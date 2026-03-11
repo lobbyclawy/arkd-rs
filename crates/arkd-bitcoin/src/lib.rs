@@ -1,5 +1,3 @@
-pub mod rpc;
-pub mod script;
 ///! arkd-bitcoin - Bitcoin primitives and utilities
 ///!
 ///! This crate provides Bitcoin-specific functionality:
@@ -7,7 +5,11 @@ pub mod script;
 ///! - Script construction (covenant scripts, timelocks)
 ///! - UTXO management
 ///! - RPC client integration
+pub mod error;
+pub mod rpc;
+pub mod script;
 pub mod transaction;
 pub mod utxo;
 
 pub use bitcoin;
+pub use error::{BitcoinError, BitcoinResult};
