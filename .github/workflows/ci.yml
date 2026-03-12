@@ -16,10 +16,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        
+
+      - name: Install Rust stable
+        run: |
+          rustup update stable
+          rustup default stable
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -40,10 +42,12 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        
+
+      - name: Install Rust stable
+        run: |
+          rustup update stable
+          rustup default stable
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -64,12 +68,13 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          
+
+      - name: Install Rust stable + clippy
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -89,12 +94,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-          
+
+      - name: Install Rust stable + rustfmt
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add rustfmt
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -104,10 +110,12 @@ jobs:
     needs: check
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        
+
+      - name: Install Rust stable
+        run: |
+          rustup update stable
+          rustup default stable
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -130,10 +138,12 @@ jobs:
     needs: [test, clippy, fmt]
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        
+
+      - name: Install Rust stable
+        run: |
+          rustup update stable
+          rustup default stable
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
