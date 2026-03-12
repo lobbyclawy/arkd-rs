@@ -216,4 +216,124 @@ mod tests {
         let offchain = Receiver::offchain(50_000, "deadbeef".to_string());
         assert!(!offchain.is_onchain());
     }
+
+    #[test]
+    fn test_vtxo_outpoint_display() {
+        let op = VtxoOutpoint::new("abc123".to_string(), 42);
+        assert_eq!(op.to_string(), "abc123:42");
+    }
+
+    #[test]
+    fn test_vtxo_outpoint_from_string_edge_cases() {
+        // Missing vout
+        assert!(VtxoOutpoint::from_string("abc123").is_none());
+        // Non-numeric vout
+        assert!(VtxoOutpoint::from_string("abc123:xyz").is_none());
+        // Empty string
+        assert!(VtxoOutpoint::from_string("").is_none());
+        // Multiple colons
+        assert!(VtxoOutpoint::from_string("a:b:c").is_none());
+        // Valid
+        assert!(VtxoOutpoint::from_string("txid:0").is_some());
+    }
+
+    #[test]
+    fn test_vtxo_spendable_states() {
+        let op = VtxoOutpoint::new("tx".to_string(), 0);
+
+        // Fresh = spendable
+        let vtxo = Vtxo::new(op.clone(), 1000, "pk".to_string());
+        assert!(vtxo.is_spendable());
+
+        // Spent = not spendable
+        let mut vtxo = Vtxo::new(op.clone(), 1000, "pk".to_string());
+        vtxo.spent = true;
+        assert!(!vtxo.is_spendable());
+
+        // Swept = not spendable
+        let mut vtxo = Vtxo::new(op.clone(), 1000, "pk".to_string());
+        vtxo.swept = true;
+        assert!(!vtxo.is_spendable());
+
+        // Unrolled = not spendable
+        let mut vtxo = Vtxo::new(op, 1000, "pk".to_string());
+        vtxo.unrolled = true;
+        assert!(!vtxo.is_spendable());
+    }
+
+    #[test]
+    fn test_vtxo_zero_expiry_never_expires() {
+        let vtxo = Vtxo::new(
+            VtxoOutpoint::new("tx".to_string(), 0),
+            1000,
+            "pk".to_string(),
+        );
+        // expires_at = 0 means never expires
+        assert!(!vtxo.is_expired_at(0));
+        assert!(!vtxo.is_expired_at(i64::MAX));
+    }
+
+    #[test]
+    fn test_vtxo_requires_forfeit_swept() {
+        let mut vtxo = Vtxo::new(
+            VtxoOutpoint::new("tx".to_string(), 0),
+            1000,
+            "pk".to_string(),
+        );
+        vtxo.commitment_txids = vec!["c1".to_string()];
+        vtxo.root_commitment_txid = "c1".to_string();
+        vtxo.swept = true;
+
+        // Swept VTXOs don't require forfeit even with commitments
+        assert!(!vtxo.requires_forfeit());
+    }
+
+    #[test]
+    fn test_vtxo_tap_key_invalid_hex() {
+        let vtxo = Vtxo::new(
+            VtxoOutpoint::new("tx".to_string(), 0),
+            1000,
+            "not_hex".to_string(),
+        );
+        assert!(vtxo.tap_key().is_none());
+    }
+
+    #[test]
+    fn test_vtxo_tap_key_valid() {
+        let valid_pk_hex = "0202020202020202020202020202020202020202020202020202020202020202";
+        let vtxo = Vtxo::new(
+            VtxoOutpoint::new("tx".to_string(), 0),
+            1000,
+            valid_pk_hex.to_string(),
+        );
+        assert!(vtxo.tap_key().is_some());
+    }
+
+    #[test]
+    fn test_vtxo_preconfirmed_flag() {
+        let mut vtxo = Vtxo::new(
+            VtxoOutpoint::new("tx".to_string(), 0),
+            1000,
+            "pk".to_string(),
+        );
+        assert!(!vtxo.preconfirmed);
+        vtxo.preconfirmed = true;
+        assert!(vtxo.preconfirmed);
+        // Preconfirmed VTXOs are still spendable
+        assert!(vtxo.is_spendable());
+    }
+
+    #[test]
+    fn test_vtxo_outpoint_from_bitcoin_outpoint() {
+        use bitcoin::hashes::Hash;
+        let outpoint = bitcoin::OutPoint {
+            txid: bitcoin::Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
+                [0xab; 32],
+            )),
+            vout: 7,
+        };
+        let vtxo_op = VtxoOutpoint::from_outpoint(outpoint);
+        assert_eq!(vtxo_op.vout, 7);
+        assert!(!vtxo_op.txid.is_empty());
+    }
 }

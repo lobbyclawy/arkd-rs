@@ -223,4 +223,47 @@ mod tests {
         let script = covenant::vtxo_script(&user_pk, &asp_pk, exit_delta).unwrap();
         assert!(!script.is_empty());
     }
+
+    #[test]
+    fn test_multisig_empty_pubkeys() {
+        assert!(ScriptBuilder::multisig(0, &[]).is_err());
+    }
+
+    #[test]
+    fn test_multisig_one_of_one() {
+        let pubkey = test_pubkey();
+        let script = ScriptBuilder::multisig(1, &[pubkey]).unwrap();
+        assert!(!script.is_empty());
+    }
+
+    #[test]
+    fn test_vtxo_script_different_keys() {
+        let user_pk = test_pubkey();
+        let asp_pk = test_pubkey();
+
+        // Different exit delays should produce different scripts
+        let script1 = covenant::vtxo_script(&user_pk, &asp_pk, 144).unwrap();
+        let script2 = covenant::vtxo_script(&user_pk, &asp_pk, 288).unwrap();
+        assert_ne!(script1, script2);
+    }
+
+    #[test]
+    fn test_cltv_various_heights() {
+        let pubkey = test_pubkey();
+        for height in [1, 100, 500_000, 1_000_000] {
+            let lock_time = LockTime::from_height(height).unwrap();
+            let script = timelock::cltv(lock_time, &pubkey).unwrap();
+            assert!(!script.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_csv_various_sequences() {
+        let pubkey = test_pubkey();
+        for blocks in [1, 144, 1008, 65535] {
+            let sequence = Sequence::from_height(blocks);
+            let script = timelock::csv(sequence, &pubkey).unwrap();
+            assert!(!script.is_empty());
+        }
+    }
 }

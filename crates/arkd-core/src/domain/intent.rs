@@ -108,13 +108,17 @@ mod tests {
     use super::*;
     use crate::domain::vtxo::VtxoOutpoint;
 
+    fn make_vtxo(amount: u64) -> Vtxo {
+        Vtxo::new(
+            VtxoOutpoint::new("tx1".to_string(), 0),
+            amount,
+            "pub".to_string(),
+        )
+    }
+
     #[test]
     fn test_intent_creation() {
-        let vtxo = Vtxo::new(
-            VtxoOutpoint::new("tx1".to_string(), 0),
-            50_000,
-            "pub".to_string(),
-        );
+        let vtxo = make_vtxo(50_000);
         let intent = Intent::new(
             "txid".to_string(),
             "proof".to_string(),
@@ -128,5 +132,145 @@ mod tests {
     #[test]
     fn test_intent_validation() {
         assert!(Intent::new(String::new(), "p".to_string(), "m".to_string(), vec![]).is_err());
+    }
+
+    #[test]
+    fn test_intent_missing_proof() {
+        assert!(Intent::new("txid".to_string(), String::new(), "msg".to_string(), vec![]).is_err());
+    }
+
+    #[test]
+    fn test_intent_missing_message() {
+        assert!(Intent::new(
+            "txid".to_string(),
+            "proof".to_string(),
+            String::new(),
+            vec![]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_intent_add_receivers() {
+        let vtxo = make_vtxo(100_000);
+        let mut intent = Intent::new(
+            "txid".to_string(),
+            "proof".to_string(),
+            "msg".to_string(),
+            vec![vtxo],
+        )
+        .unwrap();
+
+        let receivers = vec![
+            Receiver::offchain(50_000, "pk1".to_string()),
+            Receiver::offchain(30_000, "pk2".to_string()),
+        ];
+        intent.add_receivers(receivers).unwrap();
+        assert_eq!(intent.total_output_amount(), 80_000);
+        assert_eq!(intent.receivers.len(), 2);
+    }
+
+    #[test]
+    fn test_intent_add_invalid_receivers_rollback() {
+        let vtxo = make_vtxo(100_000);
+        let mut intent = Intent::new(
+            "txid".to_string(),
+            "proof".to_string(),
+            "msg".to_string(),
+            vec![vtxo],
+        )
+        .unwrap();
+
+        // Receiver with no destination should fail
+        let bad_receivers = vec![Receiver {
+            amount: 1000,
+            onchain_address: String::new(),
+            pubkey: String::new(),
+        }];
+        assert!(intent.add_receivers(bad_receivers).is_err());
+        // Should have rolled back
+        assert_eq!(intent.receivers.len(), 0);
+    }
+
+    #[test]
+    fn test_intent_add_zero_amount_receiver() {
+        let vtxo = make_vtxo(100_000);
+        let mut intent = Intent::new(
+            "txid".to_string(),
+            "proof".to_string(),
+            "msg".to_string(),
+            vec![vtxo],
+        )
+        .unwrap();
+
+        let bad = vec![Receiver::offchain(0, "pk".to_string())];
+        assert!(intent.add_receivers(bad).is_err());
+    }
+
+    #[test]
+    fn test_intent_has_only_onchain_outputs() {
+        let vtxo = make_vtxo(100_000);
+        let mut intent = Intent::new(
+            "txid".to_string(),
+            "proof".to_string(),
+            "msg".to_string(),
+            vec![vtxo],
+        )
+        .unwrap();
+
+        // No receivers = vacuously true
+        assert!(intent.has_only_onchain_outputs());
+
+        // Add on-chain
+        intent
+            .add_receivers(vec![Receiver::onchain(50_000, "bc1q_addr".to_string())])
+            .unwrap();
+        assert!(intent.has_only_onchain_outputs());
+
+        // Add off-chain → not all on-chain
+        intent
+            .add_receivers(vec![Receiver::offchain(25_000, "pk".to_string())])
+            .unwrap();
+        assert!(!intent.has_only_onchain_outputs());
+    }
+
+    #[test]
+    fn test_intent_total_with_multiple_inputs() {
+        let vtxo1 = make_vtxo(100_000);
+        let vtxo2 = Vtxo::new(
+            VtxoOutpoint::new("tx2".to_string(), 0),
+            200_000,
+            "pub".to_string(),
+        );
+
+        let intent = Intent::new(
+            "txid".to_string(),
+            "proof".to_string(),
+            "msg".to_string(),
+            vec![vtxo1, vtxo2],
+        )
+        .unwrap();
+        assert_eq!(intent.total_input_amount(), 300_000);
+    }
+
+    #[test]
+    fn test_intent_serialization_roundtrip() {
+        let vtxo = make_vtxo(75_000);
+        let mut intent = Intent::new(
+            "txid".to_string(),
+            "proof".to_string(),
+            "msg".to_string(),
+            vec![vtxo],
+        )
+        .unwrap();
+        intent
+            .add_receivers(vec![Receiver::offchain(50_000, "pk".to_string())])
+            .unwrap();
+
+        let json = serde_json::to_string(&intent).unwrap();
+        let deserialized: Intent = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, intent.id);
+        assert_eq!(deserialized.total_input_amount(), 75_000);
+        assert_eq!(deserialized.total_output_amount(), 50_000);
     }
 }
