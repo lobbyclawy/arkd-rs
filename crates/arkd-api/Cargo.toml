@@ -33,12 +33,18 @@ tracing = "0.1"
 # Authentication (macaroons)
 macaroon = "0.3"
 
+# Bitcoin
+bitcoin = { version = "0.32", features = ["serde"] }
+
 # Internal crates
 arkd-core = { path = "../arkd-core" }
 
 [dev-dependencies]
+async-trait = "0.1"
+tokio = { version = "1.42", features = ["rt-multi-thread", "macros", "net", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 tokio-test = "0.4"
-tonic-mock = "0.1"
+tonic = { version = "0.12", features = ["transport"] }
 
 [build-dependencies]
 tonic-build = "0.12"

@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package ark.v1;
+
+import "ark/v1/types.proto";
+
+// AdminService is the operator API for the Ark protocol server.
+service AdminService {
+  // GetStatus returns the current server status.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+
+  // GetRoundDetails returns detailed information about a specific round.
+  rpc GetRoundDetails(GetRoundDetailsRequest) returns (GetRoundDetailsResponse);
+
+  // GetRounds returns a list of round IDs filtered by time range.
+  rpc GetRounds(GetRoundsRequest) returns (GetRoundsResponse);
+}
+
+message GetStatusRequest {}
+message GetStatusResponse {
+  string version = 1;
+  string network = 2;
+  uint64 uptime_secs = 3;
+  uint32 active_rounds = 4;
+  uint32 total_participants = 5;
+  uint64 total_vtxos = 6;
+  string signer_pubkey = 7;
+}
+
+message GetRoundDetailsRequest {
+  string round_id = 1;
+}
+message GetRoundDetailsResponse {
+  string round_id = 1;
+  int64 started_at = 2;
+  int64 ended_at = 3;
+  string commitment_txid = 4;
+  uint32 intent_count = 5;
+}
+
+message GetRoundsRequest {
+  int64 after = 1;
+  int64 before = 2;
+}
+message GetRoundsResponse {
+  repeated string round_ids = 1;
+}

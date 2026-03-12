@@ -214,7 +214,10 @@ impl ArkService {
         requester_pubkey: bitcoin::XOnlyPublicKey,
     ) -> ArkResult<Exit> {
         // Validate VTXO exists and is spendable
-        let vtxos = self.vtxo_repo.get_vtxos(&[request.vtxo_id.clone()]).await?;
+        let vtxos = self
+            .vtxo_repo
+            .get_vtxos(std::slice::from_ref(&request.vtxo_id))
+            .await?;
         let vtxo = vtxos
             .first()
             .ok_or_else(|| ArkError::VtxoNotFound(request.vtxo_id.to_string()))?;
