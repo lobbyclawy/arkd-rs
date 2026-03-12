@@ -80,8 +80,8 @@ arkd-rs/
 - [x] Unilateral exit
 - [x] Boarding transactions
 
-### Phase 4: API
-- [ ] gRPC server (tonic)
+### Phase 4: API ✅
+- [x] gRPC server (tonic) — ArkService + AdminService, dual-port, tonic-web
 - [ ] REST gateway
 - [ ] Admin API
 - [ ] Client SDK (Rust)
