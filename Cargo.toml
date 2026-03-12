@@ -53,6 +53,9 @@ redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 config = "0.14"
 clap = { version = "4.5", features = ["derive"] }
 
+# Internal crates
+arkd-api = { path = "crates/arkd-api" }
+
 # Utilities
 hex = "0.4"
 base64 = "0.22"

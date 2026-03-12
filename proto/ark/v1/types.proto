@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package ark.v1;
+
+// Outpoint identifies a transaction output.
+message Outpoint {
+  string txid = 1;
+  uint32 vout = 2;
+}
+
+// Input represents a transaction input with optional tapscripts.
+message Input {
+  Outpoint outpoint = 1;
+  Tapscripts taproot_tree = 2;
+}
+
+// Vtxo represents a virtual transaction output.
+message Vtxo {
+  Outpoint outpoint = 1;
+  uint64 amount = 2;
+  string script = 3;
+  int64 created_at = 4;
+  int64 expires_at = 5;
+  repeated string commitment_txids = 6;
+  bool is_preconfirmed = 7;
+  bool is_swept = 8;
+  bool is_unrolled = 9;
+  bool is_spent = 10;
+  string spent_by = 11;
+  string settled_by = 12;
+  string ark_txid = 13;
+}
+
+// Tapscripts holds a list of taproot scripts.
+message Tapscripts {
+  repeated string scripts = 1;
+}
+
+// Round represents a protocol round.
+message Round {
+  string id = 1;
+  int64 starting_timestamp = 2;
+  int64 ending_timestamp = 3;
+  string stage = 4;
+  string commitment_txid = 5;
+  bool failed = 6;
+}
+
+// RoundDetails includes full round information.
+message RoundDetails {
+  string id = 1;
+  int64 starting_timestamp = 2;
+  int64 ending_timestamp = 3;
+  string stage = 4;
+  string commitment_txid = 5;
+  bool failed = 6;
+  uint32 intent_count = 7;
+}
+
+// Intent represents a registration intent with proof.
+message Intent {
+  string proof = 1;
+  string message = 2;
+}
+
+// Output specifies a payment destination.
+message Output {
+  oneof destination {
+    string vtxo_script = 1;
+    string onchain_address = 2;
+  }
+  uint64 amount = 3;
+}

@@ -5,8 +5,12 @@ use serde::{Deserialize, Serialize};
 /// Server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
-    /// gRPC listen address
+    /// gRPC listen address (user-facing ArkService)
     pub grpc_addr: String,
+
+    /// Admin gRPC listen address (operator AdminService).
+    /// If not set, derived from grpc_addr by incrementing the port.
+    pub admin_grpc_addr: Option<String>,
 
     /// REST listen address (optional)
     pub rest_addr: Option<String>,
@@ -48,11 +52,33 @@ fn default_true() -> bool {
     true
 }
 
+impl ServerConfig {
+    /// Return the admin gRPC address.
+    ///
+    /// If `admin_grpc_addr` is set, returns that. Otherwise derives from
+    /// `grpc_addr` by incrementing the port by 1.
+    pub fn admin_addr(&self) -> String {
+        if let Some(ref addr) = self.admin_grpc_addr {
+            return addr.clone();
+        }
+        // Parse port from grpc_addr, increment by 1
+        if let Some(colon_pos) = self.grpc_addr.rfind(':') {
+            let host = &self.grpc_addr[..colon_pos];
+            if let Ok(port) = self.grpc_addr[colon_pos + 1..].parse::<u16>() {
+                return format!("{}:{}", host, port + 1);
+            }
+        }
+        // Fallback
+        "0.0.0.0:7071".to_string()
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            grpc_addr: "[::1]:50051".to_string(),
-            rest_addr: Some("127.0.0.1:8080".to_string()),
+            grpc_addr: "0.0.0.0:7070".to_string(),
+            admin_grpc_addr: Some("0.0.0.0:7071".to_string()),
+            rest_addr: None,
             tls_enabled: false,
             tls_cert_path: None,
             tls_key_path: None,
@@ -61,5 +87,36 @@ impl Default for ServerConfig {
             enable_logging: true,
             admin_token: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_config() {
+        let config = ServerConfig::default();
+        assert_eq!(config.grpc_addr, "0.0.0.0:7070");
+        assert_eq!(config.admin_addr(), "0.0.0.0:7071");
+    }
+
+    #[test]
+    fn test_admin_addr_derived() {
+        let config = ServerConfig {
+            admin_grpc_addr: None,
+            grpc_addr: "0.0.0.0:9090".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(config.admin_addr(), "0.0.0.0:9091");
+    }
+
+    #[test]
+    fn test_admin_addr_explicit() {
+        let config = ServerConfig {
+            admin_grpc_addr: Some("127.0.0.1:8888".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(config.admin_addr(), "127.0.0.1:8888");
     }
 }

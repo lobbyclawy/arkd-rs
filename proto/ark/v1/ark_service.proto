@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package ark.v1;
+
+import "ark/v1/types.proto";
+
+// ArkService is the user-facing API for the Ark protocol server.
+service ArkService {
+  // GetInfo returns server information and parameters.
+  rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
+
+  // RegisterForRound registers a user's intent for the next available round.
+  rpc RegisterForRound(RegisterForRoundRequest) returns (RegisterForRoundResponse);
+
+  // RequestExit requests a collaborative exit from the protocol.
+  rpc RequestExit(RequestExitRequest) returns (RequestExitResponse);
+
+  // GetVtxos returns VTXOs for a given public key.
+  rpc GetVtxos(GetVtxosRequest) returns (GetVtxosResponse);
+
+  // ListRounds returns a paginated list of rounds.
+  rpc ListRounds(ListRoundsRequest) returns (ListRoundsResponse);
+
+  // GetRound returns details for a specific round.
+  rpc GetRound(GetRoundRequest) returns (GetRoundResponse);
+}
+
+message GetInfoRequest {}
+message GetInfoResponse {
+  string version = 1;
+  string signer_pubkey = 2;
+  string forfeit_pubkey = 3;
+  string network = 4;
+  int64 session_duration = 5;
+  int64 unilateral_exit_delay = 6;
+  int64 vtxo_min_amount = 7;
+  int64 vtxo_max_amount = 8;
+  int64 dust = 9;
+}
+
+message RegisterForRoundRequest {
+  string pubkey = 1;
+  uint64 amount = 2;
+  repeated Input inputs = 3;
+}
+message RegisterForRoundResponse {
+  string intent_id = 1;
+  string round_id = 2;
+}
+
+message RequestExitRequest {
+  repeated Outpoint vtxo_ids = 1;
+  string destination = 2;
+}
+message RequestExitResponse {
+  string exit_id = 1;
+  string status = 2;
+}
+
+message GetVtxosRequest {
+  string pubkey = 1;
+}
+message GetVtxosResponse {
+  repeated Vtxo spendable = 1;
+  repeated Vtxo spent = 2;
+}
+
+message ListRoundsRequest {
+  int64 after = 1;
+  int64 before = 2;
+  uint32 limit = 3;
+  uint32 offset = 4;
+}
+message ListRoundsResponse {
+  repeated Round rounds = 1;
+}
+
+message GetRoundRequest {
+  string round_id = 1;
+}
+message GetRoundResponse {
+  RoundDetails round = 1;
+}

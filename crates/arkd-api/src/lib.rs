@@ -15,23 +15,22 @@
 //! ## Authentication
 //!
 //! Uses macaroons for authentication (compatible with original arkd).
-//!
-//! ## Example
-//!
-//! ```rust,ignore
-//! use arkd_api::{Server, ServerConfig};
-//!
-//! let config = ServerConfig::default();
-//! let server = Server::new(config, core_service).await?;
-//! server.run().await?;
-//! ```
 
 use thiserror::Error;
 
 pub mod auth;
 pub mod config;
+pub mod grpc;
 pub mod handlers;
 pub mod server;
+
+/// Generated protobuf types and service traits.
+pub mod proto {
+    /// ark.v1 package
+    pub mod ark_v1 {
+        tonic::include_proto!("ark.v1");
+    }
+}
 
 pub use config::ServerConfig;
 pub use server::Server;
@@ -62,6 +61,10 @@ pub enum ApiError {
     /// Rate limited
     #[error("Rate limited: retry after {retry_after_secs}s")]
     RateLimited { retry_after_secs: u32 },
+
+    /// Transport error
+    #[error("Transport error: {0}")]
+    TransportError(#[from] tonic::transport::Error),
 }
 
 impl From<ApiError> for tonic::Status {
@@ -88,5 +91,16 @@ mod tests {
         let err = ApiError::AuthenticationError("Invalid token".to_string());
         let status: tonic::Status = err.into();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn test_proto_types_exist() {
+        // Verify proto types compile and are accessible
+        let _outpoint = proto::ark_v1::Outpoint {
+            txid: "abc".to_string(),
+            vout: 0,
+        };
+        let _req = proto::ark_v1::GetInfoRequest {};
+        let _status_req = proto::ark_v1::GetStatusRequest {};
     }
 }
