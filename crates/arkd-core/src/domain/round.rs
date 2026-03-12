@@ -269,4 +269,176 @@ mod tests {
         round.fail("test".to_string());
         assert!(round.is_ended());
     }
+
+    #[test]
+    fn test_round_default_stage() {
+        let round = Round::new();
+        assert_eq!(round.stage.code, RoundStage::Undefined);
+        assert!(!round.stage.ended);
+        assert!(!round.stage.failed);
+        assert!(!round.is_ended());
+    }
+
+    #[test]
+    fn test_round_timestamps() {
+        let mut round = Round::new();
+        assert_eq!(round.starting_timestamp, 0);
+        assert_eq!(round.ending_timestamp, 0);
+
+        round.start_registration().unwrap();
+        assert!(round.starting_timestamp > 0);
+
+        round.end_successfully();
+        assert!(round.ending_timestamp > 0);
+        assert!(round.ending_timestamp >= round.starting_timestamp);
+    }
+
+    #[test]
+    fn test_round_fail_timestamps() {
+        let mut round = Round::new();
+        round.start_registration().unwrap();
+        round.fail("err".to_string());
+        assert!(round.ending_timestamp > 0);
+    }
+
+    #[test]
+    fn test_register_intent_not_in_registration() {
+        let mut round = Round::new();
+        let intent = Intent {
+            id: "test".to_string(),
+            inputs: vec![],
+            receivers: vec![],
+            proof: String::new(),
+            message: String::new(),
+            txid: String::new(),
+            leaf_tx_asset_packet: String::new(),
+        };
+        // Undefined stage
+        assert!(round.register_intent(intent.clone()).is_err());
+
+        // After finalization
+        round.start_registration().unwrap();
+        round.start_finalization().unwrap();
+        assert!(round.register_intent(intent.clone()).is_err());
+    }
+
+    #[test]
+    fn test_register_intent_after_end() {
+        let mut round = Round::new();
+        round.start_registration().unwrap();
+        round.end_successfully();
+
+        let intent = Intent {
+            id: "test".to_string(),
+            inputs: vec![],
+            receivers: vec![],
+            proof: String::new(),
+            message: String::new(),
+            txid: String::new(),
+            leaf_tx_asset_packet: String::new(),
+        };
+        assert!(round.register_intent(intent).is_err());
+    }
+
+    #[test]
+    fn test_round_intent_count() {
+        let mut round = Round::new();
+        round.start_registration().unwrap();
+        assert_eq!(round.intent_count(), 0);
+
+        for i in 0..5 {
+            let intent = Intent {
+                id: format!("intent_{i}"),
+                inputs: vec![],
+                receivers: vec![],
+                proof: String::new(),
+                message: String::new(),
+                txid: String::new(),
+                leaf_tx_asset_packet: String::new(),
+            };
+            round.register_intent(intent).unwrap();
+        }
+        assert_eq!(round.intent_count(), 5);
+    }
+
+    #[test]
+    fn test_round_duplicate_intent_overwrites() {
+        let mut round = Round::new();
+        round.start_registration().unwrap();
+
+        let intent = Intent {
+            id: "same-id".to_string(),
+            inputs: vec![],
+            receivers: vec![],
+            proof: "v1".to_string(),
+            message: String::new(),
+            txid: String::new(),
+            leaf_tx_asset_packet: String::new(),
+        };
+        round.register_intent(intent).unwrap();
+
+        let intent2 = Intent {
+            id: "same-id".to_string(),
+            inputs: vec![],
+            receivers: vec![],
+            proof: "v2".to_string(),
+            message: String::new(),
+            txid: String::new(),
+            leaf_tx_asset_packet: String::new(),
+        };
+        round.register_intent(intent2).unwrap();
+
+        // Same ID, so intent_count should still be 1
+        assert_eq!(round.intent_count(), 1);
+        assert_eq!(round.intents.get("same-id").unwrap().proof, "v2");
+    }
+
+    #[test]
+    fn test_stage_display() {
+        assert_eq!(RoundStage::Undefined.to_string(), "UNDEFINED_STAGE");
+        assert_eq!(RoundStage::Registration.to_string(), "REGISTRATION_STAGE");
+        assert_eq!(RoundStage::Finalization.to_string(), "FINALIZATION_STAGE");
+    }
+
+    #[test]
+    fn test_stage_terminal() {
+        let stage = Stage {
+            code: RoundStage::Registration,
+            ended: false,
+            failed: false,
+        };
+        assert!(!stage.is_terminal());
+
+        let stage = Stage {
+            code: RoundStage::Registration,
+            ended: true,
+            failed: false,
+        };
+        assert!(stage.is_terminal());
+
+        let stage = Stage {
+            code: RoundStage::Registration,
+            ended: false,
+            failed: true,
+        };
+        assert!(stage.is_terminal());
+    }
+
+    #[test]
+    fn test_round_config_defaults() {
+        let config = RoundConfig::default();
+        assert_eq!(config.min_intents, 1);
+        assert_eq!(config.max_intents, 128);
+        assert!(config.session_duration_secs > 0);
+        assert!(config.vtxo_tree_expiry_secs > 0);
+        assert!(config.unilateral_exit_delay > 0);
+    }
+
+    #[test]
+    fn test_round_swept_flag() {
+        let mut round = Round::new();
+        assert!(!round.swept);
+        round.swept = true;
+        assert!(round.swept);
+    }
 }

@@ -96,4 +96,47 @@ mod tests {
         let err = DatabaseError::CacheError("redis down".to_string());
         assert!(err.to_string().contains("redis down"));
     }
+
+    #[test]
+    fn test_all_database_error_variants() {
+        let errors = vec![
+            DatabaseError::ConnectionError("conn fail".to_string()),
+            DatabaseError::QueryError("query fail".to_string()),
+            DatabaseError::NotFound {
+                entity: "vtxo".to_string(),
+                id: "abc123".to_string(),
+            },
+            DatabaseError::ConstraintViolation("unique".to_string()),
+            DatabaseError::MigrationError("migrate fail".to_string()),
+            DatabaseError::SerializationError("ser fail".to_string()),
+            DatabaseError::CacheError("cache fail".to_string()),
+        ];
+
+        for err in &errors {
+            assert!(!err.to_string().is_empty());
+            // Verify Debug is implemented
+            let debug = format!("{:?}", err);
+            assert!(!debug.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_not_found_error_contains_details() {
+        let err = DatabaseError::NotFound {
+            entity: "round".to_string(),
+            id: "abc-123".to_string(),
+        };
+        let display = err.to_string();
+        assert!(display.contains("round"));
+        assert!(display.contains("abc-123"));
+    }
+
+    #[test]
+    fn test_database_result_type() {
+        let ok_result: DatabaseResult<i32> = Ok(42);
+        assert!(ok_result.is_ok());
+
+        let err_result: DatabaseResult<i32> = Err(DatabaseError::QueryError("fail".to_string()));
+        assert!(err_result.is_err());
+    }
 }

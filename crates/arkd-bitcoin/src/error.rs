@@ -44,3 +44,48 @@ pub enum BitcoinError {
 
 /// Result type for Bitcoin operations
 pub type BitcoinResult<T> = Result<T, BitcoinError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_all_error_variants_display() {
+        let errors: Vec<BitcoinError> = vec![
+            BitcoinError::TransactionBuildError("build fail".to_string()),
+            BitcoinError::PsbtError("psbt fail".to_string()),
+            BitcoinError::ScriptError("script fail".to_string()),
+            BitcoinError::UtxoError("utxo fail".to_string()),
+            BitcoinError::RpcError("rpc fail".to_string()),
+            BitcoinError::InsufficientFunds {
+                required: 100_000,
+                available: 50_000,
+            },
+            BitcoinError::InvalidAddress("bad addr".to_string()),
+            BitcoinError::InvalidAmount("bad amount".to_string()),
+            BitcoinError::SerializationError("ser fail".to_string()),
+        ];
+
+        for err in &errors {
+            let display = err.to_string();
+            assert!(!display.is_empty(), "Error should have display: {:?}", err);
+        }
+    }
+
+    #[test]
+    fn test_insufficient_funds_details() {
+        let err = BitcoinError::InsufficientFunds {
+            required: 100_000,
+            available: 50_000,
+        };
+        let display = err.to_string();
+        assert!(display.contains("100000"));
+        assert!(display.contains("50000"));
+    }
+
+    #[test]
+    fn test_error_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<BitcoinError>();
+    }
+}

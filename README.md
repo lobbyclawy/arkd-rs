@@ -87,8 +87,8 @@ arkd-rs/
 - [ ] Client SDK (Rust)
 
 ### Phase 5: Production Readiness
-- [ ] Comprehensive testing (unit + integration)
-- [ ] Performance benchmarks
+- [x] Comprehensive testing (unit + integration + property-based)
+- [x] Performance benchmarks (criterion)
 - [ ] Security audit
 - [ ] Docker deployment
 - [ ] Monitoring & alerts
@@ -170,15 +170,27 @@ grpcurl -plaintext localhost:7070 list
 ### Testing
 
 ```bash
-# Unit tests
+# All tests (unit + integration + property-based)
+cargo test --workspace
+
+# Unit tests only
 cargo test --lib
 
-# Integration tests (requires Bitcoin regtest)
-cargo test --test '*'
+# Integration tests
+cargo test --test integration
 
-# Benchmarks
+# Property-based tests (proptest)
+cargo test proptest
+
+# Benchmarks (criterion)
 cargo bench
 ```
+
+**Test suite includes:**
+- 211+ tests across all crates
+- Integration tests: round lifecycle, exit flows, DB persistence
+- Property-based tests: VTXO invariants, serialization roundtrips, amount conservation
+- Performance benchmarks: tree construction, round lifecycle, DB operations
 
 ### Code style
 

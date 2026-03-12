@@ -192,6 +192,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arkd-api",
+ "arkd-bitcoin",
+ "arkd-core",
+ "arkd-db",
+ "async-trait",
  "base64 0.22.1",
  "bdk_wallet",
  "bitcoin",
@@ -214,6 +218,7 @@ dependencies = [
  "tonic-build",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

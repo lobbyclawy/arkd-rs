@@ -21,6 +21,9 @@ pub mod ports;
 pub mod round_scheduler;
 pub mod sweep;
 
+#[cfg(test)]
+mod proptest_tests;
+
 pub use application::{ArkConfig, ArkService, ServiceInfo};
 pub use boarding::{BoardingConfig, BoardingService, BoardingStats};
 pub use cosigning::{
