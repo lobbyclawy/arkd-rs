@@ -25,6 +25,9 @@ tracing = "0.1"
 bitcoin = { version = "0.32", features = ["serde"] }
 secp256k1 = { version = "0.29", features = ["rand", "serde", "rand-std"] }
 
+# Ark Bitcoin utilities (BIP-322, etc.)
+arkd-bitcoin = { path = "../arkd-bitcoin" }
+
 # Utilities
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

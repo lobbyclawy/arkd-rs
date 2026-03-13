@@ -6,6 +6,7 @@
 //! - UTXO management
 //! - RPC client integration
 
+pub mod bip322;
 pub mod error;
 pub mod exit;
 pub mod rpc;
