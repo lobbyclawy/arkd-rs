@@ -23,6 +23,12 @@ service ArkService {
 
   // GetRound returns details for a specific round.
   rpc GetRound(GetRoundRequest) returns (GetRoundResponse);
+
+  // GetEventStream opens a server-streaming connection for round lifecycle events.
+  rpc GetEventStream(GetEventStreamRequest) returns (stream RoundEvent);
+
+  // UpdateStreamTopics updates the set of event topics the client subscribes to.
+  rpc UpdateStreamTopics(UpdateStreamTopicsRequest) returns (UpdateStreamTopicsResponse);
 }
 
 message GetInfoRequest {}
@@ -88,4 +94,47 @@ message GetRoundRequest {
 }
 message GetRoundResponse {
   RoundDetails round = 1;
+}
+
+message GetEventStreamRequest {}
+
+message UpdateStreamTopicsRequest {
+  repeated string topics = 1;
+}
+
+message UpdateStreamTopicsResponse {}
+
+message RoundEvent {
+  oneof event {
+    BatchStartedEvent batch_started = 1;
+    BatchFinalizationEvent batch_finalization = 2;
+    BatchFinalizedEvent batch_finalized = 3;
+    BatchFailedEvent batch_failed = 4;
+    RoundHeartbeatEvent heartbeat = 5;
+  }
+}
+
+message BatchStartedEvent {
+  string round_id = 1;
+  int64 timestamp = 2;
+}
+
+message BatchFinalizationEvent {
+  string round_id = 1;
+  int64 timestamp = 2;
+  int64 min_relay_fee_rate = 3;
+}
+
+message BatchFinalizedEvent {
+  string round_id = 1;
+  string txid = 2;
+}
+
+message BatchFailedEvent {
+  string round_id = 1;
+  string reason = 2;
+}
+
+message RoundHeartbeatEvent {
+  int64 timestamp = 1;
 }
