@@ -2,7 +2,7 @@
 
 **Rust implementation of [arkd](https://github.com/arkade-os/arkd)** - Ark protocol server for Bitcoin Layer 2 scaling.
 
-⚠️ **EXPERIMENTAL** - This is a ground-up Rust rewrite. Not production-ready.
+🎉 **v1.0.0 Milestone Reached** — All 12 implementation issues complete. Production deployment infrastructure ready.
 
 ---
 
@@ -86,12 +86,12 @@ arkd-rs/
 - [ ] Admin API
 - [ ] Client SDK (Rust)
 
-### Phase 5: Production Readiness
+### Phase 5: Production Readiness ✅
 - [x] Comprehensive testing (unit + integration + property-based)
 - [x] Performance benchmarks (criterion)
-- [x] Security audit
-- [ ] Docker deployment
-- [ ] Monitoring & alerts
+- [x] Security audit & hardening
+- [x] Docker deployment (multi-stage build, Docker Compose prod config)
+- [x] Monitoring & alerts (Prometheus metrics, health endpoint, Grafana)
 
 ---
 
