@@ -131,6 +131,21 @@ min_vtxo_amount_sats = 1000
 # Maximum VTXO amount in satoshis
 max_vtxo_amount_sats = 100_000_000  # 1 BTC
 
+# Minimum UTXO amount for boarding (satoshis)
+utxo_min_amount = 1000
+
+# Maximum UTXO amount for boarding (satoshis, 0 = boarding disabled)
+utxo_max_amount = 100_000_000  # 1 BTC
+
+# CSV delay for public unilateral exits (blocks)
+public_unilateral_exit_delay = 512
+
+# CSV delay for boarding inputs (blocks)
+boarding_exit_delay = 512
+
+# Maximum commitment transaction weight
+max_tx_weight = 400_000
+
 # =============================================================================
 # Logging Configuration
 # =============================================================================

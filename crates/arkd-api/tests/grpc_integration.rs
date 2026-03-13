@@ -257,6 +257,51 @@ async fn test_get_info() {
     assert!(!info.network.is_empty());
     assert!(info.dust > 0);
 }
+#[tokio::test]
+async fn test_get_info_new_fields() {
+    let mut client = start_ark_server().await;
+    let resp = client.get_info(GetInfoRequest {}).await.unwrap();
+    let info = resp.into_inner();
+
+    assert!(!info.forfeit_address.is_empty(), "forfeit_address is empty");
+    assert!(
+        info.forfeit_address.starts_with("bcrt1"),
+        "expected regtest bech32m address, got: {}",
+        info.forfeit_address
+    );
+    assert!(
+        !info.checkpoint_tapscript.is_empty(),
+        "checkpoint_tapscript is empty"
+    );
+    assert!(info.utxo_min_amount > 0);
+    assert!(info.utxo_max_amount > info.utxo_min_amount);
+    assert!(info.public_unilateral_exit_delay > 0);
+    assert!(info.boarding_exit_delay > 0);
+    assert!(info.max_tx_weight > 0);
+
+    assert_eq!(info.service_status.len(), 3);
+    for name in &["database", "wallet", "bitcoin_rpc"] {
+        let status = info
+            .service_status
+            .get(*name)
+            .unwrap_or_else(|| panic!("service_status missing '{name}'"));
+        assert!(status.available, "'{name}' should be available");
+        assert_eq!(status.name, *name);
+        assert!(!status.details.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn test_get_info_default_values_are_sensible() {
+    let mut client = start_ark_server().await;
+    let resp = client.get_info(GetInfoRequest {}).await.unwrap();
+    let info = resp.into_inner();
+    assert_eq!(info.utxo_min_amount, 1000);
+    assert_eq!(info.utxo_max_amount, 100_000_000);
+    assert_eq!(info.boarding_exit_delay, 512);
+    assert_eq!(info.public_unilateral_exit_delay, 512);
+    assert_eq!(info.max_tx_weight, 400_000);
+}
 
 #[tokio::test]
 async fn test_register_for_round_validation() {
