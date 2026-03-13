@@ -274,3 +274,157 @@ mod tests {
         assert_eq!(deserialized.total_output_amount(), 50_000);
     }
 }
+
+#[cfg(test)]
+mod proptest_intent {
+    use super::*;
+    use crate::domain::vtxo::VtxoOutpoint;
+    use proptest::prelude::*;
+
+    /// Strategy for generating valid VTXOs
+    fn vtxo_strategy() -> impl Strategy<Value = Vtxo> {
+        (
+            "[a-f0-9]{64}",                   // txid (64 hex chars)
+            0u32..100,                        // vout
+            1u64..=21_000_000_000_000_000u64, // amount (1 sat to 21M BTC)
+            "[a-f0-9]{64}",                   // pubkey (64 hex chars)
+        )
+            .prop_map(|(txid, vout, amount, pubkey)| {
+                Vtxo::new(VtxoOutpoint::new(txid, vout), amount, pubkey)
+            })
+    }
+
+    /// Strategy for generating valid offchain receivers
+    fn receiver_offchain_strategy() -> impl Strategy<Value = Receiver> {
+        (
+            1u64..=21_000_000_000_000_000u64, // amount
+            "[a-f0-9]{64}",                   // pubkey
+        )
+            .prop_map(|(amount, pubkey)| Receiver::offchain(amount, pubkey))
+    }
+
+    /// Strategy for generating valid onchain receivers
+    fn receiver_onchain_strategy() -> impl Strategy<Value = Receiver> {
+        (
+            1u64..=21_000_000_000_000_000u64, // amount
+            "bc1q[a-z0-9]{8,40}",             // address
+        )
+            .prop_map(|(amount, addr)| Receiver::onchain(amount, addr))
+    }
+
+    /// Strategy for generating valid receivers (either on-chain or off-chain)
+    fn receiver_strategy() -> impl Strategy<Value = Receiver> {
+        prop_oneof![receiver_offchain_strategy(), receiver_onchain_strategy(),]
+    }
+
+    /// Strategy for generating valid Intents
+    fn intent_strategy() -> impl Strategy<Value = Intent> {
+        (
+            proptest::collection::vec(vtxo_strategy(), 0..5), // inputs
+            proptest::collection::vec(receiver_strategy(), 1..10), // receivers (at least 1)
+            "[a-zA-Z0-9_-]{1,32}",                            // proof
+            "[a-zA-Z0-9_-]{1,32}",                            // message
+            "[a-f0-9]{64}",                                   // txid
+            proptest::option::of("[a-zA-Z0-9+/=]{0,100}"),    // leaf_tx_asset_packet
+        )
+            .prop_map(
+                |(inputs, receivers, proof, message, txid, leaf_pkt)| Intent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    inputs,
+                    receivers,
+                    proof,
+                    message,
+                    txid,
+                    leaf_tx_asset_packet: leaf_pkt.unwrap_or_default(),
+                },
+            )
+    }
+
+    proptest! {
+        /// Property test: Intent serialization roundtrip preserves total_input_amount()
+        #[test]
+        fn intent_roundtrip_preserves_input_amount(intent in intent_strategy()) {
+            let original_input = intent.total_input_amount();
+            let json = serde_json::to_string(&intent).expect("serialization should succeed");
+            let deserialized: Intent = serde_json::from_str(&json).expect("deserialization should succeed");
+            prop_assert_eq!(deserialized.total_input_amount(), original_input);
+        }
+
+        /// Property test: Intent serialization roundtrip preserves total_output_amount()
+        #[test]
+        fn intent_roundtrip_preserves_output_amount(intent in intent_strategy()) {
+            let original_output = intent.total_output_amount();
+            let json = serde_json::to_string(&intent).expect("serialization should succeed");
+            let deserialized: Intent = serde_json::from_str(&json).expect("deserialization should succeed");
+            prop_assert_eq!(deserialized.total_output_amount(), original_output);
+        }
+
+        /// Property test: Intent serialization roundtrip preserves all fields
+        #[test]
+        fn intent_roundtrip_preserves_all_fields(intent in intent_strategy()) {
+            let json = serde_json::to_string(&intent).expect("serialization should succeed");
+            let deserialized: Intent = serde_json::from_str(&json).expect("deserialization should succeed");
+
+            prop_assert_eq!(deserialized.id, intent.id);
+            prop_assert_eq!(deserialized.proof, intent.proof);
+            prop_assert_eq!(deserialized.message, intent.message);
+            prop_assert_eq!(deserialized.txid, intent.txid);
+            prop_assert_eq!(deserialized.leaf_tx_asset_packet, intent.leaf_tx_asset_packet);
+            prop_assert_eq!(deserialized.inputs.len(), intent.inputs.len());
+            prop_assert_eq!(deserialized.receivers.len(), intent.receivers.len());
+        }
+
+        /// Property test: has_only_onchain_outputs is preserved through serialization
+        #[test]
+        fn intent_roundtrip_preserves_has_only_onchain(intent in intent_strategy()) {
+            let original = intent.has_only_onchain_outputs();
+            let json = serde_json::to_string(&intent).expect("serialization should succeed");
+            let deserialized: Intent = serde_json::from_str(&json).expect("deserialization should succeed");
+            prop_assert_eq!(deserialized.has_only_onchain_outputs(), original);
+        }
+
+        /// Property test: Receiver amounts sum correctly after roundtrip
+        #[test]
+        fn receiver_amounts_sum_correctly(
+            receivers in proptest::collection::vec(receiver_strategy(), 1..20)
+        ) {
+            let total: u64 = receivers.iter().map(|r| r.amount).sum();
+
+            let intent = Intent {
+                id: "test".to_string(),
+                inputs: vec![],
+                receivers,
+                proof: "proof".to_string(),
+                message: "msg".to_string(),
+                txid: "txid".to_string(),
+                leaf_tx_asset_packet: String::new(),
+            };
+
+            let json = serde_json::to_string(&intent).expect("serialization should succeed");
+            let deserialized: Intent = serde_json::from_str(&json).expect("deserialization should succeed");
+            prop_assert_eq!(deserialized.total_output_amount(), total);
+        }
+
+        /// Property test: VTXO amounts sum correctly after roundtrip
+        #[test]
+        fn vtxo_amounts_sum_correctly(
+            vtxos in proptest::collection::vec(vtxo_strategy(), 1..20)
+        ) {
+            let total: u64 = vtxos.iter().map(|v| v.amount).sum();
+
+            let intent = Intent {
+                id: "test".to_string(),
+                inputs: vtxos,
+                receivers: vec![Receiver::offchain(1000, "pk".to_string())],
+                proof: "proof".to_string(),
+                message: "msg".to_string(),
+                txid: "txid".to_string(),
+                leaf_tx_asset_packet: String::new(),
+            };
+
+            let json = serde_json::to_string(&intent).expect("serialization should succeed");
+            let deserialized: Intent = serde_json::from_str(&json).expect("deserialization should succeed");
+            prop_assert_eq!(deserialized.total_input_amount(), total);
+        }
+    }
+}
