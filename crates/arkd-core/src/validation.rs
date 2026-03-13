@@ -184,6 +184,44 @@ pub fn validate_exit_delay(blocks: u32, context: &str) -> ArkResult<()> {
     Ok(())
 }
 
+// ── Intent proof validation ──────────────────────────────────────────
+
+/// Validate a BIP-322 intent proof.
+///
+/// Checks that:
+/// 1. The proof message matches the expected format for this intent
+/// 2. The proof signature is valid for the claimed address and network
+pub fn validate_intent_proof(
+    proof: &arkd_bitcoin::bip322::Bip322Proof,
+    intent_id: &str,
+    network: bitcoin::Network,
+) -> ArkResult<()> {
+    if intent_id.is_empty() {
+        return Err(ArkError::InvalidVtxoProof(
+            "intent_id must not be empty".to_string(),
+        ));
+    }
+
+    // Check the message matches the expected format
+    let expected_message = arkd_bitcoin::bip322::format_intent_message(intent_id);
+    if proof.message != expected_message.as_bytes() {
+        return Err(ArkError::InvalidVtxoProof(format!(
+            "proof message does not match expected format for intent {intent_id}"
+        )));
+    }
+
+    // Verify the BIP-322 signature
+    match proof.verify(network) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(ArkError::InvalidSignature(format!(
+            "BIP-322 signature verification failed for intent {intent_id}"
+        ))),
+        Err(e) => Err(ArkError::InvalidVtxoProof(format!(
+            "BIP-322 proof verification error: {e}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +312,145 @@ mod tests {
         assert!(validate_exit_delay(1, "test").is_ok());
         assert!(validate_exit_delay(512, "test").is_ok());
         assert!(validate_exit_delay(65535, "test").is_ok());
+    }
+
+    // ── Intent proof validation tests ────────────────────────────────
+
+    mod intent_proof_tests {
+        use super::*;
+        use arkd_bitcoin::bip322::{self, Bip322Proof};
+        use bitcoin::key::{Keypair, TapTweak};
+        use bitcoin::secp256k1::Secp256k1;
+        use bitcoin::Network;
+
+        /// Helper to create a valid BIP-322 proof for testing.
+        fn make_valid_proof(intent_id: &str) -> Bip322Proof {
+            use bitcoin::hashes::{sha256, Hash, HashEngine};
+            use bitcoin::opcodes::all::OP_RETURN;
+            use bitcoin::opcodes::OP_FALSE;
+            use bitcoin::script::PushBytesBuf;
+            use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
+            use bitcoin::taproot::Signature as TaprootSignature;
+            use bitcoin::{
+                absolute::LockTime, script::Builder, transaction::Version, Amount, OutPoint,
+                ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+            };
+
+            let secp = Secp256k1::new();
+            let keypair = Keypair::from_seckey_slice(&secp, &[0x01u8; 32]).unwrap();
+            let (x_only, _) = keypair.x_only_public_key();
+            let address = bitcoin::Address::p2tr(&secp, x_only, None, Network::Regtest);
+            let message = bip322::format_intent_message(intent_id);
+
+            // Taproot key-path spend requires the tweaked keypair
+            let tweaked = keypair.tap_tweak(&secp, None);
+            let signing_keypair = tweaked.to_inner();
+
+            // Build to_spend
+            let msg_hash = {
+                let tag_hash = sha256::Hash::hash(b"BIP0322-signed-message");
+                let mut engine = sha256::Hash::engine();
+                engine.input(tag_hash.as_ref());
+                engine.input(tag_hash.as_ref());
+                engine.input(message.as_bytes());
+                sha256::Hash::from_engine(engine).to_byte_array()
+            };
+
+            let mut push_bytes = PushBytesBuf::new();
+            push_bytes.extend_from_slice(&msg_hash).unwrap();
+            let script_sig = Builder::new()
+                .push_opcode(OP_FALSE)
+                .push_slice(push_bytes.as_push_bytes())
+                .into_script();
+
+            let to_spend = Transaction {
+                version: Version(0),
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: bitcoin::Txid::from_byte_array([0u8; 32]),
+                        vout: 0xFFFFFFFF,
+                    },
+                    script_sig,
+                    sequence: Sequence::ZERO,
+                    witness: Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::ZERO,
+                    script_pubkey: address.script_pubkey(),
+                }],
+            };
+
+            // Build and sign to_sign
+            let to_sign_unsigned = Transaction {
+                version: Version(0),
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: to_spend.compute_txid(),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ZERO,
+                    witness: Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::ZERO,
+                    script_pubkey: Builder::new().push_opcode(OP_RETURN).into_script(),
+                }],
+            };
+
+            let prevouts = [TxOut {
+                value: Amount::ZERO,
+                script_pubkey: to_spend.output[0].script_pubkey.clone(),
+            }];
+
+            let mut cache = SighashCache::new(&to_sign_unsigned);
+            let sighash = cache
+                .taproot_key_spend_signature_hash(
+                    0,
+                    &Prevouts::All(&prevouts),
+                    TapSighashType::Default,
+                )
+                .unwrap();
+
+            let msg = bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array());
+            let sig = secp.sign_schnorr(&msg, &signing_keypair);
+            let taproot_sig = TaprootSignature {
+                signature: sig,
+                sighash_type: TapSighashType::Default,
+            };
+
+            let mut witness = Witness::new();
+            witness.push(taproot_sig.serialize());
+
+            let witness_bytes = bip322::encode_witness(&witness).unwrap();
+
+            Bip322Proof {
+                message: message.into_bytes(),
+                address,
+                signature: witness_bytes,
+            }
+        }
+
+        #[test]
+        fn test_validate_intent_proof_valid() {
+            let proof = make_valid_proof("test-intent-1");
+            assert!(validate_intent_proof(&proof, "test-intent-1", Network::Regtest).is_ok());
+        }
+
+        #[test]
+        fn test_validate_intent_proof_empty_id() {
+            let proof = make_valid_proof("test-intent-1");
+            let result = validate_intent_proof(&proof, "", Network::Regtest);
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_validate_intent_proof_wrong_id() {
+            let proof = make_valid_proof("test-intent-1");
+            let result = validate_intent_proof(&proof, "wrong-intent", Network::Regtest);
+            assert!(result.is_err());
+        }
     }
 }
