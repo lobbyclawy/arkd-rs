@@ -12,6 +12,7 @@ use arkd_core::ports::RoundRepository;
 use crate::auth::Authenticator;
 use crate::grpc::admin_service::AdminGrpcService;
 use crate::grpc::ark_service::ArkGrpcService;
+use crate::grpc::broker::SharedEventBroker;
 use crate::grpc::middleware::AuthInterceptor;
 use crate::proto::ark_v1::admin_service_server::AdminServiceServer;
 use crate::proto::ark_v1::ark_service_server::ArkServiceServer;
@@ -29,6 +30,7 @@ pub struct Server {
     config: ServerConfig,
     core: Arc<arkd_core::ArkService>,
     round_repo: Arc<dyn RoundRepository>,
+    broker: SharedEventBroker,
     authenticator: Arc<Authenticator>,
     cancel: CancellationToken,
 }
@@ -56,10 +58,13 @@ impl Server {
             Arc::new(Authenticator::new(vec![0u8; 32]))
         });
 
+        let broker = Arc::new(crate::grpc::broker::EventBroker::new(256));
+
         Ok(Self {
             config,
             core,
             round_repo,
+            broker,
             authenticator,
             cancel: CancellationToken::new(),
         })
@@ -114,7 +119,11 @@ impl Server {
             .parse()
             .map_err(|e| crate::ApiError::StartupError(format!("Invalid gRPC address: {e}")))?;
 
-        let ark_service = ArkGrpcService::new(Arc::clone(&self.core), Arc::clone(&self.round_repo));
+        let ark_service = ArkGrpcService::new(
+            Arc::clone(&self.core),
+            Arc::clone(&self.round_repo),
+            Arc::clone(&self.broker),
+        );
 
         // Create auth interceptor
         // In production, use AuthInterceptor::strict()

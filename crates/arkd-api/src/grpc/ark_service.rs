@@ -1,7 +1,10 @@
 //! ArkService gRPC implementation — user-facing API.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
+use async_stream::stream;
+use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
@@ -9,11 +12,14 @@ use arkd_core::ports::RoundRepository;
 
 use crate::proto::ark_v1::ark_service_server::ArkService as ArkServiceTrait;
 use crate::proto::ark_v1::{
-    GetInfoRequest, GetInfoResponse, GetRoundRequest, GetRoundResponse, GetVtxosRequest,
-    GetVtxosResponse, ListRoundsRequest, ListRoundsResponse, RegisterForRoundRequest,
-    RegisterForRoundResponse, RequestExitRequest, RequestExitResponse, ServiceStatus,
+    GetEventStreamRequest, GetInfoRequest, GetInfoResponse, GetRoundRequest, GetRoundResponse,
+    GetVtxosRequest, GetVtxosResponse, ListRoundsRequest, ListRoundsResponse,
+    RegisterForRoundRequest, RegisterForRoundResponse, RequestExitRequest, RequestExitResponse,
+    RoundEvent, RoundHeartbeatEvent, ServiceStatus, UpdateStreamTopicsRequest,
+    UpdateStreamTopicsResponse,
 };
 
+use super::broker::SharedEventBroker;
 use super::convert;
 use super::middleware::{get_authenticated_user, require_authenticated_user};
 
@@ -21,12 +27,21 @@ use super::middleware::{get_authenticated_user, require_authenticated_user};
 pub struct ArkGrpcService {
     core: Arc<arkd_core::ArkService>,
     round_repo: Arc<dyn RoundRepository>,
+    broker: SharedEventBroker,
 }
 
 impl ArkGrpcService {
-    /// Create a new ArkGrpcService wrapping the core service and round repository.
-    pub fn new(core: Arc<arkd_core::ArkService>, round_repo: Arc<dyn RoundRepository>) -> Self {
-        Self { core, round_repo }
+    /// Create a new ArkGrpcService wrapping the core service, round repository, and event broker.
+    pub fn new(
+        core: Arc<arkd_core::ArkService>,
+        round_repo: Arc<dyn RoundRepository>,
+        broker: SharedEventBroker,
+    ) -> Self {
+        Self {
+            core,
+            round_repo,
+            broker,
+        }
     }
 
     /// Verify that the authenticated user owns all the specified VTXOs
@@ -67,8 +82,13 @@ impl ArkGrpcService {
     }
 }
 
+/// Server-streaming response type for GetEventStream.
+type GetEventStreamStream =
+    Pin<Box<dyn Stream<Item = Result<RoundEvent, Status>> + Send + 'static>>;
+
 #[tonic::async_trait]
 impl ArkServiceTrait for ArkGrpcService {
+    type GetEventStreamStream = GetEventStreamStream;
     async fn get_info(
         &self,
         _request: Request<GetInfoRequest>,
@@ -316,6 +336,53 @@ impl ArkServiceTrait for ArkGrpcService {
             ))),
             Err(e) => Err(Status::internal(e.to_string())),
         }
+    }
+
+    async fn get_event_stream(
+        &self,
+        _request: Request<GetEventStreamRequest>,
+    ) -> Result<Response<Self::GetEventStreamStream>, Status> {
+        info!("GetEventStream called");
+        let mut rx = self.broker.subscribe();
+
+        let output = stream! {
+            // Yield an initial heartbeat so the client knows the stream is alive
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            yield Ok(RoundEvent {
+                event: Some(crate::proto::ark_v1::round_event::Event::Heartbeat(
+                    RoundHeartbeatEvent { timestamp: now },
+                )),
+            });
+
+            // Forward events from the broker
+            loop {
+                match rx.recv().await {
+                    Ok(event) => yield Ok(event),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(skipped = n, "Event stream client lagged, skipped events");
+                        // Continue receiving — don't break
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                }
+            }
+        };
+
+        Ok(Response::new(Box::pin(output)))
+    }
+
+    async fn update_stream_topics(
+        &self,
+        request: Request<UpdateStreamTopicsRequest>,
+    ) -> Result<Response<UpdateStreamTopicsResponse>, Status> {
+        let req = request.into_inner();
+        info!(topics = ?req.topics, "UpdateStreamTopics called");
+        // Topic filtering is a future enhancement; accept and acknowledge
+        Ok(Response::new(UpdateStreamTopicsResponse {}))
     }
 }
 

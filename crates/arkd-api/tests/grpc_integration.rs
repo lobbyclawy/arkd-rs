@@ -13,8 +13,9 @@ use arkd_api::proto::ark_v1::admin_service_server::AdminServiceServer;
 use arkd_api::proto::ark_v1::ark_service_client::ArkServiceClient;
 use arkd_api::proto::ark_v1::ark_service_server::ArkServiceServer;
 use arkd_api::proto::ark_v1::{
-    GetInfoRequest, GetRoundRequest, GetStatusRequest, GetVtxosRequest, ListRoundsRequest,
-    Outpoint, RegisterForRoundRequest, RequestExitRequest,
+    GetEventStreamRequest, GetInfoRequest, GetRoundRequest, GetStatusRequest, GetVtxosRequest,
+    ListRoundsRequest, Outpoint, RegisterForRoundRequest, RequestExitRequest,
+    UpdateStreamTopicsRequest,
 };
 
 use arkd_api::grpc::admin_service::AdminGrpcService;
@@ -202,7 +203,8 @@ async fn start_ark_server() -> ArkServiceClient<Channel> {
 
     let core = build_test_core();
     let round_repo: Arc<dyn arkd_core::ports::RoundRepository> = Arc::new(MockRoundRepo);
-    let svc = ArkServiceServer::new(ArkGrpcService::new(core, round_repo));
+    let broker = Arc::new(arkd_api::EventBroker::new(64));
+    let svc = ArkServiceServer::new(ArkGrpcService::new(core, round_repo, broker));
 
     tokio::spawn(async move {
         Server::builder()
@@ -520,4 +522,40 @@ async fn test_admin_get_round_details_validation() {
         .await;
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+}
+
+// ─── Event stream tests ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_event_stream_initial_heartbeat() {
+    use tokio_stream::StreamExt;
+
+    let mut client = start_ark_server().await;
+
+    let response = client
+        .get_event_stream(GetEventStreamRequest {})
+        .await
+        .expect("get_event_stream should succeed");
+
+    let mut stream = response.into_inner();
+    let first = stream.next().await.expect("stream should yield an item");
+    let event = first.expect("first item should be Ok");
+
+    match event.event {
+        Some(arkd_api::proto::ark_v1::round_event::Event::Heartbeat(hb)) => {
+            assert!(hb.timestamp > 0, "heartbeat timestamp should be positive");
+        }
+        other => panic!("Expected heartbeat event, got: {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_update_stream_topics_noop() {
+    let mut client = start_ark_server().await;
+
+    let response = client
+        .update_stream_topics(UpdateStreamTopicsRequest { topics: vec![] })
+        .await;
+
+    assert!(response.is_ok(), "update_stream_topics should succeed");
 }

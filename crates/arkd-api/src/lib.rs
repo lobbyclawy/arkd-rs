@@ -34,6 +34,7 @@ pub mod proto {
 }
 
 pub use config::ServerConfig;
+pub use grpc::broker::{EventBroker, SharedEventBroker};
 pub use monitoring::{spawn_monitoring_server, MonitoringConfig};
 pub use server::Server;
 
