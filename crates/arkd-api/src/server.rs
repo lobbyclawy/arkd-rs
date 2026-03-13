@@ -48,7 +48,11 @@ impl Server {
 
         // Use provided authenticator or create default (dev mode)
         let authenticator = authenticator.unwrap_or_else(|| {
-            info!("Using default authenticator (dev mode)");
+            if config.require_auth {
+                tracing::warn!("require_auth = true but no authenticator provided — using insecure default key!");
+            } else {
+                info!("Using default authenticator (dev mode)");
+            }
             Arc::new(Authenticator::new(vec![0u8; 32]))
         });
 

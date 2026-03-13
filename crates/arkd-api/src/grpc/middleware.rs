@@ -135,6 +135,7 @@ impl AuthInterceptor {
                 }
                 // Also accept raw token without Bearer prefix
                 if !value.is_empty() {
+                    debug!("Auth token provided without Bearer prefix — consider using 'Authorization: Bearer <token>'");
                     return Some(value.to_string());
                 }
             }
