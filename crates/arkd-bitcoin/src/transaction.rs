@@ -143,8 +143,8 @@ pub mod psbt {
     use bitcoin::psbt::Psbt;
 
     /// Create a PSBT from a transaction
-    pub fn from_transaction(tx: Transaction) -> Psbt {
-        Psbt::from_unsigned_tx(tx).expect("Failed to create PSBT")
+    pub fn from_transaction(tx: Transaction) -> BitcoinResult<Psbt> {
+        Psbt::from_unsigned_tx(tx).map_err(|e| BitcoinError::PsbtError(e.to_string()))
     }
 
     /// Finalize a PSBT

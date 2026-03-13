@@ -12,8 +12,8 @@ use std::collections::HashMap;
 
 async fn setup() -> (Database, SqliteVtxoRepository, SqliteRoundRepository) {
     let db = Database::connect_in_memory().await.unwrap();
-    let vtxo_repo = SqliteVtxoRepository::new(db.sqlite_pool().clone());
-    let round_repo = SqliteRoundRepository::new(db.sqlite_pool().clone());
+    let vtxo_repo = SqliteVtxoRepository::new(db.sqlite_pool().unwrap().clone());
+    let round_repo = SqliteRoundRepository::new(db.sqlite_pool().unwrap().clone());
     (db, vtxo_repo, round_repo)
 }
 

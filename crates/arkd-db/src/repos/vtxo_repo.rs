@@ -331,7 +331,7 @@ mod tests {
 
     async fn setup() -> (Database, SqliteVtxoRepository) {
         let db = Database::connect_in_memory().await.unwrap();
-        let repo = SqliteVtxoRepository::new(db.sqlite_pool().clone());
+        let repo = SqliteVtxoRepository::new(db.sqlite_pool().unwrap().clone());
         (db, repo)
     }
 

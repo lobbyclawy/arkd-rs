@@ -215,7 +215,7 @@ fn bench_db_operations(c: &mut Criterion) {
             b.iter(|| {
                 rt.block_on(async {
                     let db = Database::connect_in_memory().await.unwrap();
-                    let repo = SqliteVtxoRepository::new(db.sqlite_pool().clone());
+                    let repo = SqliteVtxoRepository::new(db.sqlite_pool().unwrap().clone());
                     let vtxos: Vec<Vtxo> = (0..n).map(make_vtxo).collect();
                     repo.add_vtxos(&vtxos).await.unwrap();
                 });
@@ -231,7 +231,7 @@ fn bench_db_operations(c: &mut Criterion) {
             |b, &n| {
                 let db = rt.block_on(async {
                     let db = Database::connect_in_memory().await.unwrap();
-                    let repo = SqliteVtxoRepository::new(db.sqlite_pool().clone());
+                    let repo = SqliteVtxoRepository::new(db.sqlite_pool().unwrap().clone());
                     let vtxos: Vec<Vtxo> = (0..n)
                         .map(|i| {
                             let mut v = make_vtxo(i);
@@ -245,7 +245,7 @@ fn bench_db_operations(c: &mut Criterion) {
 
                 b.iter(|| {
                     rt.block_on(async {
-                        let repo = SqliteVtxoRepository::new(db.sqlite_pool().clone());
+                        let repo = SqliteVtxoRepository::new(db.sqlite_pool().unwrap().clone());
                         let (spendable, spent) = repo
                             .get_all_vtxos_for_pubkey(black_box("target_pubkey"))
                             .await
@@ -266,7 +266,7 @@ fn bench_db_operations(c: &mut Criterion) {
                 b.iter(|| {
                     rt.block_on(async {
                         let db = Database::connect_in_memory().await.unwrap();
-                        let repo = SqliteRoundRepository::new(db.sqlite_pool().clone());
+                        let repo = SqliteRoundRepository::new(db.sqlite_pool().unwrap().clone());
 
                         let mut round = Round::new();
                         round.start_registration().unwrap();

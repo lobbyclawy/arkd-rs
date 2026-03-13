@@ -552,7 +552,7 @@ mod tests {
 
     async fn setup() -> (Database, SqliteRoundRepository) {
         let db = Database::connect_in_memory().await.unwrap();
-        let repo = SqliteRoundRepository::new(db.sqlite_pool().clone());
+        let repo = SqliteRoundRepository::new(db.sqlite_pool().unwrap().clone());
         (db, repo)
     }
 
