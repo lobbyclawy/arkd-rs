@@ -1,0 +1,65 @@
+# cargo-deny configuration for arkd-rs
+# Run: cargo deny check
+
+[advisories]
+vulnerability = "deny"
+unmaintained = "warn"
+unsound = "deny"
+yanked = "deny"
+
+# Accepted advisories with justification
+ignore = [
+    # RUSTSEC-2023-0071: rsa Marvin Attack (timing sidechannel)
+    # This comes from sqlx-mysql → rsa, which we don't use in production
+    # (we use SQLite). No fix available upstream yet.
+    "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2025-0141: bincode unmaintained
+    # Transitive dependency via bdk_file_store. The BDK team is aware
+    # and migration is tracked upstream. No security vulnerability.
+    "RUSTSEC-2025-0141",
+
+    # RUSTSEC-2025-0134: rustls-pemfile unmaintained
+    # Transitive dependency via reqwest → esplora-client. Upstream is
+    # migrating to rustls-pemfile 2.x. No security vulnerability.
+    "RUSTSEC-2025-0134",
+
+    # RUSTSEC-2021-0137: sodiumoxide deprecated
+    # Used by macaroon crate for auth tokens. Plan to migrate to a
+    # maintained alternative (see SECURITY.md threat model).
+    "RUSTSEC-2021-0137",
+]
+
+[licenses]
+unlicensed = "deny"
+copyleft = "warn"
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "BSL-1.0",
+    "OpenSSL",
+    "MPL-2.0",
+]
+
+# Some crates use dual MIT/Apache-2.0 — that's fine.
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

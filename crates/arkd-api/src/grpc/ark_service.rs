@@ -107,6 +107,18 @@ impl ArkServiceTrait for ArkGrpcService {
             return Err(Status::invalid_argument("amount must be > 0"));
         }
 
+        // Validate pubkey format
+        if let Err(e) =
+            arkd_core::validation::validate_pubkey_hex(&req.pubkey, "register_for_round")
+        {
+            return Err(Status::invalid_argument(format!("Invalid pubkey: {e}")));
+        }
+
+        // Validate amount bounds
+        if let Err(e) = arkd_core::validation::validate_amount(req.amount, "register_for_round") {
+            return Err(Status::invalid_argument(format!("Invalid amount: {e}")));
+        }
+
         // Build VTXO inputs from proto inputs
         let inputs: Vec<arkd_core::domain::Vtxo> = req
             .inputs

@@ -20,6 +20,7 @@ pub mod error;
 pub mod ports;
 pub mod round_scheduler;
 pub mod sweep;
+pub mod validation;
 
 #[cfg(test)]
 mod proptest_tests;

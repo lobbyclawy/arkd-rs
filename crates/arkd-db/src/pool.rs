@@ -71,11 +71,13 @@ impl Database {
         Self::connect(config).await
     }
 
-    /// Get the SQLite pool (panics if not SQLite backend)
-    pub fn sqlite_pool(&self) -> &SqlitePool {
-        self.sqlite_pool
-            .as_ref()
-            .expect("Not a SQLite database connection")
+    /// Get the SQLite pool.
+    ///
+    /// Returns an error if the database is not using a SQLite backend.
+    pub fn sqlite_pool(&self) -> DatabaseResult<&SqlitePool> {
+        self.sqlite_pool.as_ref().ok_or_else(|| {
+            DatabaseError::ConnectionError("Not a SQLite database connection".to_string())
+        })
     }
 
     /// Get configuration

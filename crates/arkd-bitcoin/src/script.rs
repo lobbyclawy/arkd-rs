@@ -64,8 +64,64 @@ pub mod timelock {
     use super::*;
     use bitcoin::Sequence;
 
+    /// Maximum block-height timelock (~10 years at 144 blocks/day).
+    pub const MAX_TIMELOCK_BLOCKS: u32 = 525_960;
+
+    /// Maximum CSV relative timelock (16-bit field in Sequence).
+    pub const MAX_CSV_BLOCKS: u16 = 65535;
+
+    /// Validate a block-height CLTV value.
+    fn validate_cltv(lock_time: &LockTime) -> BitcoinResult<()> {
+        match lock_time {
+            LockTime::Blocks(h) => {
+                let height = h.to_consensus_u32();
+                if height == 0 {
+                    return Err(BitcoinError::ScriptError(
+                        "CLTV block height must be > 0".to_string(),
+                    ));
+                }
+                if height > MAX_TIMELOCK_BLOCKS {
+                    return Err(BitcoinError::ScriptError(format!(
+                        "CLTV block height {height} exceeds maximum {MAX_TIMELOCK_BLOCKS}"
+                    )));
+                }
+            }
+            LockTime::Seconds(t) => {
+                let secs = t.to_consensus_u32();
+                // Seconds-based locktimes must be > 500_000_000 by consensus
+                if secs <= 500_000_000 {
+                    return Err(BitcoinError::ScriptError(format!(
+                        "CLTV seconds value {secs} is at or below the locktime threshold"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate a CSV (relative timelock) sequence value.
+    fn validate_csv(sequence: &Sequence) -> BitcoinResult<()> {
+        let raw = sequence.to_consensus_u32();
+        // CSV uses bits 0-15 for the value, bit 22 for type (blocks vs time)
+        // and bit 31 must be 0 for CSV to be enforced.
+        if raw & (1 << 31) != 0 {
+            return Err(BitcoinError::ScriptError(
+                "CSV sequence has disable flag set (bit 31)".to_string(),
+            ));
+        }
+        let value = raw & 0x0000FFFF;
+        if value == 0 {
+            return Err(BitcoinError::ScriptError(
+                "CSV value must be > 0".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Create a script with absolute timelock (CLTV - CheckLockTimeVerify)
     pub fn cltv(lock_time: LockTime, pubkey: &PublicKey) -> BitcoinResult<ScriptBuf> {
+        validate_cltv(&lock_time)?;
+
         let lock_time_bytes = match lock_time {
             LockTime::Blocks(h) => h.to_consensus_u32().to_le_bytes().to_vec(),
             LockTime::Seconds(t) => t.to_consensus_u32().to_le_bytes().to_vec(),
@@ -85,6 +141,8 @@ pub mod timelock {
 
     /// Create a script with relative timelock (CSV - CheckSequenceVerify)
     pub fn csv(sequence: Sequence, pubkey: &PublicKey) -> BitcoinResult<ScriptBuf> {
+        validate_csv(&sequence)?;
+
         let sequence_bytes = sequence.to_consensus_u32().to_le_bytes().to_vec();
 
         let push_bytes = PushBytesBuf::try_from(sequence_bytes)
@@ -140,6 +198,22 @@ pub mod covenant {
         asp_pubkey: &PublicKey,
         exit_delta: u32,
     ) -> BitcoinResult<ScriptBuf> {
+        if exit_delta == 0 {
+            return Err(BitcoinError::ScriptError(
+                "VTXO exit_delta must be > 0".to_string(),
+            ));
+        }
+        if exit_delta > 65535 {
+            return Err(BitcoinError::ScriptError(format!(
+                "VTXO exit_delta {exit_delta} exceeds CSV maximum 65535"
+            )));
+        }
+        if user_pubkey == asp_pubkey {
+            return Err(BitcoinError::ScriptError(
+                "user_pubkey and asp_pubkey must be different".to_string(),
+            ));
+        }
+
         // VTXO script structure:
         // IF
         //   <exit_delta> CSV DROP <user_pubkey> CHECKSIG
@@ -250,11 +324,19 @@ mod tests {
     #[test]
     fn test_cltv_various_heights() {
         let pubkey = test_pubkey();
-        for height in [1, 100, 500_000, 1_000_000] {
+        for height in [1, 100, 500_000] {
             let lock_time = LockTime::from_height(height).unwrap();
             let script = timelock::cltv(lock_time, &pubkey).unwrap();
             assert!(!script.is_empty());
         }
+    }
+
+    #[test]
+    fn test_cltv_rejects_excessive_height() {
+        let pubkey = test_pubkey();
+        // Height above MAX_TIMELOCK_BLOCKS should be rejected
+        let lock_time = LockTime::from_height(timelock::MAX_TIMELOCK_BLOCKS + 1).unwrap();
+        assert!(timelock::cltv(lock_time, &pubkey).is_err());
     }
 
     #[test]
@@ -265,5 +347,33 @@ mod tests {
             let script = timelock::csv(sequence, &pubkey).unwrap();
             assert!(!script.is_empty());
         }
+    }
+
+    #[test]
+    fn test_csv_rejects_disabled_flag() {
+        let pubkey = test_pubkey();
+        // Sequence with bit 31 set (CSV disabled)
+        let sequence = Sequence::from_consensus(0x80000001);
+        assert!(timelock::csv(sequence, &pubkey).is_err());
+    }
+
+    #[test]
+    fn test_vtxo_script_rejects_zero_exit_delta() {
+        let user_pk = test_pubkey();
+        let asp_pk = test_pubkey();
+        assert!(covenant::vtxo_script(&user_pk, &asp_pk, 0).is_err());
+    }
+
+    #[test]
+    fn test_vtxo_script_rejects_excessive_exit_delta() {
+        let user_pk = test_pubkey();
+        let asp_pk = test_pubkey();
+        assert!(covenant::vtxo_script(&user_pk, &asp_pk, 65536).is_err());
+    }
+
+    #[test]
+    fn test_vtxo_script_rejects_same_keys() {
+        let pk = test_pubkey();
+        assert!(covenant::vtxo_script(&pk, &pk, 144).is_err());
     }
 }
