@@ -1,0 +1,69 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  integration:
+    name: Integration tests (regtest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Bitcoin Core (regtest)
+        run: |
+          docker run -d --name bitcoind \
+            -p 18443:18443 \
+            ruimarinho/bitcoin-core:latest \
+            -regtest=1 \
+            -rpcallowip=0.0.0.0/0 \
+            -rpcbind=0.0.0.0 \
+            -rpcuser=admin1 \
+            -rpcpassword=123 \
+            -txindex=1 \
+            -fallbackfee=0.00001
+          # Wait for bitcoind to be ready
+          for i in $(seq 1 30); do
+            if docker exec bitcoind bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 getblockchaininfo > /dev/null 2>&1; then
+              echo "✅ bitcoind ready"
+              break
+            fi
+            echo "Waiting for bitcoind... ($i/30)"
+            sleep 2
+          done
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-integration-
+
+      - name: Build arkd
+        run: cargo build --bin arkd
+
+      - name: Run integration tests
+        env:
+          INTEGRATION_TEST: "1"
+          BITCOIN_RPC_URL: "http://admin1:123@localhost:18443"
+        run: cargo test --test integration -- --ignored --test-threads=1 --nocapture
+
+      - name: Stop bitcoind
+        if: always()
+        run: docker stop bitcoind && docker rm bitcoind || true
