@@ -50,7 +50,10 @@ impl BitcoinCoreFeeManager {
             rpc_url,
             rpc_user,
             rpc_pass,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .unwrap_or_default(),
             cache: RwLock::new(Vec::new()),
             cache_ttl: Duration::from_secs(DEFAULT_CACHE_TTL_SECS),
         }
