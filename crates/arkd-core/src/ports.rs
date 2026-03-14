@@ -5,7 +5,9 @@
 use async_trait::async_trait;
 use bitcoin::XOnlyPublicKey;
 
-use crate::domain::{FlatTxTree, Intent, OffchainTx, OffchainTxStage, Round, Vtxo, VtxoOutpoint};
+use crate::domain::{
+    AssetRecord, FlatTxTree, Intent, OffchainTx, OffchainTxStage, Round, Vtxo, VtxoOutpoint,
+};
 use crate::error::ArkResult;
 
 /// Wallet service interface
@@ -326,6 +328,33 @@ pub trait BlockchainScanner: Send + Sync {
     async fn tip_height(&self) -> ArkResult<u32>;
 }
 
+/// Asset repository — manages registered tokens and NFTs on this ASP.
+#[async_trait]
+pub trait AssetRepository: Send + Sync {
+    /// Register a new asset.
+    async fn register_asset(&self, record: AssetRecord) -> ArkResult<()>;
+    /// Look up an asset by its ID.
+    async fn get_asset(&self, asset_id: &str) -> ArkResult<Option<AssetRecord>>;
+    /// List all registered assets.
+    async fn list_assets(&self) -> ArkResult<Vec<AssetRecord>>;
+}
+
+/// No-op asset repository for dev/test environments.
+pub struct NoopAssetRepository;
+
+#[async_trait]
+impl AssetRepository for NoopAssetRepository {
+    async fn register_asset(&self, _record: AssetRecord) -> ArkResult<()> {
+        Ok(())
+    }
+    async fn get_asset(&self, _asset_id: &str) -> ArkResult<Option<AssetRecord>> {
+        Ok(None)
+    }
+    async fn list_assets(&self) -> ArkResult<Vec<AssetRecord>> {
+        Ok(vec![])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,6 +371,15 @@ mod tests {
         _assert_object_safe::<dyn LiveStore>();
         _assert_object_safe::<dyn BlockchainScanner>();
         _assert_object_safe::<dyn FeeManager>();
+        _assert_object_safe::<dyn AssetRepository>();
+    }
+
+    #[tokio::test]
+    async fn test_noop_asset_repo_list_empty() {
+        let repo = NoopAssetRepository;
+        let assets = repo.list_assets().await.unwrap();
+        assert!(assets.is_empty());
+        assert!(repo.get_asset("nonexistent").await.unwrap().is_none());
     }
 }
 
