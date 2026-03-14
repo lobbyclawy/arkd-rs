@@ -12,28 +12,8 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /build
 
-# Cache dependency builds: copy manifests first
-COPY Cargo.toml Cargo.lock ./
-COPY crates/arkd-core/Cargo.toml crates/arkd-core/Cargo.toml
-COPY crates/arkd-wallet/Cargo.toml crates/arkd-wallet/Cargo.toml
-COPY crates/arkd-api/Cargo.toml crates/arkd-api/Cargo.toml
-COPY crates/arkd-db/Cargo.toml crates/arkd-db/Cargo.toml
-COPY crates/arkd-bitcoin/Cargo.toml crates/arkd-bitcoin/Cargo.toml
-
-# Create dummy source files so cargo can resolve the workspace
-RUN mkdir -p src && echo 'fn main() {}' > src/main.rs \
-    && for crate in arkd-core arkd-wallet arkd-api arkd-db arkd-bitcoin; do \
-         mkdir -p crates/$crate/src && echo '' > crates/$crate/src/lib.rs; \
-       done
-
-# Pre-build dependencies (cached layer)
-RUN cargo build --release 2>/dev/null || true
-
-# Copy actual source code
+# Copy full workspace for build
 COPY . .
-
-# Touch source files to invalidate the dummy builds
-RUN find src crates -name '*.rs' -exec touch {} +
 
 # Build the release binary
 RUN cargo build --release --bin arkd
@@ -43,14 +23,11 @@ RUN cargo build --release --bin arkd
 # =============================================================================
 FROM gcr.io/distroless/cc-debian12 AS runtime
 
-# Copy TLS certificates from builder for HTTPS support
+# Copy TLS certificates for HTTPS support
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 # Copy the release binary
 COPY --from=builder /build/target/release/arkd /usr/local/bin/arkd
-
-# Create data directory (distroless runs as nonroot uid 65532 by default)
-# Note: distroless images use nonroot user by default — no root process
 
 # Default configuration
 ENV RUST_LOG=info
