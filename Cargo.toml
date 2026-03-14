@@ -7,6 +7,10 @@ description = "Rust implementation of arkd - Ark protocol server for Bitcoin Lay
 license = "MIT"
 repository = "https://github.com/lobbyclawy/arkd-rs"
 
+[features]
+default = []
+light = []
+
 [workspace]
 members = [
     "crates/arkd-core",
