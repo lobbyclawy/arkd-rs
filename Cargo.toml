@@ -15,6 +15,7 @@ members = [
     "crates/arkd-db",
     "crates/arkd-bitcoin",
     "crates/arkd-live-store",
+    "crates/arkd-scanner",
 ]
 
 [dependencies]
