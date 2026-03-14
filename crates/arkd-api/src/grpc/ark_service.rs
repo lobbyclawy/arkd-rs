@@ -547,6 +547,8 @@ impl ArkServiceTrait for ArkGrpcService {
     }
 }
 
+// TODO(#55): Asset RPCs (ListAssets, RegisterAsset, GetAsset) pending proto update
+
 #[cfg(test)]
 mod tests {
     use super::*;
