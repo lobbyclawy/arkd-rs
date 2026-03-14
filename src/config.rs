@@ -20,18 +20,32 @@ pub struct FileConfig {
     pub bitcoin: BitcoinSection,
     #[serde(default)]
     pub ark: ArkSection,
-    #[allow(dead_code)] // Will be used when store initialization branches on mode
     #[serde(default)]
     pub deployment: DeploymentSection,
 }
 
 /// Deployment configuration section.
-#[allow(dead_code)] // Will be used when store initialization branches on mode
 #[derive(Debug, Deserialize, Default)]
 pub struct DeploymentSection {
     /// Deployment mode: "full" (default) or "light".
     #[serde(default)]
     pub mode: DeploymentMode,
+}
+
+impl DeploymentSection {
+    /// Returns `true` when the deployment is configured for light mode.
+    pub fn is_light(&self) -> bool {
+        matches!(self.mode, DeploymentMode::Light)
+    }
+
+    /// Human-readable label for the store backends implied by the current mode.
+    pub fn store_info(&self) -> &'static str {
+        if self.is_light() {
+            "sqlite+in-memory"
+        } else {
+            "postgresql+redis"
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -61,6 +75,18 @@ pub struct ArkSection {
     pub round_duration_secs: Option<u64>,
     pub round_interval_blocks: Option<u32>,
     pub allow_csv_block_type: Option<bool>,
+}
+
+impl FileConfig {
+    /// Shortcut: is the deployment mode set to light?
+    pub fn is_light_mode(&self) -> bool {
+        self.deployment.is_light()
+    }
+
+    /// Shortcut: human-readable store backend label.
+    pub fn store_info(&self) -> &'static str {
+        self.deployment.store_info()
+    }
 }
 
 /// Load config from file path. Returns default config if file doesn't exist.
@@ -153,5 +179,36 @@ mod tests {
         // Parse with no args (use default)
         let cli = Cli::try_parse_from(["arkd"]).unwrap();
         assert_eq!(cli.config, "config.toml");
+    }
+
+    // ── Issue #119: deployment-mode wiring tests ──
+
+    #[test]
+    fn test_light_mode_is_light_returns_true() {
+        let section = DeploymentSection {
+            mode: DeploymentMode::Light,
+        };
+        assert!(section.is_light());
+    }
+
+    #[test]
+    fn test_full_mode_is_light_returns_false() {
+        let section = DeploymentSection {
+            mode: DeploymentMode::Full,
+        };
+        assert!(!section.is_light());
+    }
+
+    #[test]
+    fn test_store_info_light_vs_full() {
+        let light = DeploymentSection {
+            mode: DeploymentMode::Light,
+        };
+        assert_eq!(light.store_info(), "sqlite+in-memory");
+
+        let full = DeploymentSection {
+            mode: DeploymentMode::Full,
+        };
+        assert_eq!(full.store_info(), "postgresql+redis");
     }
 }
