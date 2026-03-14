@@ -182,6 +182,26 @@ pub trait OffchainTxRepository: Send + Sync {
     async fn update_stage(&self, id: &str, stage: &OffchainTxStage) -> ArkResult<()>;
 }
 
+/// Fee estimation strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FeeStrategy {
+    /// Conservative: higher confirmation target (6 blocks), cheaper fee
+    Conservative,
+    /// Economical: lower confirmation target (1 block), faster confirmation
+    Economical,
+    /// Custom: explicit fee rate in sats/vbyte
+    Custom(u64),
+}
+
+/// Fee manager — estimates fee rates for transactions
+#[async_trait]
+pub trait FeeManager: Send + Sync {
+    /// Estimate fee rate in sat/vbyte for the given strategy.
+    async fn estimate_fee_rate(&self, strategy: FeeStrategy) -> ArkResult<u64>;
+    /// Invalidate cached estimate.
+    async fn invalidate_cache(&self) -> ArkResult<()>;
+}
+
 /// Cache service
 #[async_trait]
 pub trait CacheService: Send + Sync {
@@ -311,5 +331,6 @@ mod tests {
         _assert_object_safe::<dyn OffchainTxRepository>();
         _assert_object_safe::<dyn LiveStore>();
         _assert_object_safe::<dyn BlockchainScanner>();
+        _assert_object_safe::<dyn FeeManager>();
     }
 }

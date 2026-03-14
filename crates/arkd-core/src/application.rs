@@ -47,6 +47,12 @@ pub struct ArkConfig {
     pub max_tx_weight: u64,
     /// Default fee rate in sats/vB for fee estimation
     pub default_fee_rate_sats_per_vb: u64,
+    /// Bitcoin Core RPC URL for dynamic fee estimation (None = static fee manager)
+    pub fee_manager_url: Option<String>,
+    /// Bitcoin Core RPC username
+    pub fee_manager_user: Option<String>,
+    /// Bitcoin Core RPC password
+    pub fee_manager_pass: Option<String>,
 }
 
 impl Default for ArkConfig {
@@ -66,6 +72,9 @@ impl Default for ArkConfig {
             boarding_exit_delay: DEFAULT_BOARDING_EXIT_DELAY,
             max_tx_weight: DEFAULT_MAX_TX_WEIGHT,
             default_fee_rate_sats_per_vb: 1,
+            fee_manager_url: None,
+            fee_manager_user: None,
+            fee_manager_pass: None,
         }
     }
 }
