@@ -29,6 +29,11 @@ enable_logging = true
 # Admin API token (generate a secure random token for production)
 # admin_token = "your-secure-admin-token"
 
+# Remote signer gRPC endpoint for key isolation.
+# When set, signing operations are delegated to a separate signer process.
+# When unset (default), local signing is used.
+# remote_signer_url = "http://127.0.0.1:7072"
+
 # =============================================================================
 # Bitcoin Configuration
 # =============================================================================
