@@ -146,16 +146,10 @@ impl ServerConfig {
         if let Some(colon) = self.grpc_addr.rfind(':') {
             match self.grpc_addr[colon + 1..].parse::<u16>() {
                 Ok(port) if port < 1024 => {
-                    errors.push(format!(
-                        "grpc_addr: port must be >= 1024, got {}",
-                        port
-                    ));
+                    errors.push(format!("grpc_addr: port must be >= 1024, got {}", port));
                 }
                 Err(_) => {
-                    errors.push(format!(
-                        "grpc_addr: invalid port in '{}'",
-                        self.grpc_addr
-                    ));
+                    errors.push(format!("grpc_addr: invalid port in '{}'", self.grpc_addr));
                 }
                 _ => {}
             }
@@ -275,7 +269,9 @@ mod tests {
             ..Default::default()
         };
         let errs = config.validate().unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("asp_key_hex") && e.contains("empty")));
+        assert!(errs
+            .iter()
+            .any(|e| e.contains("asp_key_hex") && e.contains("empty")));
     }
 
     #[test]
@@ -285,7 +281,9 @@ mod tests {
             ..Default::default()
         };
         let errs = config.validate().unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("asp_key_hex") && e.contains("64 hex chars")));
+        assert!(errs
+            .iter()
+            .any(|e| e.contains("asp_key_hex") && e.contains("64 hex chars")));
     }
 
     #[test]
@@ -295,7 +293,9 @@ mod tests {
             ..Default::default()
         };
         let errs = config.validate().unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("grpc_addr") && e.contains("1024")));
+        assert!(errs
+            .iter()
+            .any(|e| e.contains("grpc_addr") && e.contains("1024")));
     }
 
     #[test]
@@ -305,6 +305,8 @@ mod tests {
             ..Default::default()
         };
         let errs = config.validate().unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("esplora_url") && e.contains("http")));
+        assert!(errs
+            .iter()
+            .any(|e| e.contains("esplora_url") && e.contains("http")));
     }
 }
