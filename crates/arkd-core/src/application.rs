@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, instrument};
 
+use crate::domain::ForfeitRecord;
 use crate::domain::{
     CollaborativeExitRequest, Exit, ExitSummary, ExitType, Intent, Round, RoundStage,
     UnilateralExitRequest, Vtxo, VtxoOutpoint, DEFAULT_BOARDING_EXIT_DELAY,
@@ -14,8 +15,9 @@ use crate::domain::{
 };
 use crate::error::{ArkError, ArkResult};
 use crate::ports::{
-    ArkEvent, CacheService, CheckpointRepository, EventPublisher, NoopCheckpointRepository,
-    SignerService, TxBuilder, VtxoRepository, WalletService,
+    ArkEvent, CacheService, CheckpointRepository, EventPublisher, ForfeitRepository,
+    NoopCheckpointRepository, NoopForfeitRepository, SignerService, TxBuilder, VtxoRepository,
+    WalletService,
 };
 
 /// ASP configuration
@@ -104,6 +106,7 @@ pub struct ArkService {
     cache: Arc<dyn CacheService>,
     events: Arc<dyn EventPublisher>,
     checkpoint_repo: Arc<dyn CheckpointRepository>,
+    forfeit_repo: Arc<dyn ForfeitRepository>,
     config: ArkConfig,
     current_round: RwLock<Option<Round>>,
     /// Active exits indexed by ID
@@ -130,6 +133,7 @@ impl ArkService {
             cache,
             events,
             checkpoint_repo: Arc::new(NoopCheckpointRepository),
+            forfeit_repo: Arc::new(NoopForfeitRepository),
             config,
             current_round: RwLock::new(None),
             exits: RwLock::new(std::collections::HashMap::new()),
@@ -463,6 +467,24 @@ impl ArkService {
         info!(swept_count = swept, "Checkpoint sweep complete");
         Ok(swept)
     }
+
+    /// Submit a forfeit transaction for persistence.
+    pub async fn submit_forfeit(
+        &self,
+        round_id: String,
+        vtxo_id: String,
+        tx_hex: String,
+    ) -> ArkResult<ForfeitRecord> {
+        let record = ForfeitRecord::new(round_id, vtxo_id, tx_hex);
+        self.forfeit_repo.store_forfeit(record.clone()).await?;
+        info!(forfeit_id = %record.id, vtxo_id = %record.vtxo_id, "Forfeit stored");
+        Ok(record)
+    }
+
+    /// Get all forfeit records for a given round.
+    pub async fn get_round_forfeits(&self, round_id: &str) -> ArkResult<Vec<ForfeitRecord>> {
+        self.forfeit_repo.list_by_round(round_id).await
+    }
 }
 
 /// Service info
@@ -748,5 +770,61 @@ mod tests {
         // NoopCheckpointRepository returns empty list → 0 swept
         let swept = svc.sweep_checkpoints().await.unwrap();
         assert_eq!(swept, 0);
+    }
+
+    #[test]
+    fn test_forfeit_record_new() {
+        let record = ForfeitRecord::new("round-1".into(), "vtxo-abc".into(), "deadbeef".into());
+        assert_eq!(record.round_id, "round-1");
+        assert_eq!(record.vtxo_id, "vtxo-abc");
+        assert_eq!(record.tx_hex, "deadbeef");
+        assert!(!record.validated);
+        assert!(!record.id.is_empty());
+        assert!(record.submitted_at > 0);
+    }
+
+    #[test]
+    fn test_forfeit_mark_validated() {
+        let mut record = ForfeitRecord::new("round-1".into(), "vtxo-abc".into(), "deadbeef".into());
+        assert!(!record.validated);
+        record.mark_validated();
+        assert!(record.validated);
+    }
+
+    #[test]
+    fn test_forfeit_serde_roundtrip() {
+        let record = ForfeitRecord::new("round-42".into(), "vtxo-xyz".into(), "cafebabe".into());
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: ForfeitRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, record.id);
+        assert_eq!(deserialized.round_id, record.round_id);
+        assert_eq!(deserialized.vtxo_id, record.vtxo_id);
+        assert_eq!(deserialized.tx_hex, record.tx_hex);
+        assert_eq!(deserialized.submitted_at, record.submitted_at);
+        assert_eq!(deserialized.validated, record.validated);
+    }
+
+    #[tokio::test]
+    async fn test_submit_forfeit_stores_record() {
+        let events = Arc::new(RecordingEvents::new());
+        let svc = make_service(events);
+        // NoopForfeitRepository accepts the store silently
+        let record = svc
+            .submit_forfeit("round-1".into(), "vtxo-1".into(), "aabbcc".into())
+            .await
+            .unwrap();
+        assert_eq!(record.round_id, "round-1");
+        assert_eq!(record.vtxo_id, "vtxo-1");
+        assert_eq!(record.tx_hex, "aabbcc");
+        assert!(!record.validated);
+    }
+
+    #[tokio::test]
+    async fn test_get_round_forfeits_empty() {
+        let events = Arc::new(RecordingEvents::new());
+        let svc = make_service(events);
+        // NoopForfeitRepository returns empty vec
+        let forfeits = svc.get_round_forfeits("nonexistent").await.unwrap();
+        assert!(forfeits.is_empty());
     }
 }

@@ -9,6 +9,7 @@ pub mod asset;
 pub mod checkpoint;
 pub mod events;
 pub mod exit;
+pub mod forfeit;
 pub mod intent;
 pub mod offchain_tx;
 pub mod round;
@@ -17,6 +18,7 @@ pub mod vtxo;
 pub use asset::{AssetAmount, AssetId, AssetKind, AssetRecord};
 pub use checkpoint::{CheckpointTx, DEFAULT_CHECKPOINT_EXIT_DELAY};
 pub use events::ArkEvent;
+pub use forfeit::ForfeitRecord;
 
 pub use exit::{
     BoardingRequest, BoardingStatus, BoardingTransaction, CollaborativeExitRequest, Exit,
