@@ -28,6 +28,19 @@ async fn main() -> Result<()> {
 
     let file_config = config::load_config(std::path::Path::new(&args.config))?;
 
+    // Log deployment mode
+    if file_config.is_light_mode() {
+        info!(
+            store = file_config.store_info(),
+            "Starting in LIGHT mode (SQLite + in-memory live store)"
+        );
+    } else {
+        info!(
+            store = file_config.store_info(),
+            "Starting in FULL mode (PostgreSQL + Redis)"
+        );
+    }
+
     // Apply file config to ServerConfig (CLI args override file config)
     let mut config = arkd_api::ServerConfig::default();
     if let Some(addr) = args.grpc_addr.or(file_config.server.grpc_addr) {

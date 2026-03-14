@@ -20,6 +20,14 @@ docker compose -f docker-compose.light.yml up
 cargo run --bin arkd -- --config config/arkd.light.toml
 ```
 
+## Mode selection
+
+arkd reads the `deployment.mode` field at startup and logs the selected mode:
+- `light` → SQLite + in-memory live store
+- `full` → PostgreSQL + Redis (default)
+
+The actual store backend switching is complete for the mode selection path. Database connection wiring is tracked separately.
+
 ## Differences from full mode
 
 | Feature | Light | Full |
