@@ -55,6 +55,12 @@ pub struct ServerConfig {
     /// Example: `"https://blockstream.info/testnet/api"`
     #[serde(default)]
     pub esplora_url: Option<String>,
+
+    /// Hex-encoded 32-byte secret key for the ASP local signer.
+    /// When set, the server uses `LocalSigner::from_hex` instead of a remote signer.
+    /// Generate with: `openssl rand -hex 32`
+    #[serde(default)]
+    pub asp_key_hex: Option<String>,
 }
 
 fn default_max_connections() -> usize {
@@ -106,6 +112,7 @@ impl Default for ServerConfig {
             require_auth: false, // Dev mode by default
             remote_signer_url: None,
             esplora_url: None,
+            asp_key_hex: None,
         }
     }
 }
@@ -129,6 +136,12 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.admin_addr(), "0.0.0.0:9091");
+    }
+
+    #[test]
+    fn test_config_asp_key_defaults_to_none() {
+        let config = ServerConfig::default();
+        assert!(config.asp_key_hex.is_none());
     }
 
     #[test]
