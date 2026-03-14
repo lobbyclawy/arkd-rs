@@ -1,5 +1,14 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+/// Deployment mode: Full (Redis + PostgreSQL) or Light (SQLite + in-memory).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DeploymentMode {
+    #[default]
+    Full,
+    Light,
+}
 
 /// Top-level config file structure (config.toml)
 #[derive(Debug, Deserialize, Default)]
@@ -11,6 +20,18 @@ pub struct FileConfig {
     pub bitcoin: BitcoinSection,
     #[serde(default)]
     pub ark: ArkSection,
+    #[allow(dead_code)] // Will be used when store initialization branches on mode
+    #[serde(default)]
+    pub deployment: DeploymentSection,
+}
+
+/// Deployment configuration section.
+#[allow(dead_code)] // Will be used when store initialization branches on mode
+#[derive(Debug, Deserialize, Default)]
+pub struct DeploymentSection {
+    /// Deployment mode: "full" (default) or "light".
+    #[serde(default)]
+    pub mode: DeploymentMode,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -100,6 +121,28 @@ mod tests {
         assert!(cfg.server.grpc_addr.is_none());
         assert!(cfg.bitcoin.network.is_none());
         assert!(cfg.ark.round_duration_secs.is_none());
+    }
+
+    #[test]
+    fn test_deployment_mode_default_is_full() {
+        let mode = DeploymentMode::default();
+        assert_eq!(mode, DeploymentMode::Full);
+    }
+
+    #[test]
+    fn test_deployment_mode_serde_light() {
+        let json = serde_json::to_string(&DeploymentMode::Light).unwrap();
+        assert_eq!(json, "\"light\"");
+        let parsed: DeploymentMode = serde_json::from_str("\"light\"").unwrap();
+        assert_eq!(parsed, DeploymentMode::Light);
+    }
+
+    #[test]
+    fn test_deployment_mode_serde_full() {
+        let json = serde_json::to_string(&DeploymentMode::Full).unwrap();
+        assert_eq!(json, "\"full\"");
+        let parsed: DeploymentMode = serde_json::from_str("\"full\"").unwrap();
+        assert_eq!(parsed, DeploymentMode::Full);
     }
 
     #[test]
