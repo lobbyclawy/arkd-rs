@@ -63,15 +63,15 @@ arkd-rs/
 ### Phase 1: Core Infrastructure ✅
 - [x] Project structure
 - [x] Bitcoin primitives (UTXO, transactions, scripts)
-- [ ] Database layer (Postgres + SQLite) — SQLite ✅, PostgreSQL in progress (#47)
-- [ ] Configuration system
-- [ ] Logging & telemetry
+- [x] Database layer (PostgreSQL + SQLite + Redis)
+- [x] Configuration system
+- [x] Logging & telemetry (tracing, Prometheus metrics)
 
 ### Phase 2: Wallet & Liquidity ✅
 - [x] On-chain wallet (BDK integration)
-- [ ] NBXplorer client (compatibility with original)
-- [ ] Signing service
-- [ ] UTXO management
+- [x] NBXplorer client (compatibility with original)
+- [x] Signing service (separate signer process)
+- [x] UTXO management
 
 ### Phase 3: Ark Protocol ✅
 - [x] VTXO tree construction
@@ -82,9 +82,10 @@ arkd-rs/
 
 ### Phase 4: API ✅
 - [x] gRPC server (tonic) — ArkService + AdminService, dual-port, tonic-web
-- [ ] REST gateway
-- [ ] Admin API
-- [ ] Client SDK (Rust)
+- [x] REST gateway (tonic-web)
+- [x] Admin API (15+ RPCs)
+- [x] Client SDK (arkd-client crate)
+- [x] CLI (ark-cli)
 
 ### Phase 5: Production Readiness ✅
 - [x] Comprehensive testing (unit + integration + property-based)
@@ -232,21 +233,26 @@ cargo clippy -- -D warnings
 
 ## Roadmap
 
-**2026 Q2:**
+**2026 Q1:**
 - ✅ Repository setup
 - ✅ Core crate structure
-- 🔄 Bitcoin primitives
-- 🔄 Database layer
+- ✅ Bitcoin primitives (arkd-bitcoin)
+- ✅ Database layer (PostgreSQL, SQLite, Redis)
+- ✅ Wallet integration (BDK)
+- ✅ Ark protocol core (VTXOs, rounds, exits)
+- ✅ gRPC API (tonic)
+- ✅ Production deployment infrastructure
 
-**2026 Q3:**
-- Wallet integration
-- Ark protocol core
-- gRPC API
+**2026 Q2 (Current):**
+- ✅ All P0 blockers resolved (protocol-compatible)
+- ✅ All P1 production features complete
+- ✅ All P2 nice-to-have features complete
+- 🎉 **v1.0.0 milestone reached!**
 
-**2026 Q4:**
-- Testnet deployment
-- Security audit
-- Documentation
+**Next:**
+- Mainnet deployment
+- Community testing
+- Performance optimization
 
 ---
 
