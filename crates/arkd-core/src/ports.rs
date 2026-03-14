@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use bitcoin::XOnlyPublicKey;
 
 use crate::domain::{
-    AssetRecord, CheckpointTx, FlatTxTree, Intent, OffchainTx, OffchainTxStage, Round, Vtxo,
-    VtxoOutpoint,
+    AssetRecord, CheckpointTx, FlatTxTree, ForfeitRecord, Intent, OffchainTx, OffchainTxStage,
+    Round, Vtxo, VtxoOutpoint,
 };
 use crate::error::ArkResult;
 
@@ -356,6 +356,42 @@ impl AssetRepository for NoopAssetRepository {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Forfeit repository
+// ---------------------------------------------------------------------------
+
+/// Repository for persisting forfeit transactions.
+#[async_trait]
+pub trait ForfeitRepository: Send + Sync {
+    /// Store a forfeit record.
+    async fn store_forfeit(&self, record: ForfeitRecord) -> ArkResult<()>;
+    /// Get a forfeit record by ID.
+    async fn get_forfeit(&self, id: &str) -> ArkResult<Option<ForfeitRecord>>;
+    /// List all forfeit records for a given round.
+    async fn list_by_round(&self, round_id: &str) -> ArkResult<Vec<ForfeitRecord>>;
+    /// Mark a forfeit record as validated.
+    async fn mark_validated(&self, id: &str) -> ArkResult<()>;
+}
+
+/// No-op forfeit repository for dev/test environments.
+pub struct NoopForfeitRepository;
+
+#[async_trait]
+impl ForfeitRepository for NoopForfeitRepository {
+    async fn store_forfeit(&self, _record: ForfeitRecord) -> ArkResult<()> {
+        Ok(())
+    }
+    async fn get_forfeit(&self, _id: &str) -> ArkResult<Option<ForfeitRecord>> {
+        Ok(None)
+    }
+    async fn list_by_round(&self, _round_id: &str) -> ArkResult<Vec<ForfeitRecord>> {
+        Ok(vec![])
+    }
+    async fn mark_validated(&self, _id: &str) -> ArkResult<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +410,7 @@ mod tests {
         _assert_object_safe::<dyn FeeManager>();
         _assert_object_safe::<dyn AssetRepository>();
         _assert_object_safe::<dyn AdminPort>();
+        _assert_object_safe::<dyn ForfeitRepository>();
     }
 
     #[tokio::test]

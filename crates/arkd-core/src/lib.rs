@@ -38,16 +38,17 @@ pub use cosigning::{
 };
 pub use domain::{
     BoardingRequest, BoardingStatus, BoardingTransaction, CheckpointTx, CollaborativeExitRequest,
-    Exit, ExitError, ExitStatus, ExitSummary, ExitType, FlatTxTree, ForfeitTx, Intent, Receiver,
-    Round, RoundConfig, RoundStage, RoundStats, Stage, TxTreeNode, UnilateralExitRequest, Vtxo,
-    VtxoId, VtxoOutpoint, DEFAULT_CHECKPOINT_EXIT_DELAY, DEFAULT_EVENT_CHANNEL_CAPACITY,
+    Exit, ExitError, ExitStatus, ExitSummary, ExitType, FlatTxTree, ForfeitRecord, ForfeitTx,
+    Intent, Receiver, Round, RoundConfig, RoundStage, RoundStats, Stage, TxTreeNode,
+    UnilateralExitRequest, Vtxo, VtxoId, VtxoOutpoint, DEFAULT_CHECKPOINT_EXIT_DELAY,
+    DEFAULT_EVENT_CHANNEL_CAPACITY,
 };
 pub use error::{ArkError, ArkResult};
 pub use multi_signer::MultiSigner;
 pub use ports::{
-    ArkEvent, CacheService, CheckpointRepository, EventPublisher, LoggingEventPublisher,
-    NoopCheckpointRepository, RoundRepository, SignerService, TxBuilder, VtxoRepository,
-    WalletService,
+    ArkEvent, CacheService, CheckpointRepository, EventPublisher, ForfeitRepository,
+    LoggingEventPublisher, NoopCheckpointRepository, NoopForfeitRepository, RoundRepository,
+    SignerService, TxBuilder, VtxoRepository, WalletService,
 };
 pub use round_loop::spawn_round_loop;
 pub use round_scheduler::{RoundScheduler, SchedulerCommand, SchedulerConfig, SchedulerState};
