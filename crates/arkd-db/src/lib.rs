@@ -18,12 +18,22 @@ use thiserror::Error;
 pub mod cache;
 pub mod config;
 pub mod migrations;
+#[cfg(feature = "sqlite")]
 pub mod pool;
+#[cfg(feature = "postgres")]
+pub mod pool_postgres;
 pub mod repos;
 
 pub use config::DatabaseConfig;
+#[cfg(feature = "sqlite")]
 pub use pool::Database;
+#[cfg(feature = "sqlite")]
 pub use repos::SqliteOffchainTxRepository;
+
+#[cfg(feature = "postgres")]
+pub use pool_postgres::{create_postgres_pool, run_postgres_migrations};
+#[cfg(feature = "postgres")]
+pub use repos::{PgOffchainTxRepository, PgRoundRepository, PgVtxoRepository};
 
 /// Database-specific errors
 #[derive(Error, Debug)]

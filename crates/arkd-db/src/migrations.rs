@@ -11,6 +11,7 @@ use tracing::info;
 /// Note: In practice, migrations are run automatically by `Database::connect()`
 /// when `run_migrations` is true in the config. This function is provided for
 /// manual/CLI use.
+#[cfg(feature = "sqlite")]
 pub async fn run_migrations(database_url: &str) -> DatabaseResult<()> {
     info!(url = %database_url, "Running database migrations");
     // Migrations are applied by Database::run_migrations() using the embedded SQL.
@@ -18,6 +19,13 @@ pub async fn run_migrations(database_url: &str) -> DatabaseResult<()> {
     let db = crate::Database::connect(crate::DatabaseConfig::sqlite(database_url)).await?;
     db.run_migrations().await?;
     Ok(())
+}
+
+/// Run all pending PostgreSQL migrations against the given pool
+#[cfg(feature = "postgres")]
+pub async fn run_pg_migrations(pool: &sqlx::PgPool) -> DatabaseResult<()> {
+    info!("Running PostgreSQL migrations via migrations module");
+    crate::pool_postgres::run_postgres_migrations(pool).await
 }
 
 /// Check migration status

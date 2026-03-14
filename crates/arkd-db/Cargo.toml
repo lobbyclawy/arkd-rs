@@ -5,9 +5,14 @@ edition = "2021"
 description = "Database layer for arkd-rs (PostgreSQL, SQLite, Redis)"
 license = "MIT"
 
+[features]
+default = ["sqlite"]
+sqlite = ["sqlx/sqlite"]
+postgres = ["sqlx/postgres"]
+
 [dependencies]
 # Database
-sqlx = { version = "0.8", features = ["postgres", "sqlite", "runtime-tokio", "macros", "uuid", "chrono"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "macros", "uuid", "chrono"] }
 
 # Cache
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
