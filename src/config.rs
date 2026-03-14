@@ -20,6 +20,7 @@ pub struct FileConfig {
     pub bitcoin: BitcoinSection,
     #[serde(default)]
     pub ark: ArkSection,
+    #[allow(dead_code)] // Will be used when store initialization branches on mode
     #[serde(default)]
     pub deployment: DeploymentSection,
 }
