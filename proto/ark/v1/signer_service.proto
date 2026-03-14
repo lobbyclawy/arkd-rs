@@ -1,0 +1,40 @@
+syntax = "proto3";
+package ark.v1;
+
+option go_package = "github.com/arkade-os/arkd/api/gen/ark/v1";
+
+// SignerService provides remote signing operations for ASP key isolation.
+// The signer process holds the private key; the main arkd process calls it.
+service SignerService {
+  rpc SignTransaction(SignTransactionRequest) returns (SignTransactionResponse);
+  rpc SignMessage(SignMessageRequest) returns (SignMessageResponse);
+  rpc GetPublicKey(GetPublicKeyRequest) returns (GetPublicKeyResponse);
+  rpc AggregateKeys(AggregateKeysRequest) returns (AggregateKeysResponse);
+}
+
+message SignTransactionRequest {
+  bytes psbt = 1;                      // PSBT bytes to sign
+  repeated uint32 input_indexes = 2;   // Which inputs to sign
+}
+message SignTransactionResponse {
+  bytes signed_psbt = 1;
+}
+
+message SignMessageRequest {
+  bytes message = 1;                   // Raw message bytes (32-byte hash recommended)
+}
+message SignMessageResponse {
+  bytes signature = 1;                 // 64-byte Schnorr signature
+}
+
+message GetPublicKeyRequest {}
+message GetPublicKeyResponse {
+  bytes pubkey = 1;                    // 33-byte compressed public key
+}
+
+message AggregateKeysRequest {
+  repeated bytes pubkeys = 1;          // Public keys to aggregate (MuSig2)
+}
+message AggregateKeysResponse {
+  bytes aggregated_pubkey = 1;
+}
