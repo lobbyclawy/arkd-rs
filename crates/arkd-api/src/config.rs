@@ -62,6 +62,11 @@ pub struct ServerConfig {
     #[serde(default)]
     pub asp_key_hex: Option<String>,
 
+    /// List of deprecated ASP key hex strings that are still accepted for
+    /// verification (e.g. after a key rotation). Empty by default.
+    #[serde(default)]
+    pub deprecated_signer_keys: Vec<String>,
+
     /// Use block-height-based round scheduling instead of time-based.
     #[serde(default)]
     pub allow_csv_block_type: bool,
@@ -132,6 +137,7 @@ impl Default for ServerConfig {
             remote_signer_url: None,
             esplora_url: None,
             asp_key_hex: None,
+            deprecated_signer_keys: Vec::new(),
             allow_csv_block_type: false,
             round_interval_blocks: 6,
             round_duration_secs: 30,
@@ -164,6 +170,12 @@ mod tests {
     fn test_config_asp_key_defaults_to_none() {
         let config = ServerConfig::default();
         assert!(config.asp_key_hex.is_none());
+    }
+
+    #[test]
+    fn test_config_deprecated_keys_default_empty() {
+        let config = ServerConfig::default();
+        assert!(config.deprecated_signer_keys.is_empty());
     }
 
     #[test]

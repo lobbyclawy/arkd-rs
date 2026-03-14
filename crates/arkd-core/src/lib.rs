@@ -18,6 +18,7 @@ pub mod cosigning;
 pub mod domain;
 pub mod error;
 pub mod metrics;
+pub mod multi_signer;
 pub mod ports;
 pub mod round_loop;
 pub mod round_scheduler;
@@ -41,6 +42,7 @@ pub use domain::{
     VtxoOutpoint,
 };
 pub use error::{ArkError, ArkResult};
+pub use multi_signer::MultiSigner;
 pub use ports::{
     ArkEvent, CacheService, EventPublisher, RoundRepository, SignerService, TxBuilder,
     VtxoRepository, WalletService,

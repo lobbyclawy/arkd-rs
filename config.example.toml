@@ -44,6 +44,10 @@ enable_logging = true
 # Generate with: openssl rand -hex 32
 # asp_key_hex = "e8f32e723decf4051aefac8e2c93c9c5b214313817cdb01a1494b917c8436b35"
 
+# Deprecated ASP signer keys — hex public keys of previous ASP signers
+# that should still be accepted for verification after a key rotation.
+# deprecated_signer_keys = ["old-hex-key-1", "old-hex-key-2"]
+
 # =============================================================================
 # Bitcoin Configuration
 # =============================================================================
