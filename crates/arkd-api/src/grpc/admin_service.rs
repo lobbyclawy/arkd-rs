@@ -144,12 +144,14 @@ impl AdminServiceTrait for AdminGrpcService {
         let req = request.into_inner();
         info!("AdminService::UpdateIntentFees called");
 
-        let fees = req
+        let _fees = req
             .fees
             .ok_or_else(|| Status::invalid_argument("fees config is required"))?;
 
-        // Stub: echo back the requested config
-        Ok(Response::new(UpdateIntentFeesResponse { fees: Some(fees) }))
+        // Stub: requires fee persistence — returning UNIMPLEMENTED for consistency
+        Err(Status::unimplemented(
+            "UpdateIntentFees not yet implemented — requires fee persistence",
+        ))
     }
 
     async fn clear_intent_fees(
@@ -251,14 +253,14 @@ impl AdminServiceTrait for AdminGrpcService {
         let req = request.into_inner();
         info!("AdminService::UpdateScheduledSessionConfig called");
 
-        let config = req
+        let _config = req
             .config
             .ok_or_else(|| Status::invalid_argument("config is required"))?;
 
-        // Stub: echo back the requested config
-        Ok(Response::new(UpdateScheduledSessionConfigResponse {
-            config: Some(config),
-        }))
+        // Stub: requires config persistence — returning UNIMPLEMENTED for consistency
+        Err(Status::unimplemented(
+            "UpdateScheduledSessionConfig not yet implemented — requires config persistence",
+        ))
     }
 
     async fn clear_scheduled_session_config(
