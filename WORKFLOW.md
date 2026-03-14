@@ -26,10 +26,10 @@
    - **"Deferred to future issue" does NOT count as addressing a comment** — if something is truly deferred, create a GitHub issue for it, link it in the reply, then resolve
    - Do NOT merge while any comment is unresolved
    - After pushing fixes: re-run CI, wait for green, then merge
-10. **Merge** — **NEVER merge a PR yourself.** Only `andreacarotti99` (Andrea) can approve and merge.
-    - All CI checks must be green ✅ before Andrea will merge
-    - Every inline review comment must be replied to and resolved ✅
-    - Wait for Andrea's approval — do not call the merge API
+10. **Merge** — squash-merge ONLY when:
+    - All CI checks are green ✅
+    - Every inline review comment has been replied to and resolved ✅
+    - **NEVER bypass branch protection or force-push to merge** — if CI is red, fix the code first
 11. **Close issue** — mark the GitHub issue as closed
 12. **Update roadmap** — tick the issue in Issue #13, update progress percentages
 13. **Update README** — tick any phase checkboxes if the issue completes a phase
