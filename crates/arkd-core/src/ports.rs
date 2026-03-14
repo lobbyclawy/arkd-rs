@@ -268,6 +268,34 @@ pub trait LiveStore: Send + Sync {
     async fn list_partial_sigs(&self, session_id: &str) -> ArkResult<Vec<String>>;
 }
 
+/// Notification when a watched script is spent on-chain.
+#[derive(Debug, Clone)]
+pub struct ScriptSpentEvent {
+    /// The watched script pubkey bytes.
+    pub script_pubkey: Vec<u8>,
+    /// Transaction ID that spent the script.
+    pub spending_txid: String,
+    /// Block height where the spend was confirmed.
+    pub block_height: u32,
+}
+
+/// Blockchain scanner for watching on-chain VTXO spends.
+///
+/// Implementations monitor the blockchain for transactions that spend
+/// watched script pubkeys, enabling detection of unilateral exits and
+/// forfeit transactions.
+#[async_trait]
+pub trait BlockchainScanner: Send + Sync {
+    /// Start watching a script pubkey for on-chain spends.
+    async fn watch_script(&self, script_pubkey: Vec<u8>) -> ArkResult<()>;
+    /// Stop watching a script pubkey.
+    async fn unwatch_script(&self, script_pubkey: &[u8]) -> ArkResult<()>;
+    /// Get a receiver for script-spent notifications.
+    fn notification_channel(&self) -> tokio::sync::broadcast::Receiver<ScriptSpentEvent>;
+    /// Get current chain tip height.
+    async fn tip_height(&self) -> ArkResult<u32>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -282,5 +310,6 @@ mod tests {
         _assert_object_safe::<dyn CacheService>();
         _assert_object_safe::<dyn OffchainTxRepository>();
         _assert_object_safe::<dyn LiveStore>();
+        _assert_object_safe::<dyn BlockchainScanner>();
     }
 }

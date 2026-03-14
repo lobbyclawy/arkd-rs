@@ -34,6 +34,11 @@ enable_logging = true
 # When unset (default), local signing is used.
 # remote_signer_url = "http://127.0.0.1:7072"
 
+# Esplora API endpoint for blockchain scanning (on-chain VTXO watching).
+# When set, the server polls Esplora for script spends.
+# When unset (default), no on-chain monitoring is performed.
+# esplora_url = "https://blockstream.info/testnet/api"
+
 # =============================================================================
 # Bitcoin Configuration
 # =============================================================================

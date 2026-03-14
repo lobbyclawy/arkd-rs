@@ -49,6 +49,12 @@ pub struct ServerConfig {
     /// If `None`, local signing is used. Example: `"http://127.0.0.1:7072"`
     #[serde(default)]
     pub remote_signer_url: Option<String>,
+
+    /// Esplora API URL for blockchain scanning.
+    /// If `None`, a no-op scanner is used (no on-chain monitoring).
+    /// Example: `"https://blockstream.info/testnet/api"`
+    #[serde(default)]
+    pub esplora_url: Option<String>,
 }
 
 fn default_max_connections() -> usize {
@@ -99,6 +105,7 @@ impl Default for ServerConfig {
             admin_token: None,
             require_auth: false, // Dev mode by default
             remote_signer_url: None,
+            esplora_url: None,
         }
     }
 }

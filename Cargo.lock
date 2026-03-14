@@ -240,6 +240,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "arkd-scanner"
+version = "0.1.0"
+dependencies = [
+ "arkd-core",
+ "async-trait",
+ "bitcoin",
+ "hex",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "arkd-wallet"
 version = "0.1.0"
 dependencies = [
