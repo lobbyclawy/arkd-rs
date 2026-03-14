@@ -104,7 +104,9 @@ impl ServerConfig {
     }
 }
 
-fn default_round_interval_blocks() -> u32 { 6 }
+fn default_round_interval_blocks() -> u32 {
+    6
+}
 
 impl Default for ServerConfig {
     fn default() -> Self {
