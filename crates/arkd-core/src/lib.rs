@@ -38,12 +38,12 @@ pub use domain::{
     BoardingRequest, BoardingStatus, BoardingTransaction, CollaborativeExitRequest, Exit,
     ExitError, ExitStatus, ExitSummary, ExitType, FlatTxTree, ForfeitTx, Intent, Receiver, Round,
     RoundConfig, RoundStage, RoundStats, Stage, TxTreeNode, UnilateralExitRequest, Vtxo, VtxoId,
-    VtxoOutpoint,
+    VtxoOutpoint, DEFAULT_EVENT_CHANNEL_CAPACITY,
 };
 pub use error::{ArkError, ArkResult};
 pub use ports::{
-    ArkEvent, CacheService, EventPublisher, RoundRepository, SignerService, TxBuilder,
-    VtxoRepository, WalletService,
+    ArkEvent, CacheService, EventPublisher, LoggingEventPublisher, RoundRepository, SignerService,
+    TxBuilder, VtxoRepository, WalletService,
 };
 pub use round_loop::spawn_round_loop;
 pub use round_scheduler::{RoundScheduler, SchedulerCommand, SchedulerConfig, SchedulerState};
