@@ -20,6 +20,7 @@ pub mod error;
 pub mod metrics;
 pub mod ports;
 pub mod round_scheduler;
+pub mod signer;
 pub mod sweep;
 pub mod validation;
 
@@ -44,6 +45,7 @@ pub use ports::{
     VtxoRepository, WalletService,
 };
 pub use round_scheduler::{RoundScheduler, SchedulerCommand, SchedulerConfig, SchedulerState};
+pub use signer::LocalSigner;
 pub use sweep::{SweepBatch, SweepConfig, SweepService, SweepStats};
 
 /// Crate version
