@@ -48,6 +48,8 @@ pub const DEFAULT_PUBLIC_UNILATERAL_EXIT_DELAY: u32 = 512;
 pub const DEFAULT_BOARDING_EXIT_DELAY: u32 = 512;
 /// Default max commitment tx weight
 pub const DEFAULT_MAX_TX_WEIGHT: u64 = 400_000;
+/// Default event channel capacity for broadcast subscribers
+pub const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
 
 #[cfg(test)]
 mod tests {

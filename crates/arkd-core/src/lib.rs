@@ -38,7 +38,7 @@ pub use domain::{
     BoardingRequest, BoardingStatus, BoardingTransaction, CollaborativeExitRequest, Exit,
     ExitError, ExitStatus, ExitSummary, ExitType, FlatTxTree, ForfeitTx, Intent, Receiver, Round,
     RoundConfig, RoundStage, RoundStats, Stage, TxTreeNode, UnilateralExitRequest, Vtxo, VtxoId,
-    VtxoOutpoint,
+    VtxoOutpoint, DEFAULT_EVENT_CHANNEL_CAPACITY,
 };
 pub use error::{ArkError, ArkResult};
 pub use ports::{

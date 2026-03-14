@@ -42,7 +42,9 @@ async fn main() -> Result<()> {
         Arc::new(StubVtxoRepo),
         Arc::new(StubTxBuilder),
         Arc::new(StubCache),
-        Arc::new(arkd_core::LoggingEventPublisher::new(256)),
+        Arc::new(arkd_core::LoggingEventPublisher::new(
+            arkd_core::DEFAULT_EVENT_CHANNEL_CAPACITY,
+        )),
         arkd_core::ArkConfig::default(),
     ));
 
