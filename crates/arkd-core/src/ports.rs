@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use bitcoin::XOnlyPublicKey;
 
 use crate::domain::{
-    AssetRecord, CheckpointTx, FlatTxTree, ForfeitRecord, Intent, OffchainTx, OffchainTxStage,
-    Round, Vtxo, VtxoOutpoint,
+    AssetRecord, BoardingTransaction, CheckpointTx, FlatTxTree, ForfeitRecord, Intent, OffchainTx,
+    OffchainTxStage, Round, Vtxo, VtxoOutpoint,
 };
 use crate::error::ArkResult;
 
@@ -122,6 +122,33 @@ pub struct BoardingInput {
     pub outpoint: VtxoOutpoint,
     /// Amount
     pub amount: u64,
+}
+
+/// Repository for persisting and querying boarding transactions.
+#[async_trait]
+pub trait BoardingRepository: Send + Sync {
+    /// Store a new boarding transaction.
+    async fn register_boarding(&self, tx: BoardingTransaction) -> ArkResult<()>;
+    /// Get all funded (pending) boarding transactions not yet included in a round.
+    async fn get_pending_boarding(&self) -> ArkResult<Vec<BoardingTransaction>>;
+    /// Mark a boarding transaction as claimed (included in a round).
+    async fn mark_claimed(&self, id: &str) -> ArkResult<()>;
+}
+
+/// No-op boarding repository for dev/test environments.
+pub struct NoopBoardingRepository;
+
+#[async_trait]
+impl BoardingRepository for NoopBoardingRepository {
+    async fn register_boarding(&self, _tx: BoardingTransaction) -> ArkResult<()> {
+        Ok(())
+    }
+    async fn get_pending_boarding(&self) -> ArkResult<Vec<BoardingTransaction>> {
+        Ok(vec![])
+    }
+    async fn mark_claimed(&self, _id: &str) -> ArkResult<()> {
+        Ok(())
+    }
 }
 
 /// Validated forfeit tx
@@ -409,6 +436,7 @@ mod tests {
         _assert_object_safe::<dyn BlockchainScanner>();
         _assert_object_safe::<dyn FeeManager>();
         _assert_object_safe::<dyn AssetRepository>();
+        _assert_object_safe::<dyn BoardingRepository>();
         _assert_object_safe::<dyn AdminPort>();
         _assert_object_safe::<dyn ForfeitRepository>();
     }

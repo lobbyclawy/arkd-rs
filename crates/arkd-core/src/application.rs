@@ -6,8 +6,8 @@ use tracing::{info, instrument};
 
 use crate::domain::ForfeitRecord;
 use crate::domain::{
-    CollaborativeExitRequest, Exit, ExitSummary, ExitType, Intent, Round, RoundStage,
-    UnilateralExitRequest, Vtxo, VtxoOutpoint, DEFAULT_BOARDING_EXIT_DELAY,
+    BoardingTransaction, CollaborativeExitRequest, Exit, ExitSummary, ExitType, Intent, Round,
+    RoundStage, UnilateralExitRequest, Vtxo, VtxoOutpoint, DEFAULT_BOARDING_EXIT_DELAY,
     DEFAULT_CHECKPOINT_EXIT_DELAY, DEFAULT_MAX_INTENTS, DEFAULT_MAX_TX_WEIGHT, DEFAULT_MIN_INTENTS,
     DEFAULT_PUBLIC_UNILATERAL_EXIT_DELAY, DEFAULT_SESSION_DURATION_SECS,
     DEFAULT_UNILATERAL_EXIT_DELAY, DEFAULT_UTXO_MAX_AMOUNT, DEFAULT_UTXO_MIN_AMOUNT,
@@ -15,9 +15,9 @@ use crate::domain::{
 };
 use crate::error::{ArkError, ArkResult};
 use crate::ports::{
-    ArkEvent, CacheService, CheckpointRepository, EventPublisher, ForfeitRepository,
-    NoopCheckpointRepository, NoopForfeitRepository, SignerService, TxBuilder, VtxoRepository,
-    WalletService,
+    ArkEvent, BoardingRepository, CacheService, CheckpointRepository, EventPublisher,
+    ForfeitRepository, NoopBoardingRepository, NoopCheckpointRepository, NoopForfeitRepository,
+    SignerService, TxBuilder, VtxoRepository, WalletService,
 };
 
 /// ASP configuration
@@ -107,6 +107,7 @@ pub struct ArkService {
     events: Arc<dyn EventPublisher>,
     checkpoint_repo: Arc<dyn CheckpointRepository>,
     forfeit_repo: Arc<dyn ForfeitRepository>,
+    boarding_repo: Arc<dyn BoardingRepository>,
     config: ArkConfig,
     current_round: RwLock<Option<Round>>,
     /// Active exits indexed by ID
@@ -134,6 +135,7 @@ impl ArkService {
             events,
             checkpoint_repo: Arc::new(NoopCheckpointRepository),
             forfeit_repo: Arc::new(NoopForfeitRepository),
+            boarding_repo: Arc::new(NoopBoardingRepository),
             config,
             current_round: RwLock::new(None),
             exits: RwLock::new(std::collections::HashMap::new()),
@@ -241,11 +243,29 @@ impl ArkService {
             round.start_finalization().map_err(ArkError::Internal)?;
         }
 
+        // Collect pending boarding inputs
+        let boarding_txs = self.claim_boarding_inputs().await.unwrap_or_default();
+        let boarding_inputs: Vec<crate::ports::BoardingInput> = boarding_txs
+            .iter()
+            .filter_map(|bt| {
+                let txid = bt.funding_txid.as_ref()?;
+                let vout = bt.funding_vout?;
+                Some(crate::ports::BoardingInput {
+                    outpoint: VtxoOutpoint::new(txid.to_string(), vout),
+                    amount: bt.amount.to_sat(),
+                })
+            })
+            .collect();
+        info!(
+            boarding_count = boarding_inputs.len(),
+            "Including boarding inputs in round"
+        );
+
         // Build commitment transaction
         let signer_pubkey = self.signer.get_pubkey().await?;
         let result = self
             .tx_builder
-            .build_commitment_tx(&signer_pubkey, &intents, &[])
+            .build_commitment_tx(&signer_pubkey, &intents, &boarding_inputs)
             .await?;
 
         // Store results on the round
@@ -498,6 +518,48 @@ impl ArkService {
     /// Get all forfeit records for a given round.
     pub async fn get_round_forfeits(&self, round_id: &str) -> ArkResult<Vec<ForfeitRecord>> {
         self.forfeit_repo.list_by_round(round_id).await
+    }
+
+    // ── Boarding ────────────────────────────────────────────────────
+
+    /// Register a new boarding transaction from a user.
+    ///
+    /// Creates a `BoardingTransaction` for the given recipient and amount,
+    /// persists it via the `BoardingRepository`.  The transaction will be
+    /// claimed during the next round finalization once funded.
+    #[instrument(skip(self))]
+    pub async fn register_boarding(
+        &self,
+        recipient_pubkey: bitcoin::XOnlyPublicKey,
+        amount: bitcoin::Amount,
+    ) -> ArkResult<BoardingTransaction> {
+        let sats = amount.to_sat();
+
+        // Validate amount against boarding limits
+        if sats < self.config.utxo_min_amount {
+            return Err(ArkError::AmountTooSmall {
+                amount: sats,
+                minimum: self.config.utxo_min_amount,
+            });
+        }
+        if self.config.utxo_max_amount > 0 && sats > self.config.utxo_max_amount {
+            return Err(ArkError::Internal(format!(
+                "Boarding amount {} exceeds maximum {}",
+                sats, self.config.utxo_max_amount
+            )));
+        }
+
+        let tx = BoardingTransaction::new(recipient_pubkey, amount);
+        self.boarding_repo.register_boarding(tx.clone()).await?;
+        info!(boarding_id = %tx.id, amount = sats, "Boarding registered");
+        Ok(tx)
+    }
+
+    /// Claim all pending (funded) boarding transactions for inclusion in the current round.
+    pub async fn claim_boarding_inputs(&self) -> ArkResult<Vec<BoardingTransaction>> {
+        let pending = self.boarding_repo.get_pending_boarding().await?;
+        info!(count = pending.len(), "Claiming boarding inputs for round");
+        Ok(pending)
     }
 }
 
@@ -840,5 +902,45 @@ mod tests {
         // NoopForfeitRepository returns empty vec
         let forfeits = svc.get_round_forfeits("nonexistent").await.unwrap();
         assert!(forfeits.is_empty());
+    }
+
+    // ── Boarding tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_register_boarding_returns_transaction() {
+        let events = Arc::new(RecordingEvents::new());
+        let svc = make_service(events);
+        let pubkey = XOnlyPublicKey::from_slice(&[2u8; 32]).unwrap();
+        let result = svc
+            .register_boarding(pubkey, bitcoin::Amount::from_sat(50_000))
+            .await
+            .unwrap();
+        assert_eq!(result.amount, bitcoin::Amount::from_sat(50_000));
+        assert_eq!(
+            result.status,
+            crate::domain::BoardingStatus::AwaitingFunding
+        );
+    }
+
+    #[tokio::test]
+    async fn test_register_boarding_rejects_below_minimum() {
+        let events = Arc::new(RecordingEvents::new());
+        let svc = make_service(events);
+        let pubkey = XOnlyPublicKey::from_slice(&[2u8; 32]).unwrap();
+        // Default utxo_min_amount is 1_000
+        let err = svc
+            .register_boarding(pubkey, bitcoin::Amount::from_sat(100))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("too small") || err.to_string().contains("Amount"));
+    }
+
+    #[tokio::test]
+    async fn test_claim_boarding_inputs_empty() {
+        let events = Arc::new(RecordingEvents::new());
+        let svc = make_service(events);
+        // NoopBoardingRepository returns empty list
+        let pending = svc.claim_boarding_inputs().await.unwrap();
+        assert!(pending.is_empty());
     }
 }
