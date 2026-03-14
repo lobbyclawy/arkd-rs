@@ -33,3 +33,4 @@ jobs:
           format: false
           breaking: true
           breaking_against: 'https://github.com/${{ github.repository }}.git#branch=main,subdir=proto'
+          pr_comment: false
