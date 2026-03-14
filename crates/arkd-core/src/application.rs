@@ -248,6 +248,7 @@ impl ArkService {
                 round_id: round.id.clone(),
                 commitment_tx: round.commitment_tx.clone(),
                 timestamp: round.ending_timestamp,
+                vtxo_count: round.vtxo_tree.len() as u32,
             })
             .await?;
 
