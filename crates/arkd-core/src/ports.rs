@@ -419,6 +419,37 @@ impl ForfeitRepository for NoopForfeitRepository {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Fraud detection
+// ---------------------------------------------------------------------------
+
+/// Detects and reacts to fraud (e.g. VTXO double-spend across rounds).
+#[async_trait]
+pub trait FraudDetector: Send + Sync {
+    /// Check if a VTXO has been double-spent (used in two rounds).
+    async fn detect_double_spend(&self, vtxo_id: &str, round_id: &str) -> ArkResult<bool>;
+    /// React to detected fraud: broadcast forfeit tx.
+    async fn react_to_fraud(&self, vtxo_id: &str, forfeit_tx_hex: &str) -> ArkResult<()>;
+}
+
+/// No-op fraud detector for dev/test environments.
+pub struct NoopFraudDetector;
+
+#[async_trait]
+impl FraudDetector for NoopFraudDetector {
+    async fn detect_double_spend(&self, vtxo_id: &str, _round_id: &str) -> ArkResult<bool> {
+        tracing::debug!(vtxo_id, "NoopFraudDetector: skipping double-spend check");
+        Ok(false)
+    }
+    async fn react_to_fraud(&self, vtxo_id: &str, _forfeit_tx_hex: &str) -> ArkResult<()> {
+        tracing::warn!(
+            vtxo_id,
+            "NoopFraudDetector: would broadcast forfeit tx (stub)"
+        );
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +475,7 @@ mod tests {
         _assert_object_safe::<dyn ConfirmationStore>();
         _assert_object_safe::<dyn SigningSessionStore>();
         _assert_object_safe::<dyn CurrentRoundStore>();
+        _assert_object_safe::<dyn FraudDetector>();
     }
 
     #[tokio::test]
