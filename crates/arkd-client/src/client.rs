@@ -1,57 +1,191 @@
+//! ArkClient — typed gRPC client for arkd-rs server.
+
 use crate::error::{ClientError, ClientResult};
-use crate::types::{Intent, ServerInfo, TxResult, Vtxo};
+use crate::types::{RoundInfo, RoundSummary, ServerInfo, Vtxo};
+use arkd_api::proto::ark_v1::{
+    ark_service_client::ArkServiceClient, GetInfoRequest, GetRoundRequest, GetVtxosRequest,
+    ListRoundsRequest,
+};
+use tonic::transport::Channel;
 
 /// Client for communicating with an arkd-rs server.
 pub struct ArkClient {
     server_url: String,
+    client: Option<ArkServiceClient<Channel>>,
 }
 
 impl ArkClient {
-    /// Create a new client connected to `server_url` (e.g. `http://localhost:50051`).
+    /// Create a new client for `server_url` (e.g. `http://localhost:50051`).
     pub fn new(server_url: impl Into<String>) -> Self {
         Self {
             server_url: server_url.into(),
+            client: None,
         }
+    }
+
+    /// Connect to the server. Call this before making RPC calls.
+    pub async fn connect(&mut self) -> ClientResult<()> {
+        let channel = Channel::from_shared(self.server_url.clone())
+            .map_err(|e| ClientError::Connection(format!("Invalid URL: {}", e)))?
+            .connect()
+            .await
+            .map_err(|e| ClientError::Connection(format!("Failed to connect: {}", e)))?;
+
+        self.client = Some(ArkServiceClient::new(channel));
+        Ok(())
+    }
+
+    /// Check if connected.
+    pub fn is_connected(&self) -> bool {
+        self.client.is_some()
     }
 
     pub fn server_url(&self) -> &str {
         &self.server_url
     }
 
-    /// Get server info. (stub — real gRPC call once proto client is generated)
-    pub async fn get_info(&self) -> ClientResult<ServerInfo> {
-        // TODO: real tonic client call
-        // For now return a stub to show the API shape
-        Err(ClientError::Connection(format!(
-            "gRPC client not yet wired to {}: use grpcurl for now",
-            self.server_url
-        )))
+    fn require_client(&mut self) -> ClientResult<&mut ArkServiceClient<Channel>> {
+        self.client.as_mut().ok_or_else(|| {
+            ClientError::Connection("Not connected. Call connect() first.".into())
+        })
+    }
+
+    /// Get server info via GetInfo RPC.
+    pub async fn get_info(&mut self) -> ClientResult<ServerInfo> {
+        let client = self.require_client()?;
+
+        let response = client
+            .get_info(GetInfoRequest {})
+            .await
+            .map_err(|e| ClientError::Rpc(format!("GetInfo failed: {}", e)))?;
+
+        let info = response.into_inner();
+        Ok(ServerInfo {
+            pubkey: info.signer_pubkey,
+            forfeit_pubkey: info.forfeit_pubkey,
+            network: info.network,
+            session_duration: info.session_duration as u32,
+            unilateral_exit_delay: info.unilateral_exit_delay as u32,
+            version: info.version,
+            dust: info.dust as u64,
+            vtxo_min_amount: info.vtxo_min_amount as u64,
+            vtxo_max_amount: info.vtxo_max_amount as u64,
+        })
     }
 
     /// List VTXOs owned by `pubkey`.
-    pub async fn list_vtxos(&self, _pubkey: &str) -> ClientResult<Vec<Vtxo>> {
-        Err(ClientError::Connection("gRPC client not yet wired".into()))
+    pub async fn list_vtxos(&mut self, pubkey: &str) -> ClientResult<Vec<Vtxo>> {
+        let client = self.require_client()?;
+
+        let response = client
+            .get_vtxos(GetVtxosRequest {
+                pubkey: pubkey.to_string(),
+            })
+            .await
+            .map_err(|e| ClientError::Rpc(format!("GetVtxos failed: {}", e)))?;
+
+        let resp = response.into_inner();
+        let mut vtxos = Vec::new();
+
+        for v in resp.spendable {
+            let outpoint = v.outpoint.unwrap_or_default();
+            vtxos.push(Vtxo {
+                id: format!("{}:{}", outpoint.txid, outpoint.vout),
+                txid: outpoint.txid,
+                vout: outpoint.vout,
+                amount: v.amount,
+                script: v.script,
+                created_at: v.created_at,
+                expires_at: v.expires_at,
+                is_spent: false,
+                is_swept: v.is_swept,
+                is_unrolled: v.is_unrolled,
+                spent_by: v.spent_by,
+                ark_txid: v.ark_txid,
+            });
+        }
+
+        for v in resp.spent {
+            let outpoint = v.outpoint.unwrap_or_default();
+            vtxos.push(Vtxo {
+                id: format!("{}:{}", outpoint.txid, outpoint.vout),
+                txid: outpoint.txid,
+                vout: outpoint.vout,
+                amount: v.amount,
+                script: v.script,
+                created_at: v.created_at,
+                expires_at: v.expires_at,
+                is_spent: true,
+                is_swept: v.is_swept,
+                is_unrolled: v.is_unrolled,
+                spent_by: v.spent_by,
+                ark_txid: v.ark_txid,
+            });
+        }
+
+        Ok(vtxos)
     }
 
-    /// Register an intent to receive VTXOs in the next round.
-    pub async fn register_intent(&self, _intent: Intent) -> ClientResult<String> {
-        Err(ClientError::Connection("gRPC client not yet wired".into()))
+    /// List rounds with optional pagination.
+    pub async fn list_rounds(
+        &mut self,
+        limit: Option<u32>,
+        offset: Option<u32>,
+    ) -> ClientResult<Vec<RoundSummary>> {
+        let client = self.require_client()?;
+
+        let response = client
+            .list_rounds(ListRoundsRequest {
+                after: 0,
+                before: 0,
+                limit: limit.unwrap_or(20),
+                offset: offset.unwrap_or(0),
+            })
+            .await
+            .map_err(|e| ClientError::Rpc(format!("ListRounds failed: {}", e)))?;
+
+        let resp = response.into_inner();
+        let rounds = resp
+            .rounds
+            .into_iter()
+            .map(|r| RoundSummary {
+                id: r.id,
+                starting_timestamp: r.starting_timestamp,
+                ending_timestamp: r.ending_timestamp,
+                stage: r.stage,
+                commitment_txid: r.commitment_txid,
+                failed: r.failed,
+            })
+            .collect();
+
+        Ok(rounds)
     }
 
-    /// Submit an offchain transaction.
-    pub async fn submit_tx(&self, _tx_hex: &str) -> ClientResult<TxResult> {
-        Err(ClientError::Connection("gRPC client not yet wired".into()))
-    }
+    /// Get details for a specific round.
+    pub async fn get_round(&mut self, round_id: &str) -> ClientResult<RoundInfo> {
+        let client = self.require_client()?;
 
-    /// Board: register a new VTXO from an on-chain output.
-    pub async fn board(
-        &self,
-        _txid: &str,
-        _vout: u32,
-        _amount: u64,
-        _pubkey: &str,
-    ) -> ClientResult<String> {
-        Err(ClientError::Connection("gRPC client not yet wired".into()))
+        let response = client
+            .get_round(GetRoundRequest {
+                round_id: round_id.to_string(),
+            })
+            .await
+            .map_err(|e| ClientError::Rpc(format!("GetRound failed: {}", e)))?;
+
+        let resp = response.into_inner();
+        let round = resp
+            .round
+            .ok_or_else(|| ClientError::InvalidResponse("Round not found".into()))?;
+
+        Ok(RoundInfo {
+            id: round.id,
+            starting_timestamp: round.starting_timestamp,
+            ending_timestamp: round.ending_timestamp,
+            stage: round.stage,
+            commitment_txid: round.commitment_txid,
+            failed: round.failed,
+            intent_count: round.intent_count,
+        })
     }
 }
 
@@ -63,6 +197,7 @@ mod tests {
     fn test_client_new() {
         let c = ArkClient::new("http://localhost:50051");
         assert_eq!(c.server_url(), "http://localhost:50051");
+        assert!(!c.is_connected());
     }
 
     #[test]
@@ -72,28 +207,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_info_returns_error_when_not_connected() {
-        let c = ArkClient::new("http://localhost:50051");
-        assert!(c.get_info().await.is_err());
+    async fn test_get_info_fails_when_not_connected() {
+        let mut c = ArkClient::new("http://localhost:50051");
+        let result = c.get_info().await;
+        assert!(result.is_err());
+        if let Err(ClientError::Connection(msg)) = result {
+            assert!(msg.contains("Not connected"));
+        } else {
+            panic!("Expected Connection error");
+        }
     }
 
     #[tokio::test]
-    async fn test_list_vtxos_returns_error_when_not_connected() {
-        let c = ArkClient::new("http://localhost:50051");
-        assert!(c.list_vtxos("pubkey123").await.is_err());
-    }
-
-    #[test]
-    fn test_server_info_serde() {
-        let info = crate::types::ServerInfo {
-            pubkey: "abc".into(),
-            network: "regtest".into(),
-            round_lifetime: 512,
-            unilateral_exit_delay: 1024,
-            version: "0.1.0".into(),
-        };
-        let j = serde_json::to_string(&info).unwrap();
-        let info2: crate::types::ServerInfo = serde_json::from_str(&j).unwrap();
-        assert_eq!(info2.network, "regtest");
+    async fn test_list_vtxos_fails_when_not_connected() {
+        let mut c = ArkClient::new("http://localhost:50051");
+        let result = c.list_vtxos("pubkey123").await;
+        assert!(result.is_err());
     }
 }

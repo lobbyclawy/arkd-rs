@@ -2,8 +2,10 @@
 name = "arkd-client"
 version = "0.1.0"
 edition = "2021"
+description = "gRPC client library for arkd-rs"
 
 [dependencies]
+arkd-api = { path = "../arkd-api" }
 tonic = { version = "0.11", features = ["transport"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
