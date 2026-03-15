@@ -439,6 +439,11 @@ mod tests {
         _assert_object_safe::<dyn BoardingRepository>();
         _assert_object_safe::<dyn AdminPort>();
         _assert_object_safe::<dyn ForfeitRepository>();
+        _assert_object_safe::<dyn IntentsQueue>();
+        _assert_object_safe::<dyn ForfeitTxsStore>();
+        _assert_object_safe::<dyn ConfirmationStore>();
+        _assert_object_safe::<dyn SigningSessionStore>();
+        _assert_object_safe::<dyn CurrentRoundStore>();
     }
 
     #[tokio::test]
@@ -569,4 +574,87 @@ impl CheckpointRepository for NoopCheckpointRepository {
     async fn list_pending(&self) -> ArkResult<Vec<CheckpointTx>> {
         Ok(vec![])
     }
+}
+
+// ---------------------------------------------------------------------------
+// LiveStore: higher-level ephemeral round-state components
+// ---------------------------------------------------------------------------
+
+/// FIFO queue of registered intents for the current round.
+#[async_trait]
+pub trait IntentsQueue: Send + Sync {
+    /// Push an intent onto the queue.
+    async fn push(&self, intent: Intent) -> ArkResult<()>;
+    /// Drain and return all queued intents.
+    async fn pop_all(&self) -> ArkResult<Vec<Intent>>;
+    /// Number of intents currently queued.
+    async fn len(&self) -> ArkResult<usize>;
+    /// Clear the queue.
+    async fn clear(&self) -> ArkResult<()>;
+}
+
+/// Tracks expected vs received forfeit transactions per round.
+#[async_trait]
+pub trait ForfeitTxsStore: Send + Sync {
+    /// Initialize tracking for a round with the expected count.
+    async fn init(&self, round_id: &str, expected: usize) -> ArkResult<()>;
+    /// Add a received forfeit transaction.
+    async fn add(&self, round_id: &str, tx_hex: String) -> ArkResult<()>;
+    /// Check whether all expected forfeit txs have been received.
+    async fn all_received(&self, round_id: &str) -> ArkResult<bool>;
+    /// Drain and return all stored forfeit txs for a round.
+    async fn pop_all(&self, round_id: &str) -> ArkResult<Vec<String>>;
+}
+
+/// Tracks which intents have been confirmed for a round.
+#[async_trait]
+pub trait ConfirmationStore: Send + Sync {
+    /// Initialize with the set of intent IDs that need confirmation.
+    async fn init(&self, round_id: &str, intent_ids: Vec<String>) -> ArkResult<()>;
+    /// Mark an intent as confirmed.
+    async fn confirm(&self, round_id: &str, intent_id: &str) -> ArkResult<()>;
+    /// Check whether all intents are confirmed.
+    async fn all_confirmed(&self, round_id: &str) -> ArkResult<bool>;
+    /// Return the list of confirmed intent IDs.
+    async fn get_confirmed(&self, round_id: &str) -> ArkResult<Vec<String>>;
+}
+
+/// MuSig2 nonce and partial-signature collection for signing sessions.
+#[async_trait]
+pub trait SigningSessionStore: Send + Sync {
+    /// Initialize a signing session with the expected participant count.
+    async fn init_session(&self, session_id: &str, participant_count: usize) -> ArkResult<()>;
+    /// Add a nonce from a participant.
+    async fn add_nonce(
+        &self,
+        session_id: &str,
+        participant_id: &str,
+        nonce: Vec<u8>,
+    ) -> ArkResult<()>;
+    /// Check whether all nonces have been collected.
+    async fn all_nonces_collected(&self, session_id: &str) -> ArkResult<bool>;
+    /// Add a partial signature from a participant.
+    async fn add_signature(
+        &self,
+        session_id: &str,
+        participant_id: &str,
+        sig: Vec<u8>,
+    ) -> ArkResult<()>;
+    /// Check whether all signatures have been collected.
+    async fn all_signatures_collected(&self, session_id: &str) -> ArkResult<bool>;
+    /// Return all collected nonces.
+    async fn get_nonces(&self, session_id: &str) -> ArkResult<Vec<Vec<u8>>>;
+    /// Return all collected signatures.
+    async fn get_signatures(&self, session_id: &str) -> ArkResult<Vec<Vec<u8>>>;
+}
+
+/// Atomic get/set of the active round ID.
+#[async_trait]
+pub trait CurrentRoundStore: Send + Sync {
+    /// Get the current round ID, if any.
+    async fn get_current_round_id(&self) -> ArkResult<Option<String>>;
+    /// Set the current round ID.
+    async fn set_current_round_id(&self, round_id: &str) -> ArkResult<()>;
+    /// Clear the current round ID.
+    async fn clear(&self) -> ArkResult<()>;
 }
