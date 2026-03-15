@@ -16,8 +16,9 @@ use crate::domain::{
 use crate::error::{ArkError, ArkResult};
 use crate::ports::{
     ArkEvent, BoardingRepository, CacheService, CheckpointRepository, EventPublisher,
-    ForfeitRepository, NoopBoardingRepository, NoopCheckpointRepository, NoopForfeitRepository,
-    SignerService, TxBuilder, VtxoRepository, WalletService,
+    ForfeitRepository, FraudDetector, NoopBoardingRepository, NoopCheckpointRepository,
+    NoopForfeitRepository, NoopFraudDetector, SignerService, TxBuilder, VtxoRepository,
+    WalletService,
 };
 
 /// ASP configuration
@@ -108,6 +109,7 @@ pub struct ArkService {
     checkpoint_repo: Arc<dyn CheckpointRepository>,
     forfeit_repo: Arc<dyn ForfeitRepository>,
     boarding_repo: Arc<dyn BoardingRepository>,
+    fraud_detector: Arc<dyn FraudDetector>,
     config: ArkConfig,
     current_round: RwLock<Option<Round>>,
     /// Active exits indexed by ID
@@ -136,6 +138,7 @@ impl ArkService {
             checkpoint_repo: Arc::new(NoopCheckpointRepository),
             forfeit_repo: Arc::new(NoopForfeitRepository),
             boarding_repo: Arc::new(NoopBoardingRepository),
+            fraud_detector: Arc::new(NoopFraudDetector),
             config,
             current_round: RwLock::new(None),
             exits: RwLock::new(std::collections::HashMap::new()),
@@ -518,6 +521,36 @@ impl ArkService {
     /// Get all forfeit records for a given round.
     pub async fn get_round_forfeits(&self, round_id: &str) -> ArkResult<Vec<ForfeitRecord>> {
         self.forfeit_repo.list_by_round(round_id).await
+    }
+
+    // ── Fraud detection ─────────────────────────────────────────────
+
+    /// Check if a VTXO has been double-spent and, if so, broadcast its
+    /// forfeit transactions as a reaction.
+    #[instrument(skip(self))]
+    pub async fn check_and_react_fraud(&self, vtxo_id: &str, round_id: &str) -> ArkResult<()> {
+        let is_fraud = self
+            .fraud_detector
+            .detect_double_spend(vtxo_id, round_id)
+            .await?;
+        if is_fraud {
+            tracing::warn!(vtxo_id, round_id, "Fraud detected: double spend");
+            // Get forfeit txs from store and broadcast each
+            let forfeits = self.forfeit_repo.list_by_round(round_id).await?;
+            for forfeit in forfeits {
+                self.fraud_detector
+                    .react_to_fraud(vtxo_id, &forfeit.tx_hex)
+                    .await?;
+            }
+            // Emit event
+            self.events
+                .publish_event(ArkEvent::FraudDetected {
+                    vtxo_id: vtxo_id.to_string(),
+                    round_id: round_id.to_string(),
+                })
+                .await?;
+        }
+        Ok(())
     }
 
     // ── Boarding ────────────────────────────────────────────────────
@@ -942,5 +975,152 @@ mod tests {
         // NoopBoardingRepository returns empty list
         let pending = svc.claim_boarding_inputs().await.unwrap();
         assert!(pending.is_empty());
+    }
+
+    // ── Fraud detection tests ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_noop_fraud_detector_no_fraud() {
+        use crate::ports::{FraudDetector, NoopFraudDetector};
+        let detector = NoopFraudDetector;
+        let result = detector
+            .detect_double_spend("vtxo-1", "round-1")
+            .await
+            .unwrap();
+        assert!(!result, "NoopFraudDetector should never detect fraud");
+        // react_to_fraud should also succeed silently
+        detector.react_to_fraud("vtxo-1", "deadbeef").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fraud_detection_emits_event() {
+        use crate::ports::FraudDetector;
+        use std::sync::atomic::AtomicU32;
+
+        struct AlwaysFraudDetector;
+        #[async_trait]
+        impl FraudDetector for AlwaysFraudDetector {
+            async fn detect_double_spend(
+                &self,
+                _vtxo_id: &str,
+                _round_id: &str,
+            ) -> ArkResult<bool> {
+                Ok(true)
+            }
+            async fn react_to_fraud(&self, _vtxo_id: &str, _forfeit_tx_hex: &str) -> ArkResult<()> {
+                Ok(())
+            }
+        }
+
+        struct FraudEventRecorder {
+            fraud_count: AtomicU32,
+        }
+        impl FraudEventRecorder {
+            fn new() -> Self {
+                Self {
+                    fraud_count: AtomicU32::new(0),
+                }
+            }
+        }
+        #[async_trait]
+        impl EventPublisher for FraudEventRecorder {
+            async fn publish_event(&self, event: ArkEvent) -> ArkResult<()> {
+                if matches!(event, ArkEvent::FraudDetected { .. }) {
+                    self.fraud_count.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(())
+            }
+            async fn subscribe(&self) -> ArkResult<broadcast::Receiver<ArkEvent>> {
+                let (_tx, rx) = broadcast::channel(1);
+                Ok(rx)
+            }
+        }
+
+        let recorder = Arc::new(FraudEventRecorder::new());
+        let mut svc = make_service(Arc::new(RecordingEvents::new()));
+        svc.events = recorder.clone();
+        svc.fraud_detector = Arc::new(AlwaysFraudDetector);
+
+        svc.check_and_react_fraud("vtxo-bad", "round-42")
+            .await
+            .unwrap();
+        assert_eq!(recorder.fraud_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_react_to_fraud_calls_detector() {
+        use crate::ports::FraudDetector;
+        use std::sync::atomic::AtomicU32;
+
+        struct CountingFraudDetector {
+            react_calls: AtomicU32,
+        }
+        impl CountingFraudDetector {
+            fn new() -> Self {
+                Self {
+                    react_calls: AtomicU32::new(0),
+                }
+            }
+        }
+        #[async_trait]
+        impl FraudDetector for CountingFraudDetector {
+            async fn detect_double_spend(
+                &self,
+                _vtxo_id: &str,
+                _round_id: &str,
+            ) -> ArkResult<bool> {
+                Ok(true)
+            }
+            async fn react_to_fraud(&self, _vtxo_id: &str, _forfeit_tx_hex: &str) -> ArkResult<()> {
+                self.react_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        /// In-memory forfeit repo that returns pre-loaded records.
+        struct MemForfeitRepo {
+            records: Vec<ForfeitRecord>,
+        }
+        #[async_trait]
+        impl ForfeitRepository for MemForfeitRepo {
+            async fn store_forfeit(&self, _record: ForfeitRecord) -> ArkResult<()> {
+                Ok(())
+            }
+            async fn get_forfeit(&self, _id: &str) -> ArkResult<Option<ForfeitRecord>> {
+                Ok(None)
+            }
+            async fn list_by_round(&self, _round_id: &str) -> ArkResult<Vec<ForfeitRecord>> {
+                Ok(self.records.clone())
+            }
+            async fn mark_validated(&self, _id: &str) -> ArkResult<()> {
+                Ok(())
+            }
+        }
+
+        let detector = Arc::new(CountingFraudDetector::new());
+        let mut svc = make_service(Arc::new(RecordingEvents::new()));
+        svc.fraud_detector = detector.clone();
+        svc.forfeit_repo = Arc::new(MemForfeitRepo {
+            records: vec![
+                ForfeitRecord::new("round-1".into(), "vtxo-bad".into(), "tx_hex_1".into()),
+                ForfeitRecord::new("round-1".into(), "vtxo-bad".into(), "tx_hex_2".into()),
+            ],
+        });
+
+        svc.check_and_react_fraud("vtxo-bad", "round-1")
+            .await
+            .unwrap();
+        assert_eq!(
+            detector.react_calls.load(Ordering::SeqCst),
+            2,
+            "should call react_to_fraud for each forfeit"
+        );
+    }
+
+    #[test]
+    fn test_fraud_detector_trait_object_safe() {
+        use crate::ports::{FraudDetector, NoopFraudDetector};
+        // Ensure FraudDetector can be used as a trait object
+        let _: Arc<dyn FraudDetector> = Arc::new(NoopFraudDetector);
     }
 }

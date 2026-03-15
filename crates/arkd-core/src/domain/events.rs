@@ -115,6 +115,15 @@ pub enum ArkEvent {
         network: String,
     },
 
+    // ── Fraud detection ────────────────────────────────────────────
+    /// Fraud detected: a VTXO was double-spent across rounds.
+    FraudDetected {
+        /// The double-spent VTXO identifier
+        vtxo_id: String,
+        /// Round where the fraud was detected
+        round_id: String,
+    },
+
     /// The Ark server is shutting down.
     ServerStopping,
 }
@@ -134,6 +143,7 @@ impl ArkEvent {
             Self::VtxoForfeited { .. } => "vtxo.forfeited",
             Self::TxSubmitted { .. } => "tx.submitted",
             Self::TxFinalized { .. } => "tx.finalized",
+            Self::FraudDetected { .. } => "fraud.detected",
             Self::ServerStarted { .. } => "server.started",
             Self::ServerStopping => "server.stopping",
         }
@@ -228,6 +238,13 @@ mod tests {
                     commitment_txid: "ctx".into(),
                 },
                 "tx.finalized",
+            ),
+            (
+                ArkEvent::FraudDetected {
+                    vtxo_id: "v1".into(),
+                    round_id: "r1".into(),
+                },
+                "fraud.detected",
             ),
             (
                 ArkEvent::ServerStarted {
