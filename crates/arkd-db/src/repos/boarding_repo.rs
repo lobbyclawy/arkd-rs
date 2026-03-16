@@ -138,7 +138,13 @@ impl BoardingRow {
         use std::str::FromStr;
         use uuid::Uuid;
 
-        let id = Uuid::parse_str(&self.id).ok()?;
+        let id = match Uuid::parse_str(&self.id) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(row_id = %self.id, error = %e, "Failed to parse boarding tx UUID");
+                return None;
+            }
+        };
         let status = match self.status.as_str() {
             "awaitingfunding" => BoardingStatus::AwaitingFunding,
             "funded" => BoardingStatus::Funded,
@@ -149,7 +155,13 @@ impl BoardingRow {
             _ => BoardingStatus::AwaitingFunding,
         };
         let amount = Amount::from_sat(self.amount as u64);
-        let recipient_pubkey = XOnlyPublicKey::from_str(&self.recipient_pubkey).ok()?;
+        let recipient_pubkey = match XOnlyPublicKey::from_str(&self.recipient_pubkey) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(row_id = %id, error = %e, "Failed to parse boarding tx recipient pubkey");
+                return None;
+            }
+        };
         let funding_txid = self
             .funding_txid
             .and_then(|t| bitcoin::Txid::from_str(&t).ok());
