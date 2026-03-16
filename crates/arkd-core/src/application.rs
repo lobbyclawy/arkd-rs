@@ -224,6 +224,7 @@ impl ArkService {
             scanner: Arc::new(NoopBlockchainScanner::new()),
             indexer: Arc::new(NoopIndexerService),
             fee_manager: Arc::new(NoopFeeManager),
+            signing_session_store: Arc::new(crate::ports::NoopSigningSessionStore),
             tx_decoder: Arc::new(NoopTxDecoder),
             unlocker: Arc::new(crate::ports::EnvUnlocker),
             alerts: Arc::new(NoopAlerts),
