@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
         arkd_core::ArkService::new(
             Arc::new(StubWallet),
             Arc::new(StubSigner),
-            Arc::new(StubVtxoRepo),
+            vtxo_repo.clone(),
             Arc::new(StubTxBuilder),
             Arc::new(StubCache),
             Arc::new(arkd_core::LoggingEventPublisher::new(
