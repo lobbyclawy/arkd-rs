@@ -104,7 +104,7 @@ impl AdminServiceTrait for AdminGrpcService {
             uptime_secs: uptime,
             active_rounds: 0,
             total_participants: 0,
-            total_vtxos: stats.total_vtxos as u64,
+            total_vtxos: stats.total_vtxos,
             signer_pubkey: info.signer_pubkey,
         }))
     }
