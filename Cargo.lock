@@ -225,6 +225,7 @@ dependencies = [
  "anyhow",
  "arkd-core",
  "async-trait",
+ "bitcoin",
  "chrono",
  "redis 0.27.6",
  "serde",

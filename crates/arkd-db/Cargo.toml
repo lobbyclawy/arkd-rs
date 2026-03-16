@@ -38,6 +38,9 @@ uuid = { version = "1.11", features = ["v4", "serde"] }
 # Logging
 tracing = "0.1"
 
+# Bitcoin
+bitcoin = { version = "0.32", features = ["serde"] }
+
 # Internal crates
 arkd-core = { path = "../arkd-core" }
 

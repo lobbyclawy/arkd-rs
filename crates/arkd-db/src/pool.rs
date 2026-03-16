@@ -111,7 +111,20 @@ impl Database {
                 .execute(pool)
                 .await
                 .map_err(|e| DatabaseError::MigrationError(e.to_string()))?;
-            info!("Migrations applied successfully");
+            // NOTE: Multi-statement migrations rely on SQLite's raw_execute support.
+            // If future migrations use triggers or compound statements, consider
+            // splitting into per-statement execution.
+            let migration_003 = include_str!("../migrations/003_noop_repos.sql");
+            sqlx::query(migration_003)
+                .execute(pool)
+                .await
+                .map_err(|e| DatabaseError::MigrationError(e.to_string()))?;
+            let migration_004 = include_str!("../migrations/004_signing_combined_sig.sql");
+            sqlx::query(migration_004)
+                .execute(pool)
+                .await
+                .map_err(|e| DatabaseError::MigrationError(e.to_string()))?;
+            info!("Migrations applied successfully (001-004)");
         }
         Ok(())
     }

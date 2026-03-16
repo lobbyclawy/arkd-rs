@@ -28,7 +28,11 @@ pub use config::DatabaseConfig;
 #[cfg(feature = "sqlite")]
 pub use pool::Database;
 #[cfg(feature = "sqlite")]
-pub use repos::SqliteOffchainTxRepository;
+pub use repos::{
+    SqliteBoardingRepository, SqliteCheckpointRepository, SqliteConfirmationStore,
+    SqliteConvictionRepository, SqliteForfeitRepository, SqliteOffchainTxRepository,
+    SqliteRoundRepository, SqliteSigningSessionStore, SqliteVtxoRepository,
+};
 
 #[cfg(feature = "postgres")]
 pub use pool_postgres::{create_postgres_pool, run_postgres_migrations};

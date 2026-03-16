@@ -261,6 +261,30 @@ impl ArkService {
         self
     }
 
+    /// Set a custom checkpoint repository (for SQLite/Postgres persistence).
+    pub fn with_checkpoint_repo(mut self, repo: Arc<dyn CheckpointRepository>) -> Self {
+        self.checkpoint_repo = repo;
+        self
+    }
+
+    /// Set a custom forfeit repository (for SQLite/Postgres persistence).
+    pub fn with_forfeit_repo(mut self, repo: Arc<dyn ForfeitRepository>) -> Self {
+        self.forfeit_repo = repo;
+        self
+    }
+
+    /// Set a custom boarding repository (for SQLite/Postgres persistence).
+    pub fn with_boarding_repo(mut self, repo: Arc<dyn BoardingRepository>) -> Self {
+        self.boarding_repo = repo;
+        self
+    }
+
+    /// Set a custom offchain tx repository (for SQLite/Postgres persistence).
+    pub fn with_offchain_tx_repo(mut self, repo: Arc<dyn OffchainTxRepository>) -> Self {
+        self.offchain_tx_repo = repo;
+        self
+    }
+
     /// Send a round-completion notification via the configured notification service.
     pub async fn send_round_notification(
         &self,
