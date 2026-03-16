@@ -163,9 +163,11 @@ impl WalletServiceTrait for WalletGrpcService {
         let balance = self.wallet.get_balance().await.map_err(ark_err_to_status)?;
 
         Ok(Response::new(GetBalanceResponse {
-            confirmed_balance: balance.confirmed,
-            unconfirmed_balance: balance.unconfirmed,
-            locked_balance: balance.locked,
+            main_account: Some(Balance {
+                available: balance.confirmed.to_string(),
+                locked: balance.locked.to_string(),
+            }),
+            connectors_account: None,
         }))
     }
 
