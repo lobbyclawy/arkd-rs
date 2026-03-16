@@ -225,7 +225,7 @@ mod tests {
     fn test_seckey(b: u8) -> SecretKey {
         let mut bytes = [0u8; 32];
         bytes[31] = b;
-        SecretKey::from_byte_array(&bytes).unwrap()
+        SecretKey::from_byte_array(bytes).unwrap()
     }
 
     /// Helper: derive public key from secret key.
