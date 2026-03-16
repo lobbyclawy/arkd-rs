@@ -70,6 +70,7 @@ arkd-api = { path = "crates/arkd-api" }
 arkd-core = { path = "crates/arkd-core" }
 arkd-db = { path = "crates/arkd-db" }
 arkd-scheduler = { path = "crates/arkd-scheduler" }
+arkd-scanner = { path = "crates/arkd-scanner" }
 arkd-wallet = { path = "crates/arkd-wallet" }
 async-trait = "0.1"
 

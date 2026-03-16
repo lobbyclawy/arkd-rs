@@ -113,23 +113,26 @@ async fn main() -> Result<()> {
     let offchain_tx_repo = Arc::new(arkd_db::SqliteOffchainTxRepository::new(
         sqlite_pool.clone(),
     ));
-    let boarding_repo = Arc::new(arkd_db::SqliteBoardingRepository::new(sqlite_pool.clone()));
-    let checkpoint_repo = Arc::new(arkd_db::SqliteCheckpointRepository::new(
-        sqlite_pool.clone(),
-    ));
-    let forfeit_repo = Arc::new(arkd_db::SqliteForfeitRepository::new(sqlite_pool.clone()));
-    let confirmation_store = Arc::new(arkd_db::SqliteConfirmationStore::new(sqlite_pool.clone()));
-    let signing_session_store =
-        Arc::new(arkd_db::SqliteSigningSessionStore::new(sqlite_pool.clone()));
+    let offchain_tx_repo = Arc::new(arkd_db::repos::SqliteOffchainTxRepository::new(sqlite_pool));
 
-    info!("SQLite repositories initialized (vtxo, round, offchain_tx, boarding, checkpoint, forfeit, confirmation, signing_session)");
+    // --- Blockchain scanner ---
+    let scanner: Arc<dyn arkd_core::ports::BlockchainScanner> =
+        if let Some(ref esplora_url) = config.esplora_url {
+            info!(url = %esplora_url, "Starting EsploraScanner for on-chain monitoring");
+            let scanner = Arc::new(arkd_scanner::EsploraScanner::new(esplora_url, 30));
+            Arc::clone(&scanner).start_polling();
+            scanner
+        } else {
+            info!("No esplora_url configured — using NoopBlockchainScanner");
+            Arc::new(arkd_core::NoopBlockchainScanner::new())
+        };
 
-    // --- Core service ---
+    // --- Core service (with stub impls for now) ---
     let core = Arc::new(
         arkd_core::ArkService::new(
             Arc::new(StubWallet),
             Arc::new(StubSigner),
-            vtxo_repo,
+            Arc::new(StubVtxoRepo),
             Arc::new(StubTxBuilder),
             Arc::new(StubCache),
             Arc::new(arkd_core::LoggingEventPublisher::new(
@@ -137,14 +140,7 @@ async fn main() -> Result<()> {
             )),
             arkd_core::ArkConfig::default(),
         )
-        .with_boarding_repo(boarding_repo)
-        .with_checkpoint_repo(checkpoint_repo)
-        .with_forfeit_repo(forfeit_repo)
-        .with_confirmation_store(confirmation_store)
-        .with_signing_session_store(signing_session_store)
-        .with_offchain_tx_repo(
-            offchain_tx_repo.clone() as Arc<dyn arkd_core::ports::OffchainTxRepository>
-        ),
+        .with_scanner(scanner),
     );
 
     // --- API server ---
