@@ -58,9 +58,9 @@ struct EsploraOutspend {
 /// script is spent in a confirmed transaction.
 ///
 /// Also provides direct lookup methods:
-/// - [`get_tx_hex`] — fetch raw transaction hex by txid
-/// - [`is_output_spent`] — check if a specific output has been spent
-/// - [`get_address_txs`] — fetch transactions for an address
+/// - `get_tx_hex` — fetch raw transaction hex by txid
+/// - `is_output_spent` — check if a specific output has been spent
+/// - `get_address_txs` — fetch transactions for an address
 pub struct EsploraScanner {
     base_url: String,
     client: reqwest::Client,
