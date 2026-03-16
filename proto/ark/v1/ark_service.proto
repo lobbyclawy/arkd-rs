@@ -121,6 +121,7 @@ message GetInfoResponse {
   ScheduledSession scheduled_session = 18;
   repeated string deprecated_signers = 19;
   string digest = 20;
+  FeeInfo fees = 21;
 }
 
 // ScheduledSession describes the next scheduled round session.
