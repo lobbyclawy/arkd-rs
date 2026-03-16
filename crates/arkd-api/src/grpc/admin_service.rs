@@ -142,9 +142,12 @@ impl AdminServiceTrait for AdminGrpcService {
     ) -> Result<Response<GetRoundsResponse>, Status> {
         info!("AdminService::GetRounds called");
 
+        // TODO: use after/before fields from request for time-range filtering
+        // once IndexerService supports timestamp-based queries. For now, return
+        // the most recent 1000 rounds via offset/limit pagination.
         let rounds = self
             .core
-            .list_rounds(0, 100)
+            .list_rounds(0, 1000)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -249,8 +252,11 @@ impl AdminServiceTrait for AdminGrpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
+        // TODO: sweep_expired_vtxos returns count only; to return a txid we'd
+        // need SweepService to return the actual transaction hash(es). For now
+        // sweep_txid is empty — callers should check swept_count.
         Ok(Response::new(SweepResponse {
-            sweep_txid: String::new(), // No single txid — sweep may produce multiple txs
+            sweep_txid: String::new(),
             swept_count,
         }))
     }
