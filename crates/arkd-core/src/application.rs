@@ -18,14 +18,15 @@ use crate::domain::{
 };
 use crate::domain::{OffchainTx, VtxoInput, VtxoOutput};
 use crate::error::{ArkError, ArkResult};
+use crate::ports::ConfigService;
 use crate::ports::{
     ArkEvent, BanRepository, BlockchainScanner, BoardingRepository, CacheService,
     CheckpointRepository, ConfirmationStore, EventPublisher, ForfeitRepository, FraudDetector,
     IndexerService, IndexerStats, NoopBlockchainScanner, NoopBoardingRepository,
     NoopCheckpointRepository, NoopConfirmationStore, NoopForfeitRepository, NoopFraudDetector,
-    NoopIndexerService, NoopNotificationService, NoopOffchainTxRepository, NoopSweepService,
-    NotificationService, OffchainTxRepository, SignerService, SweepService, TxBuilder,
-    VtxoRepository, WalletService,
+    NoopIndexerService, NoopNotificationService, NoopOffchainTxRepository, NoopSigningSessionStore,
+    NoopSweepService, NotificationService, OffchainTxRepository, SignerService,
+    SigningSessionStore, SweepService, TxBuilder, VtxoRepository, WalletService,
 };
 
 /// Round timing configuration (matches Go arkd's `roundTiming`)
@@ -177,6 +178,7 @@ pub struct ArkService {
     scanner: Arc<dyn BlockchainScanner>,
     indexer: Arc<dyn IndexerService>,
     notification_service: Arc<dyn NotificationService>,
+    signing_session_store: Arc<dyn SigningSessionStore>,
     config: ArkConfig,
     config_service: Arc<dyn ConfigService>,
     current_round: RwLock<Option<Round>>,
@@ -216,6 +218,7 @@ impl ArkService {
             scanner: Arc::new(NoopBlockchainScanner::new()),
             indexer: Arc::new(NoopIndexerService),
             notification_service: Arc::new(NoopNotificationService),
+            signing_session_store: Arc::new(NoopSigningSessionStore),
             config,
             config_service,
             current_round: RwLock::new(None),
@@ -249,6 +252,12 @@ impl ArkService {
     /// Set a custom notification service (for production push notifications)
     pub fn with_notification_service(mut self, svc: Arc<dyn NotificationService>) -> Self {
         self.notification_service = svc;
+        self
+    }
+
+    /// Set a custom signing session store (for MuSig2 cosigning).
+    pub fn with_signing_session_store(mut self, store: Arc<dyn SigningSessionStore>) -> Self {
+        self.signing_session_store = store;
         self
     }
 
