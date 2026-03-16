@@ -8,7 +8,7 @@ service IndexerService {
   rpc GetConnectors(GetConnectorsRequest) returns (GetConnectorsResponse);
   rpc GetVtxoTree(GetVtxoTreeRequest) returns (GetVtxoTreeResponse);
   rpc GetVtxoTreeLeaves(GetVtxoTreeLeavesRequest) returns (GetVtxoTreeLeavesResponse);
-  rpc GetVtxos(IndexerGetVtxosRequest) returns (IndexerGetVtxosResponse);
+  rpc GetVtxos(IndexerServiceGetVtxosRequest) returns (IndexerServiceGetVtxosResponse);
   rpc GetVtxoChain(GetVtxoChainRequest) returns (GetVtxoChainResponse);
   rpc GetVirtualTxs(GetVirtualTxsRequest) returns (GetVirtualTxsResponse);
   rpc GetAsset(GetAssetRequest) returns (GetAssetResponse);
@@ -67,7 +67,7 @@ message GetVtxoTreeLeavesResponse {
   IndexerPageResponse page = 2;
 }
 
-message IndexerGetVtxosRequest {
+message IndexerServiceGetVtxosRequest {
   repeated string scripts = 1;
   repeated string outpoints = 2;
   bool spendable_only = 3;
@@ -78,7 +78,7 @@ message IndexerGetVtxosRequest {
   int64 after = 8;
   int64 before = 9;
 }
-message IndexerGetVtxosResponse {
+message IndexerServiceGetVtxosResponse {
   repeated IndexerVtxo vtxos = 1;
   IndexerPageResponse page = 2;
 }

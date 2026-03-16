@@ -18,9 +18,9 @@ use crate::proto::ark_v1::{
     GetConnectorsRequest, GetConnectorsResponse, GetForfeitTxsRequest, GetForfeitTxsResponse,
     GetSubscriptionRequest, GetSubscriptionResponse, GetVirtualTxsRequest, GetVirtualTxsResponse,
     GetVtxoChainRequest, GetVtxoChainResponse, GetVtxoTreeLeavesRequest, GetVtxoTreeLeavesResponse,
-    GetVtxoTreeRequest, GetVtxoTreeResponse, IndexerGetVtxosRequest, IndexerGetVtxosResponse,
-    SubscribeForScriptsRequest, SubscribeForScriptsResponse, UnsubscribeForScriptsRequest,
-    UnsubscribeForScriptsResponse,
+    GetVtxoTreeRequest, GetVtxoTreeResponse, IndexerServiceGetVtxosRequest,
+    IndexerServiceGetVtxosResponse, SubscribeForScriptsRequest, SubscribeForScriptsResponse,
+    UnsubscribeForScriptsRequest, UnsubscribeForScriptsResponse,
 };
 
 /// Server-streaming response type for GetSubscription.
@@ -93,8 +93,8 @@ impl IndexerServiceTrait for IndexerGrpcService {
 
     async fn get_vtxos(
         &self,
-        _request: Request<IndexerGetVtxosRequest>,
-    ) -> Result<Response<IndexerGetVtxosResponse>, Status> {
+        _request: Request<IndexerServiceGetVtxosRequest>,
+    ) -> Result<Response<IndexerServiceGetVtxosResponse>, Status> {
         info!("IndexerService::GetVtxos called");
         Err(Status::unimplemented("TODO: #160"))
     }
@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::Unimplemented);
 
         let err = svc
-            .get_vtxos(Request::new(IndexerGetVtxosRequest {
+            .get_vtxos(Request::new(IndexerServiceGetVtxosRequest {
                 scripts: vec![],
                 outpoints: vec![],
                 spendable_only: false,
