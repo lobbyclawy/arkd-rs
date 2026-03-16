@@ -393,7 +393,7 @@ impl LocalTxBuilder {
         }
 
         // Split into RADIX groups and create intermediate node
-        let chunk_size = (leaf_outputs.len() + VTXO_TREE_RADIX - 1) / VTXO_TREE_RADIX;
+        let chunk_size = leaf_outputs.len().div_ceil(VTXO_TREE_RADIX);
         let chunks: Vec<&[(ScriptBuf, u64)]> = leaf_outputs.chunks(chunk_size).collect();
 
         // Build intermediate outputs (P2TR to ASP for each chunk)
@@ -405,7 +405,7 @@ impl LocalTxBuilder {
             .map(|chunk| chunk.iter().map(|(_, a)| a).sum())
             .collect();
 
-        let total_chunk: u64 = chunk_amounts.iter().sum();
+        let _total_chunk: u64 = chunk_amounts.iter().sum();
         let intermediate_outputs: Vec<TxOut> = chunk_amounts
             .iter()
             .map(|&amount| TxOut {
