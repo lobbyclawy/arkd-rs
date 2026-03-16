@@ -20,6 +20,9 @@ service WalletService {
   // Lock encrypts the wallet, preventing further signing.
   rpc Lock(LockRequest) returns (LockResponse);
 
+  // GetStatus returns the current wallet initialization and sync status.
+  rpc GetStatus(GetWalletStatusRequest) returns (GetWalletStatusResponse);
+
   // DeriveAddress returns a fresh on-chain receive address.
   rpc DeriveAddress(DeriveAddressRequest) returns (DeriveAddressResponse);
 
@@ -50,6 +53,7 @@ message CreateResponse {}
 message RestoreRequest {
   string seed_phrase = 1;
   string password = 2;
+  uint64 gap_limit = 3;
 }
 message RestoreResponse {}
 
@@ -63,6 +67,15 @@ message UnlockResponse {}
 message LockRequest {}
 message LockResponse {}
 
+// ── GetStatus ────────────────────────────────────────────────────────────
+
+message GetWalletStatusRequest {}
+message GetWalletStatusResponse {
+  bool initialized = 1;
+  bool unlocked = 2;
+  bool synced = 3;
+}
+
 // ── DeriveAddress ────────────────────────────────────────────────────────
 
 message DeriveAddressRequest {}
@@ -74,10 +87,15 @@ message DeriveAddressResponse {
 // ── GetBalance ───────────────────────────────────────────────────────────
 
 message GetBalanceRequest {}
+
+message Balance {
+  string locked = 1;
+  string available = 2;
+}
+
 message GetBalanceResponse {
-  uint64 confirmed_balance = 1;
-  uint64 unconfirmed_balance = 2;
-  uint64 locked_balance = 3;
+  Balance main_account = 1;
+  Balance connectors_account = 2;
 }
 
 // ── Withdraw ─────────────────────────────────────────────────────────────
@@ -85,6 +103,8 @@ message GetBalanceResponse {
 message WithdrawRequest {
   string address = 1;
   uint64 amount_sats = 2;
+  // if all=true, amount is ignored and all available balance is withdrawn
+  bool all = 3;
 }
 message WithdrawResponse {
   string txid = 1;

@@ -212,6 +212,7 @@ impl ArkServiceTrait for ArkGrpcService {
             scheduled_session,
             deprecated_signers: vec![], // No deprecated signers by default
             digest: String::new(),      // Config digest (computed from server config)
+            fees: None,                 // Fee info (populated when fee manager is configured)
         }))
     }
 

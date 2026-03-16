@@ -98,3 +98,17 @@ message BoardingInputInfo {
   Outpoint outpoint = 1;
   uint64 amount = 2;
 }
+
+// FeeInfo describes the fee structure for the server.
+message FeeInfo {
+  IntentFeeInfo intent_fee = 1;
+  string tx_fee_rate = 2;
+}
+
+// IntentFeeInfo describes the per-intent fee rates.
+message IntentFeeInfo {
+  string offchain_input = 1;
+  string offchain_output = 2;
+  string onchain_input = 3;
+  string onchain_output = 4;
+}

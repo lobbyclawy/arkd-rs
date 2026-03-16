@@ -5,10 +5,10 @@ use tracing::info;
 
 use crate::proto::ark_v1::wallet_service_server::WalletService as WalletServiceTrait;
 use crate::proto::ark_v1::{
-    CreateRequest, CreateResponse, DeriveAddressRequest, DeriveAddressResponse, GenSeedRequest,
-    GenSeedResponse, GetBalanceRequest, GetBalanceResponse, LockRequest, LockResponse,
-    RestoreRequest, RestoreResponse, UnlockRequest, UnlockResponse, WithdrawRequest,
-    WithdrawResponse,
+    Balance, CreateRequest, CreateResponse, DeriveAddressRequest, DeriveAddressResponse,
+    GenSeedRequest, GenSeedResponse, GetBalanceRequest, GetBalanceResponse, GetWalletStatusRequest,
+    GetWalletStatusResponse, LockRequest, LockResponse, RestoreRequest, RestoreResponse,
+    UnlockRequest, UnlockResponse, WithdrawRequest, WithdrawResponse,
 };
 
 /// WalletService gRPC handler.
@@ -75,7 +75,7 @@ impl WalletServiceTrait for WalletGrpcService {
         request: Request<RestoreRequest>,
     ) -> Result<Response<RestoreResponse>, Status> {
         let req = request.into_inner();
-        info!("WalletService::Restore called");
+        info!(gap_limit = req.gap_limit, "WalletService::Restore called");
 
         if req.seed_phrase.is_empty() {
             return Err(Status::invalid_argument("seed_phrase is required"));
@@ -113,6 +113,20 @@ impl WalletServiceTrait for WalletGrpcService {
         ))
     }
 
+    async fn get_status(
+        &self,
+        _request: Request<GetWalletStatusRequest>,
+    ) -> Result<Response<GetWalletStatusResponse>, Status> {
+        info!("WalletService::GetStatus called");
+
+        // Stub: wallet is not initialized/unlocked/synced until BDK wiring.
+        Ok(Response::new(GetWalletStatusResponse {
+            initialized: false,
+            unlocked: false,
+            synced: false,
+        }))
+    }
+
     async fn derive_address(
         &self,
         _request: Request<DeriveAddressRequest>,
@@ -132,11 +146,16 @@ impl WalletServiceTrait for WalletGrpcService {
     ) -> Result<Response<GetBalanceResponse>, Status> {
         info!("WalletService::GetBalance called");
 
-        // Stub: return zero balances.
+        // Stub: return zero balances using Go-parity Balance sub-messages.
         Ok(Response::new(GetBalanceResponse {
-            confirmed_balance: 0,
-            unconfirmed_balance: 0,
-            locked_balance: 0,
+            main_account: Some(Balance {
+                locked: "0".to_string(),
+                available: "0".to_string(),
+            }),
+            connectors_account: Some(Balance {
+                locked: "0".to_string(),
+                available: "0".to_string(),
+            }),
         }))
     }
 
@@ -145,13 +164,15 @@ impl WalletServiceTrait for WalletGrpcService {
         request: Request<WithdrawRequest>,
     ) -> Result<Response<WithdrawResponse>, Status> {
         let req = request.into_inner();
-        info!(address = %req.address, amount = req.amount_sats, "WalletService::Withdraw called");
+        info!(address = %req.address, amount = req.amount_sats, all = req.all, "WalletService::Withdraw called");
 
         if req.address.is_empty() {
             return Err(Status::invalid_argument("address is required"));
         }
-        if req.amount_sats == 0 {
-            return Err(Status::invalid_argument("amount_sats must be > 0"));
+        if !req.all && req.amount_sats == 0 {
+            return Err(Status::invalid_argument(
+                "amount_sats must be > 0 (or set all=true)",
+            ));
         }
 
         // Stub: withdrawal not yet wired to BDK.
@@ -187,9 +208,11 @@ mod tests {
             .await
             .unwrap();
         let bal = resp.get_ref();
-        assert_eq!(bal.confirmed_balance, 0);
-        assert_eq!(bal.unconfirmed_balance, 0);
-        assert_eq!(bal.locked_balance, 0);
+        assert!(bal.main_account.is_some());
+        assert!(bal.connectors_account.is_some());
+        let main = bal.main_account.as_ref().unwrap();
+        assert_eq!(main.locked, "0");
+        assert_eq!(main.available, "0");
     }
 
     #[tokio::test]
@@ -233,16 +256,58 @@ mod tests {
             .withdraw(Request::new(WithdrawRequest {
                 address: String::new(),
                 amount_sats: 1000,
+                all: false,
             }))
             .await
             .unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
 
-        // Zero amount should fail.
+        // Zero amount with all=false should fail.
         let err = service()
             .withdraw(Request::new(WithdrawRequest {
                 address: "bcrt1qfoo".to_string(),
                 amount_sats: 0,
+                all: false,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_withdraw_all_allows_zero_amount() {
+        // all=true with zero amount should NOT fail on validation (but will be unimplemented).
+        let err = service()
+            .withdraw(Request::new(WithdrawRequest {
+                address: "bcrt1qfoo".to_string(),
+                amount_sats: 0,
+                all: true,
+            }))
+            .await
+            .unwrap_err();
+        // Should be unimplemented, not invalid argument.
+        assert_eq!(err.code(), tonic::Code::Unimplemented);
+    }
+
+    #[tokio::test]
+    async fn test_get_status_returns_not_initialized() {
+        let resp = service()
+            .get_status(Request::new(GetWalletStatusRequest {}))
+            .await
+            .unwrap();
+        let status = resp.get_ref();
+        assert!(!status.initialized);
+        assert!(!status.unlocked);
+        assert!(!status.synced);
+    }
+
+    #[tokio::test]
+    async fn test_restore_validates_seed() {
+        let err = service()
+            .restore(Request::new(RestoreRequest {
+                seed_phrase: String::new(),
+                password: "secret".to_string(),
+                gap_limit: 20,
             }))
             .await
             .unwrap_err();
