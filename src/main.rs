@@ -108,23 +108,44 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to get SQLite pool: {e}"))?
         .clone();
 
-    let round_repo = Arc::new(arkd_db::repos::SqliteRoundRepository::new(
+    let round_repo = Arc::new(arkd_db::SqliteRoundRepository::new(sqlite_pool.clone()));
+    let vtxo_repo = Arc::new(arkd_db::SqliteVtxoRepository::new(sqlite_pool.clone()));
+    let offchain_tx_repo = Arc::new(arkd_db::SqliteOffchainTxRepository::new(
         sqlite_pool.clone(),
     ));
-    let offchain_tx_repo = Arc::new(arkd_db::repos::SqliteOffchainTxRepository::new(sqlite_pool));
-
-    // --- Core service (with stub impls for now) ---
-    let core = Arc::new(arkd_core::ArkService::new(
-        Arc::new(StubWallet),
-        Arc::new(StubSigner),
-        Arc::new(StubVtxoRepo),
-        Arc::new(StubTxBuilder),
-        Arc::new(StubCache),
-        Arc::new(arkd_core::LoggingEventPublisher::new(
-            arkd_core::DEFAULT_EVENT_CHANNEL_CAPACITY,
-        )),
-        arkd_core::ArkConfig::default(),
+    let boarding_repo = Arc::new(arkd_db::SqliteBoardingRepository::new(sqlite_pool.clone()));
+    let checkpoint_repo = Arc::new(arkd_db::SqliteCheckpointRepository::new(
+        sqlite_pool.clone(),
     ));
+    let forfeit_repo = Arc::new(arkd_db::SqliteForfeitRepository::new(sqlite_pool.clone()));
+    let confirmation_store = Arc::new(arkd_db::SqliteConfirmationStore::new(sqlite_pool.clone()));
+    let signing_session_store =
+        Arc::new(arkd_db::SqliteSigningSessionStore::new(sqlite_pool.clone()));
+
+    info!("SQLite repositories initialized (vtxo, round, offchain_tx, boarding, checkpoint, forfeit, confirmation, signing_session)");
+
+    // --- Core service ---
+    let core = Arc::new(
+        arkd_core::ArkService::new(
+            Arc::new(StubWallet),
+            Arc::new(StubSigner),
+            vtxo_repo,
+            Arc::new(StubTxBuilder),
+            Arc::new(StubCache),
+            Arc::new(arkd_core::LoggingEventPublisher::new(
+                arkd_core::DEFAULT_EVENT_CHANNEL_CAPACITY,
+            )),
+            arkd_core::ArkConfig::default(),
+        )
+        .with_boarding_repo(boarding_repo)
+        .with_checkpoint_repo(checkpoint_repo)
+        .with_forfeit_repo(forfeit_repo)
+        .with_confirmation_store(confirmation_store)
+        .with_signing_session_store(signing_session_store)
+        .with_offchain_tx_repo(
+            offchain_tx_repo.clone() as Arc<dyn arkd_core::ports::OffchainTxRepository>
+        ),
+    );
 
     // --- API server ---
     info!(
@@ -228,26 +249,7 @@ impl SignerService for StubSigner {
     }
 }
 
-struct StubVtxoRepo;
-#[async_trait]
-impl VtxoRepository for StubVtxoRepo {
-    async fn add_vtxos(&self, _vtxos: &[Vtxo]) -> ArkResult<()> {
-        Ok(())
-    }
-    async fn get_vtxos(&self, _outpoints: &[VtxoOutpoint]) -> ArkResult<Vec<Vtxo>> {
-        Ok(vec![])
-    }
-    async fn get_all_vtxos_for_pubkey(&self, _pubkey: &str) -> ArkResult<(Vec<Vtxo>, Vec<Vtxo>)> {
-        Ok((vec![], vec![]))
-    }
-    async fn spend_vtxos(
-        &self,
-        _spent: &[(VtxoOutpoint, String)],
-        _ark_txid: &str,
-    ) -> ArkResult<()> {
-        Ok(())
-    }
-}
+// StubVtxoRepo removed — now using SqliteVtxoRepository
 
 struct StubTxBuilder;
 #[async_trait]

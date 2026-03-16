@@ -111,7 +111,17 @@ impl Database {
                 .execute(pool)
                 .await
                 .map_err(|e| DatabaseError::MigrationError(e.to_string()))?;
-            info!("Migrations applied successfully");
+            let migration_003 = include_str!("../migrations/003_noop_repos.sql");
+            sqlx::query(migration_003)
+                .execute(pool)
+                .await
+                .map_err(|e| DatabaseError::MigrationError(e.to_string()))?;
+            let migration_004 = include_str!("../migrations/004_signing_combined_sig.sql");
+            sqlx::query(migration_004)
+                .execute(pool)
+                .await
+                .map_err(|e| DatabaseError::MigrationError(e.to_string()))?;
+            info!("Migrations applied successfully (001-004)");
         }
         Ok(())
     }

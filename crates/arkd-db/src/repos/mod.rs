@@ -4,9 +4,21 @@
 //! using SQLite or PostgreSQL (via sqlx) as the backing store.
 
 #[cfg(feature = "sqlite")]
+pub mod boarding_repo;
+#[cfg(feature = "sqlite")]
+pub mod checkpoint_repo;
+#[cfg(feature = "sqlite")]
+pub mod confirmation_store;
+#[cfg(feature = "sqlite")]
+pub mod conviction_repo;
+#[cfg(feature = "sqlite")]
+pub mod forfeit_repo;
+#[cfg(feature = "sqlite")]
 pub mod offchain_tx_repo;
 #[cfg(feature = "sqlite")]
 pub mod round_repo;
+#[cfg(feature = "sqlite")]
+pub mod signing_session_store;
 #[cfg(feature = "sqlite")]
 pub mod vtxo_repo;
 
@@ -18,9 +30,21 @@ pub mod round_repo_pg;
 pub mod vtxo_repo_pg;
 
 #[cfg(feature = "sqlite")]
+pub use boarding_repo::SqliteBoardingRepository;
+#[cfg(feature = "sqlite")]
+pub use checkpoint_repo::SqliteCheckpointRepository;
+#[cfg(feature = "sqlite")]
+pub use confirmation_store::SqliteConfirmationStore;
+#[cfg(feature = "sqlite")]
+pub use conviction_repo::SqliteConvictionRepository;
+#[cfg(feature = "sqlite")]
+pub use forfeit_repo::SqliteForfeitRepository;
+#[cfg(feature = "sqlite")]
 pub use offchain_tx_repo::SqliteOffchainTxRepository;
 #[cfg(feature = "sqlite")]
 pub use round_repo::SqliteRoundRepository;
+#[cfg(feature = "sqlite")]
+pub use signing_session_store::SqliteSigningSessionStore;
 #[cfg(feature = "sqlite")]
 pub use vtxo_repo::SqliteVtxoRepository;
 
