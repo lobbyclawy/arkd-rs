@@ -13,10 +13,12 @@ use arkd_api::proto::ark_v1::admin_service_server::AdminServiceServer;
 use arkd_api::proto::ark_v1::ark_service_client::ArkServiceClient;
 use arkd_api::proto::ark_v1::ark_service_server::ArkServiceServer;
 use arkd_api::proto::ark_v1::{
-    DeleteIntentRequest, EstimateIntentFeeRequest, FinalizeTxRequest, GetEventStreamRequest,
-    GetInfoRequest, GetPendingTxRequest, GetRoundRequest, GetStatusRequest, GetVtxosRequest,
-    ListRoundsRequest, Outpoint, Output, RegisterForRoundRequest, RequestExitRequest,
-    SignedVtxoInput, SubmitTxRequest, UpdateStreamTopicsRequest,
+    ConfirmRegistrationRequest, DeleteIntentRequest, EstimateIntentFeeRequest, FinalizeTxRequest,
+    GetEventStreamRequest, GetInfoRequest, GetIntentRequest, GetPendingTxRequest, GetRoundRequest,
+    GetStatusRequest, GetTransactionsStreamRequest, GetVtxosRequest, ListRoundsRequest, Outpoint,
+    RegisterForRoundRequest, RegisterIntentRequest, RequestExitRequest,
+    SubmitSignedForfeitTxsRequest, SubmitTreeNoncesRequest, SubmitTreeSignaturesRequest,
+    SubmitTxRequest, UpdateStreamTopicsRequest,
 };
 
 use arkd_api::grpc::admin_service::AdminGrpcService;
@@ -675,7 +677,7 @@ async fn test_event_stream_initial_heartbeat() {
     let mut client = start_ark_server().await;
 
     let response = client
-        .get_event_stream(GetEventStreamRequest {})
+        .get_event_stream(GetEventStreamRequest { topics: vec![] })
         .await
         .expect("get_event_stream should succeed");
 
@@ -684,10 +686,10 @@ async fn test_event_stream_initial_heartbeat() {
     let event = first.expect("first item should be Ok");
 
     match event.event {
-        Some(arkd_api::proto::ark_v1::round_event::Event::Heartbeat(hb)) => {
-            assert!(hb.timestamp > 0, "heartbeat timestamp should be positive");
+        Some(arkd_api::proto::ark_v1::get_event_stream_response::Event::StreamStarted(s)) => {
+            assert!(!s.id.is_empty(), "stream_started id should be non-empty");
         }
-        other => panic!("Expected heartbeat event, got: {:?}", other),
+        other => panic!("Expected StreamStarted event, got: {:?}", other),
     }
 }
 
@@ -697,228 +699,139 @@ async fn test_update_stream_topics_noop() {
 
     let response = client
         .update_stream_topics(UpdateStreamTopicsRequest {
-            topics: vec![],
-            update_mode: None,
+            stream_id: String::new(),
+            topics_change: None,
         })
         .await;
 
     assert!(response.is_ok(), "update_stream_topics should succeed");
 }
 
-// ─── EstimateIntentFee Tests ────────────────────────────────────────
+// ─── New RPC stub tests (all return Unimplemented for now) ──────────
 
 #[tokio::test]
-async fn test_estimate_intent_fee_basic() {
+async fn test_register_intent_unimplemented() {
     let mut client = start_ark_server().await;
-
     let resp = client
-        .estimate_intent_fee(EstimateIntentFeeRequest {
-            input_vtxo_ids: vec!["vtxo1".to_string(), "vtxo2".to_string()],
-            outputs: vec![
-                Output {
-                    amount: 50_000,
-                    destination: Some(
-                        arkd_api::proto::ark_v1::output::Destination::OnchainAddress(
-                            "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".to_string(),
-                        ),
-                    ),
-                },
-                Output {
-                    amount: 30_000,
-                    destination: Some(
-                        arkd_api::proto::ark_v1::output::Destination::OnchainAddress(
-                            "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx".to_string(),
-                        ),
-                    ),
-                },
-            ],
-        })
-        .await
-        .unwrap();
-
-    let fee = resp.into_inner();
-    // fee = (2 * 68 + 2 * 43 + 10) * 1 = (136 + 86 + 10) = 232
-    assert!(fee.fee_sats > 0, "fee_sats should be > 0");
-    assert_eq!(fee.fee_sats, 232);
-    assert_eq!(fee.fee_rate_sats_per_vb, 1);
+        .register_intent(RegisterIntentRequest { intent: None })
+        .await;
+    assert_eq!(resp.unwrap_err().code(), tonic::Code::Unimplemented);
 }
 
 #[tokio::test]
-async fn test_estimate_intent_fee_more_inputs() {
+async fn test_confirm_registration_unimplemented() {
     let mut client = start_ark_server().await;
-
-    // 2-input fee
-    let resp2 = client
-        .estimate_intent_fee(EstimateIntentFeeRequest {
-            input_vtxo_ids: vec!["vtxo1".to_string(), "vtxo2".to_string()],
-            outputs: vec![Output {
-                amount: 50_000,
-                destination: Some(
-                    arkd_api::proto::ark_v1::output::Destination::OnchainAddress(
-                        "tb1qtest".to_string(),
-                    ),
-                ),
-            }],
-        })
-        .await
-        .unwrap()
-        .into_inner();
-
-    // 5-input fee
-    let resp5 = client
-        .estimate_intent_fee(EstimateIntentFeeRequest {
-            input_vtxo_ids: vec![
-                "v1".to_string(),
-                "v2".to_string(),
-                "v3".to_string(),
-                "v4".to_string(),
-                "v5".to_string(),
-            ],
-            outputs: vec![Output {
-                amount: 50_000,
-                destination: Some(
-                    arkd_api::proto::ark_v1::output::Destination::OnchainAddress(
-                        "tb1qtest".to_string(),
-                    ),
-                ),
-            }],
-        })
-        .await
-        .unwrap()
-        .into_inner();
-
-    assert!(
-        resp5.fee_sats > resp2.fee_sats,
-        "5-input fee ({}) should be > 2-input fee ({})",
-        resp5.fee_sats,
-        resp2.fee_sats
-    );
-}
-
-// ─── DeleteIntent Tests ─────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_delete_intent_empty_id() {
-    let mut client = start_ark_server().await;
-
-    let result = client
-        .delete_intent(DeleteIntentRequest {
-            intent_id: String::new(),
-            proof: vec![1, 2, 3],
+    let resp = client
+        .confirm_registration(ConfirmRegistrationRequest {
+            intent_id: "test".to_string(),
         })
         .await;
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    assert_eq!(resp.unwrap_err().code(), tonic::Code::Unimplemented);
 }
 
 #[tokio::test]
-async fn test_delete_intent_empty_proof() {
+async fn test_submit_tree_nonces_unimplemented() {
     let mut client = start_ark_server().await;
-
-    let result = client
-        .delete_intent(DeleteIntentRequest {
-            intent_id: "some-intent-id".to_string(),
-            proof: vec![],
+    let resp = client
+        .submit_tree_nonces(SubmitTreeNoncesRequest {
+            batch_id: "test".to_string(),
+            pubkey: "test".to_string(),
+            tree_nonces: Default::default(),
         })
         .await;
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    assert_eq!(resp.unwrap_err().code(), tonic::Code::Unimplemented);
 }
 
 #[tokio::test]
-async fn test_delete_intent_not_found() {
+async fn test_submit_tree_signatures_unimplemented() {
     let mut client = start_ark_server().await;
-
-    let result = client
-        .delete_intent(DeleteIntentRequest {
-            intent_id: "nonexistent-intent".to_string(),
-            proof: vec![1, 2, 3, 4],
+    let resp = client
+        .submit_tree_signatures(SubmitTreeSignaturesRequest {
+            batch_id: "test".to_string(),
+            pubkey: "test".to_string(),
+            tree_signatures: Default::default(),
         })
         .await;
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
+    assert_eq!(resp.unwrap_err().code(), tonic::Code::Unimplemented);
 }
 
-// --- Offchain transaction tests ---
+#[tokio::test]
+async fn test_submit_signed_forfeit_txs_unimplemented() {
+    let mut client = start_ark_server().await;
+    let resp = client
+        .submit_signed_forfeit_txs(SubmitSignedForfeitTxsRequest {
+            signed_forfeit_txs: vec![],
+            signed_commitment_tx: String::new(),
+        })
+        .await;
+    assert_eq!(resp.unwrap_err().code(), tonic::Code::Unimplemented);
+}
 
 #[tokio::test]
-async fn test_submit_tx_empty_inputs() {
+async fn test_get_intent_unimplemented() {
+    let mut client = start_ark_server().await;
+    let resp = client.get_intent(GetIntentRequest { filter: None }).await;
+    assert_eq!(resp.unwrap_err().code(), tonic::Code::Unimplemented);
+}
+
+#[tokio::test]
+async fn test_get_transactions_stream_unimplemented() {
+    let mut client = start_ark_server().await;
+    let resp = client
+        .get_transactions_stream(GetTransactionsStreamRequest {})
+        .await;
+    assert_eq!(resp.unwrap_err().code(), tonic::Code::Unimplemented);
+}
+
+#[tokio::test]
+async fn test_estimate_intent_fee_unimplemented() {
+    let mut client = start_ark_server().await;
+    let resp = client
+        .estimate_intent_fee(EstimateIntentFeeRequest { intent: None })
+        .await;
+    assert_eq!(resp.unwrap_err().code(), tonic::Code::Unimplemented);
+}
+
+#[tokio::test]
+async fn test_delete_intent_unimplemented() {
+    let mut client = start_ark_server().await;
+    let resp = client
+        .delete_intent(DeleteIntentRequest { intent: None })
+        .await;
+    assert_eq!(resp.unwrap_err().code(), tonic::Code::Unimplemented);
+}
+
+#[tokio::test]
+async fn test_submit_tx_unimplemented() {
     let mut client = start_ark_server().await;
     let resp = client
         .submit_tx(SubmitTxRequest {
-            inputs: vec![],
-            outputs: vec![],
-        })
-        .await;
-    assert_eq!(resp.unwrap_err().code(), tonic::Code::InvalidArgument);
-}
-
-#[tokio::test]
-async fn test_submit_tx_basic() {
-    let mut client = start_ark_server().await;
-    let resp = client
-        .submit_tx(SubmitTxRequest {
-            inputs: vec![SignedVtxoInput {
-                vtxo_id: "vtxo-1".to_string(),
-                signed_tx: vec![0u8; 32],
-            }],
-            outputs: vec![],
-        })
-        .await
-        .unwrap()
-        .into_inner();
-    assert!(!resp.tx_id.is_empty());
-}
-
-#[tokio::test]
-async fn test_finalize_tx_not_found() {
-    let mut client = start_ark_server().await;
-    let resp = client
-        .finalize_tx(FinalizeTxRequest {
-            tx_id: "nonexistent-id".to_string(),
+            signed_ark_tx: String::new(),
             checkpoint_txs: vec![],
         })
         .await;
-    assert_eq!(resp.unwrap_err().code(), tonic::Code::NotFound);
+    assert_eq!(resp.unwrap_err().code(), tonic::Code::Unimplemented);
 }
 
 #[tokio::test]
-async fn test_get_pending_tx_not_found() {
+async fn test_finalize_tx_unimplemented() {
     let mut client = start_ark_server().await;
     let resp = client
-        .get_pending_tx(GetPendingTxRequest {
-            tx_id: "nonexistent-id".to_string(),
+        .finalize_tx(FinalizeTxRequest {
+            ark_txid: "test".to_string(),
+            final_checkpoint_txs: vec![],
         })
         .await;
-    assert_eq!(resp.unwrap_err().code(), tonic::Code::NotFound);
+    assert_eq!(resp.unwrap_err().code(), tonic::Code::Unimplemented);
 }
 
 #[tokio::test]
-async fn test_offchain_tx_submit_and_get() {
+async fn test_get_pending_tx_unimplemented() {
     let mut client = start_ark_server().await;
-    let submit = client
-        .submit_tx(SubmitTxRequest {
-            inputs: vec![SignedVtxoInput {
-                vtxo_id: "vtxo-abc".to_string(),
-                signed_tx: vec![1u8; 32],
-            }],
-            outputs: vec![],
-        })
-        .await
-        .unwrap()
-        .into_inner();
-    let tx_id = submit.tx_id;
-    assert!(!tx_id.is_empty());
-
-    let get = client
-        .get_pending_tx(GetPendingTxRequest {
-            tx_id: tx_id.clone(),
-        })
-        .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(get.tx_id, tx_id);
-    assert!(!get.stage.is_empty());
+    let resp = client
+        .get_pending_tx(GetPendingTxRequest { identifier: None })
+        .await;
+    assert_eq!(resp.unwrap_err().code(), tonic::Code::Unimplemented);
 }
 
 // ─── TLS Configuration Tests ────────────────────────────────────────
