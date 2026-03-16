@@ -261,7 +261,7 @@ impl ArkService {
         self
     }
 
-    /// Set a custom [`SweepService`] implementation (e.g. [`TxBuilderSweepService`]).
+    /// Set a custom [`SweepService`] implementation (e.g. `TxBuilderSweepService`).
     pub fn with_sweep_service(mut self, svc: Arc<dyn SweepService>) -> Self {
         self.sweep_service = svc;
         self
@@ -950,7 +950,7 @@ impl ArkService {
         Ok(())
     }
 
-    /// Run a scheduled sweep and return the [`SweepResult`].
+    /// Run a scheduled sweep and return the `SweepResult`.
     ///
     /// Like [`run_scheduled_sweep`](Self::run_scheduled_sweep) but returns the
     /// result instead of only logging it — useful for gRPC responses.
