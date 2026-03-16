@@ -379,8 +379,8 @@ async fn test_get_info_new_fields() {
 
     // Exit delays
     assert!(
-        info.public_unilateral_exit_delay > 0,
-        "public_unilateral_exit_delay should be > 0"
+        info.unilateral_exit_delay > 0,
+        "unilateral_exit_delay should be > 0"
     );
     assert!(
         info.boarding_exit_delay > 0,
@@ -406,9 +406,7 @@ async fn test_get_info_new_fields() {
             .service_status
             .get(*name)
             .unwrap_or_else(|| panic!("service_status missing '{name}'"));
-        assert!(status.available, "'{name}' should be available");
-        assert_eq!(status.name, *name, "status.name mismatch for '{name}'");
-        assert!(!status.details.is_empty(), "'{name}' details is empty");
+        assert!(!status.is_empty(), "'{name}' status string is empty");
     }
 }
 
@@ -424,8 +422,8 @@ async fn test_get_info_default_values_are_sensible() {
     assert_eq!(info.utxo_max_amount, 100_000_000);
     // Default boarding_exit_delay should be 512 blocks
     assert_eq!(info.boarding_exit_delay, 512);
-    // Default public_unilateral_exit_delay should be 512 blocks
-    assert_eq!(info.public_unilateral_exit_delay, 512);
+    // Default unilateral_exit_delay should be 512 blocks
+    assert_eq!(info.unilateral_exit_delay, 512);
     // Default max_tx_weight should be 400_000
     assert_eq!(info.max_tx_weight, 400_000);
 }
