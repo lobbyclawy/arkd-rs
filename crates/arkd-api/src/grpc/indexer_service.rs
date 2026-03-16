@@ -5,9 +5,6 @@
 //! All methods currently return `Status::unimplemented` — real
 //! implementations will follow as the indexer backend is built.
 
-use std::pin::Pin;
-
-use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 use tracing::info;
 
@@ -25,7 +22,7 @@ use crate::proto::ark_v1::{
 
 /// Server-streaming response type for GetSubscription.
 type GetSubscriptionStream =
-    Pin<Box<dyn Stream<Item = Result<GetSubscriptionResponse, Status>> + Send + 'static>>;
+    tokio_stream::wrappers::ReceiverStream<Result<GetSubscriptionResponse, Status>>;
 
 /// IndexerService gRPC handler.
 ///
