@@ -193,3 +193,61 @@ pub struct IssueAssetResult {
     /// List of issued asset IDs.
     pub issued_assets: Vec<String>,
 }
+
+// ── Event stream types ─────────────────────────────────────────────────────
+
+/// Events emitted on the batch lifecycle stream (`GetEventStream`).
+///
+/// Maps to the proto `RoundEvent` oneof.
+#[derive(Debug, Clone)]
+pub enum BatchEvent {
+    /// A new batch round has started; participants should register intents.
+    BatchStarted { round_id: String, timestamp: i64 },
+    /// The batch is being finalised; MuSig2 signing is complete.
+    BatchFinalization {
+        round_id: String,
+        timestamp: i64,
+        min_relay_fee_rate: i64,
+    },
+    /// The batch commitment transaction has been broadcast.
+    BatchFinalized {
+        round_id: String,
+        /// Commitment transaction ID.
+        txid: String,
+    },
+    /// The batch round failed (e.g. not enough participants).
+    BatchFailed { round_id: String, reason: String },
+    /// MuSig2 tree signing has started; cosigners should submit nonces.
+    TreeSigningStarted {
+        round_id: String,
+        cosigner_pubkeys: Vec<String>,
+        timestamp: i64,
+    },
+    /// All MuSig2 nonces have been aggregated; signers should submit signatures.
+    TreeNoncesAggregated { round_id: String, timestamp: i64 },
+    /// Server heartbeat — stream is alive.
+    Heartbeat { timestamp: i64 },
+}
+
+/// Events emitted on the transactions stream (`GetTransactionsStream`).
+///
+/// Maps to the proto `TransactionEvent` oneof.
+#[derive(Debug, Clone)]
+pub enum TxEvent {
+    /// A commitment (batch) transaction was broadcast.
+    CommitmentTx {
+        txid: String,
+        round_id: String,
+        timestamp: i64,
+    },
+    /// An Ark (offchain) transaction was settled.
+    ArkTx {
+        txid: String,
+        from_script: String,
+        to_script: String,
+        amount: u64,
+        timestamp: i64,
+    },
+    /// Server heartbeat — stream is alive.
+    Heartbeat { timestamp: i64 },
+}
