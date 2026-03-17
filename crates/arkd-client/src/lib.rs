@@ -28,9 +28,10 @@ pub mod client;
 pub mod error;
 pub mod types;
 
-pub use client::{ArkClient, OffchainTxResult};
+pub use client::{ArkClient, OffchainTxResult, RedeemBranch};
 pub use error::{ClientError, ClientResult};
 pub use types::{
-    Balance, BatchTxRes, BoardingAddress, Intent, LockedAmount, OffchainAddress, OffchainBalance,
-    OnchainBalance, RoundInfo, RoundSummary, ServerInfo, TxResult, Vtxo,
+    Asset, AssetMetadata, Balance, BatchEvent, BatchTxRes, BoardingAddress, ControlAssetOption,
+    ExistingControlAsset, Intent, IssueAssetResult, LockedAmount, NewControlAsset, OffchainAddress,
+    OffchainBalance, OnchainBalance, RoundInfo, RoundSummary, ServerInfo, TxEvent, TxResult, Vtxo,
 };
