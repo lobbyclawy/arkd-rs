@@ -1,6 +1,6 @@
 # arkd-rs
 
-**Rust implementation of [arkd](https://github.com/arkade-os/arkd)** - Ark protocol server for Bitcoin Layer 2 scaling.
+**Rust implementation of [arkd](https://github.com/arkade-os/arkd) by the [Arkade team](https://github.com/arkade-os)** — Ark protocol server for Bitcoin Layer 2 scaling.
 
 ---
 
@@ -44,41 +44,6 @@ arkd-rs/
 ```
 
 ---
-
-## Features
-
-### Phase 1: Core Infrastructure ✅
-- [x] Project structure
-- [x] Bitcoin primitives (UTXO, transactions, scripts)
-- [x] Database layer (PostgreSQL + SQLite + Redis)
-- [x] Configuration system
-- [x] Logging & telemetry (tracing, Prometheus metrics)
-
-### Phase 2: Wallet & Liquidity ✅
-- [x] On-chain wallet (BDK integration)
-- [x] Signing service (separate signer process)
-- [x] UTXO management
-
-### Phase 3: Ark Protocol ✅
-- [x] VTXO tree construction
-- [x] Round management (batching logic)
-- [x] Collaborative exit
-- [x] Unilateral exit
-- [x] Boarding transactions
-
-### Phase 4: API ✅
-- [x] gRPC server (tonic) — ArkService + AdminService, dual-port, tonic-web
-- [x] REST gateway (tonic-web)
-- [x] Admin API (15+ RPCs)
-- [x] Client SDK (arkd-client crate)
-- [x] CLI (ark-cli)
-
-### Phase 5: Production Readiness ✅
-- [x] Comprehensive testing (unit + integration)
-- [x] Security audit & hardening
-- [x] Docker deployment (multi-stage build, distroless runtime)
-- [x] Trivy container scanning (zero unfixed CVEs)
-
 ---
 
 ## Quick Start
