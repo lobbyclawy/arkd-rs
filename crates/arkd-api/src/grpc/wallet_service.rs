@@ -375,17 +375,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_withdraw_all_allows_zero_amount() {
-        // all=true with zero amount should NOT fail on validation (but will be unimplemented).
-        let err = service()
+        // all=true with zero amount should NOT fail on validation.
+        let resp = service()
             .withdraw(Request::new(WithdrawRequest {
                 address: "bcrt1qfoo".to_string(),
                 amount_sats: 0,
                 all: true,
             }))
-            .await
-            .unwrap_err();
-        // Should be unimplemented, not invalid argument.
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
+            .await;
+        assert!(resp.is_ok());
     }
 
     #[tokio::test]
