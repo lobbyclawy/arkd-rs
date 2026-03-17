@@ -2,15 +2,17 @@
 
 use crate::error::{ClientError, ClientResult};
 use crate::types::{
-    Balance, BatchTxRes, BoardingAddress, LockedAmount, OffchainAddress, OffchainBalance,
-    OnchainBalance, RoundInfo, RoundSummary, ServerInfo, Vtxo,
+    Balance, BatchEvent, BatchTxRes, BoardingAddress, LockedAmount, OffchainAddress,
+    OffchainBalance, OnchainBalance, RoundInfo, RoundSummary, ServerInfo, TxEvent, Vtxo,
 };
 use arkd_api::proto::ark_v1::{
-    ark_service_client::ArkServiceClient, output, transaction_event, ConfirmRegistrationRequest,
-    DeleteIntentRequest, FinalizeTxRequest, GetInfoRequest, GetRoundRequest,
-    GetTransactionsStreamRequest, GetVtxosRequest, IntentDescriptor, ListRoundsRequest, Output,
-    RegisterIntentRequest, RequestExitRequest, SubmitTxRequest,
+    ark_service_client::ArkServiceClient, output, round_event, transaction_event,
+    ConfirmRegistrationRequest, DeleteIntentRequest, FinalizeTxRequest, GetEventStreamRequest,
+    GetInfoRequest, GetRoundRequest, GetTransactionsStreamRequest, GetVtxosRequest,
+    IntentDescriptor, ListRoundsRequest, Output, RegisterIntentRequest, RequestExitRequest,
+    SubmitTxRequest,
 };
+use tokio::sync::mpsc;
 use tonic::transport::Channel;
 
 /// Client for communicating with an arkd-rs server.
@@ -736,6 +738,188 @@ impl RedeemBranch {
     }
 }
 
+/// Streaming API methods (event stream and transactions stream).
+impl ArkClient {
+    /// Subscribe to batch lifecycle events.
+    ///
+    /// Opens a `GetEventStream` server-streaming RPC and forwards events onto a
+    /// `mpsc` channel. Returns the receiver and a close handle; call the close
+    /// handle to cancel the background forwarding task and drop the stream.
+    ///
+    /// The `_topics` parameter is reserved for future server-side filtering and
+    /// is ignored in this implementation.
+    pub async fn get_event_stream(
+        &mut self,
+        _topics: Option<()>,
+    ) -> ClientResult<(mpsc::Receiver<BatchEvent>, impl FnOnce())> {
+        let client = self.require_client()?;
+
+        let mut stream = client
+            .get_event_stream(GetEventStreamRequest {})
+            .await
+            .map_err(|e| ClientError::Rpc(format!("GetEventStream failed: {}", e)))?
+            .into_inner();
+
+        let (tx, rx) = mpsc::channel::<BatchEvent>(64);
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            tokio::pin!(cancel_rx);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut cancel_rx => break,
+                    msg = stream.message() => {
+                        match msg {
+                            Ok(Some(event)) => {
+                                if let Some(batch_event) = proto_round_event_to_domain(event) {
+                                    if tx.send(batch_event).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok((rx, move || {
+            let _ = cancel_tx.send(());
+        }))
+    }
+
+    /// Subscribe to the transactions stream (Ark txs + commitment txs).
+    ///
+    /// Opens a `GetTransactionsStream` server-streaming RPC and forwards events
+    /// onto a `mpsc` channel. Returns the receiver and a close handle.
+    pub async fn get_transactions_stream(
+        &mut self,
+    ) -> ClientResult<(mpsc::Receiver<TxEvent>, impl FnOnce())> {
+        let client = self.require_client()?;
+
+        let mut stream = client
+            .get_transactions_stream(GetTransactionsStreamRequest { scripts: vec![] })
+            .await
+            .map_err(|e| ClientError::Rpc(format!("GetTransactionsStream failed: {}", e)))?
+            .into_inner();
+
+        let (tx, rx) = mpsc::channel::<TxEvent>(64);
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            tokio::pin!(cancel_rx);
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut cancel_rx => break,
+                    msg = stream.message() => {
+                        match msg {
+                            Ok(Some(event)) => {
+                                if let Some(tx_event) = proto_tx_event_to_domain(event) {
+                                    if tx.send(tx_event).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok((rx, move || {
+            let _ = cancel_tx.send(());
+        }))
+    }
+
+    /// Redeem one or more Ark notes and receive the corresponding VTXOs
+    /// in the next batch.
+    ///
+    /// # Note
+    /// **Stub implementation.** The `RedeemNotes` gRPC is not yet defined in the
+    /// server proto. This method will be wired once the server-side RPC is available.
+    ///
+    /// # Returns
+    /// An error indicating the feature is not yet implemented.
+    pub async fn redeem_notes(&mut self, _notes: Vec<String>) -> ClientResult<String> {
+        // TODO: wire to RedeemNotes gRPC once the server-side RPC is added.
+        // Notes are bearer instruments redeemed for VTXOs in the next batch.
+        // Double-spend attempts are rejected by the server.
+        Err(ClientError::Rpc(
+            "redeem_notes: not yet implemented — RedeemNotes RPC not yet defined in proto".into(),
+        ))
+    }
+}
+
+/// Map a proto `RoundEvent` to a domain `BatchEvent`, returning `None` for
+/// unrecognised or unhandled variants (e.g. `TreeTx`, `TreeSignature`).
+fn proto_round_event_to_domain(
+    event: arkd_api::proto::ark_v1::RoundEvent,
+) -> Option<BatchEvent> {
+    match event.event? {
+        round_event::Event::BatchStarted(e) => Some(BatchEvent::BatchStarted {
+            round_id: e.round_id,
+            timestamp: e.timestamp,
+        }),
+        round_event::Event::BatchFinalization(e) => Some(BatchEvent::BatchFinalization {
+            round_id: e.round_id,
+            timestamp: e.timestamp,
+            min_relay_fee_rate: e.min_relay_fee_rate,
+        }),
+        round_event::Event::BatchFinalized(e) => Some(BatchEvent::BatchFinalized {
+            round_id: e.round_id,
+            txid: e.txid,
+        }),
+        round_event::Event::BatchFailed(e) => Some(BatchEvent::BatchFailed {
+            round_id: e.round_id,
+            reason: e.reason,
+        }),
+        round_event::Event::TreeSigningStarted(e) => Some(BatchEvent::TreeSigningStarted {
+            round_id: e.round_id,
+            cosigner_pubkeys: e.cosigner_pubkeys,
+            timestamp: e.timestamp,
+        }),
+        round_event::Event::TreeNoncesAggregated(e) => Some(BatchEvent::TreeNoncesAggregated {
+            round_id: e.round_id,
+            timestamp: e.timestamp,
+        }),
+        round_event::Event::Heartbeat(e) => Some(BatchEvent::Heartbeat {
+            timestamp: e.timestamp,
+        }),
+        // TreeTx and TreeSignature are MuSig2 internals; not exposed at this level.
+        round_event::Event::TreeTx(_) | round_event::Event::TreeSignature(_) => None,
+        round_event::Event::StreamStarted(_) => None,
+    }
+}
+
+/// Map a proto `TransactionEvent` to a domain `TxEvent`.
+fn proto_tx_event_to_domain(
+    event: arkd_api::proto::ark_v1::TransactionEvent,
+) -> Option<TxEvent> {
+    match event.event? {
+        transaction_event::Event::CommitmentTx(e) => Some(TxEvent::CommitmentTx {
+            txid: e.txid,
+            round_id: e.round_id,
+            timestamp: e.timestamp,
+        }),
+        transaction_event::Event::ArkTx(e) => Some(TxEvent::ArkTx {
+            txid: e.txid,
+            from_script: e.from_script,
+            to_script: e.to_script,
+            amount: e.amount,
+            timestamp: e.timestamp,
+        }),
+        transaction_event::Event::Heartbeat(e) => Some(TxEvent::Heartbeat {
+            timestamp: e.timestamp,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,5 +1043,119 @@ mod tests {
         let mut branch = RedeemBranch::new(vtxo).await.unwrap();
         let next = branch.next_redeem_tx().await.unwrap();
         assert!(next.is_none());
+    }
+
+    // ── redeem_notes stub tests ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_redeem_notes_returns_not_implemented() {
+        let mut c = ArkClient::new("http://localhost:50051");
+        let result = c.redeem_notes(vec!["note1".to_string()]).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not yet implemented"), "got: {msg}");
+    }
+
+    // ── streaming not-connected tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_event_stream_fails_when_not_connected() {
+        let mut c = ArkClient::new("http://localhost:50051");
+        let result = c.get_event_stream(None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_transactions_stream_fails_when_not_connected() {
+        let mut c = ArkClient::new("http://localhost:50051");
+        let result = c.get_transactions_stream().await;
+        assert!(result.is_err());
+    }
+
+    // ── proto → domain mapping tests ─────────────────────────────
+
+    #[test]
+    fn test_proto_round_event_batch_started() {
+        use arkd_api::proto::ark_v1::{round_event, BatchStartedEvent, RoundEvent};
+        let proto = RoundEvent {
+            event: Some(round_event::Event::BatchStarted(BatchStartedEvent {
+                round_id: "r1".to_string(),
+                timestamp: 1000,
+            })),
+        };
+        let domain = proto_round_event_to_domain(proto).unwrap();
+        if let BatchEvent::BatchStarted { round_id, timestamp } = domain {
+            assert_eq!(round_id, "r1");
+            assert_eq!(timestamp, 1000);
+        } else {
+            panic!("expected BatchStarted");
+        }
+    }
+
+    #[test]
+    fn test_proto_round_event_heartbeat() {
+        use arkd_api::proto::ark_v1::{round_event, RoundEvent, RoundHeartbeatEvent};
+        let proto = RoundEvent {
+            event: Some(round_event::Event::Heartbeat(RoundHeartbeatEvent {
+                timestamp: 42,
+            })),
+        };
+        let domain = proto_round_event_to_domain(proto).unwrap();
+        if let BatchEvent::Heartbeat { timestamp } = domain {
+            assert_eq!(timestamp, 42);
+        } else {
+            panic!("expected Heartbeat");
+        }
+    }
+
+    #[test]
+    fn test_proto_tx_event_commitment_tx() {
+        use arkd_api::proto::ark_v1::{transaction_event, CommitmentTxEvent, TransactionEvent};
+        let proto = TransactionEvent {
+            event: Some(transaction_event::Event::CommitmentTx(CommitmentTxEvent {
+                txid: "txid1".to_string(),
+                round_id: "r1".to_string(),
+                timestamp: 500,
+            })),
+        };
+        let domain = proto_tx_event_to_domain(proto).unwrap();
+        if let TxEvent::CommitmentTx { txid, round_id, timestamp } = domain {
+            assert_eq!(txid, "txid1");
+            assert_eq!(round_id, "r1");
+            assert_eq!(timestamp, 500);
+        } else {
+            panic!("expected CommitmentTx");
+        }
+    }
+
+    #[test]
+    fn test_proto_tx_event_ark_tx() {
+        use arkd_api::proto::ark_v1::{transaction_event, ArkTxEvent, TransactionEvent};
+        let proto = TransactionEvent {
+            event: Some(transaction_event::Event::ArkTx(ArkTxEvent {
+                txid: "arktxid".to_string(),
+                from_script: "pk_from".to_string(),
+                to_script: "pk_to".to_string(),
+                amount: 50_000,
+                timestamp: 999,
+            })),
+        };
+        let domain = proto_tx_event_to_domain(proto).unwrap();
+        if let TxEvent::ArkTx { txid, from_script, to_script, amount, timestamp } = domain {
+            assert_eq!(txid, "arktxid");
+            assert_eq!(from_script, "pk_from");
+            assert_eq!(to_script, "pk_to");
+            assert_eq!(amount, 50_000);
+            assert_eq!(timestamp, 999);
+        } else {
+            panic!("expected ArkTx");
+        }
+    }
+
+    #[test]
+    fn test_proto_round_event_none_event_returns_none() {
+        use arkd_api::proto::ark_v1::RoundEvent;
+        let proto = RoundEvent { event: None };
+        assert!(proto_round_event_to_domain(proto).is_none());
     }
 }
