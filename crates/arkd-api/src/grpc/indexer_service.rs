@@ -202,7 +202,10 @@ impl IndexerServiceTrait for IndexerGrpcService {
         request: Request<GetVirtualTxsRequest>,
     ) -> Result<Response<GetVirtualTxsResponse>, Status> {
         let req = request.into_inner();
-        info!(txids = req.txids.len(), "IndexerService::GetVirtualTxs called");
+        info!(
+            txids = req.txids.len(),
+            "IndexerService::GetVirtualTxs called"
+        );
         Err(Status::unimplemented(
             "GetVirtualTxs not yet implemented — requires virtual-tx store",
         ))
