@@ -775,11 +775,7 @@ impl ArkClient {
     /// # Note
     /// **Stub implementation.** Asset reissuance RPCs are not yet defined in the
     /// server proto.
-    pub async fn reissue_asset(
-        &mut self,
-        _asset_id: &str,
-        _amount: u64,
-    ) -> ClientResult<String> {
+    pub async fn reissue_asset(&mut self, _asset_id: &str, _amount: u64) -> ClientResult<String> {
         Err(ClientError::Rpc(
             "reissue_asset: not yet implemented — ReissueAsset RPC not yet defined in proto".into(),
         ))
@@ -984,9 +980,7 @@ mod tests {
                 locked_amount: vec![],
             },
             offchain: crate::types::OffchainBalance { total: 0 },
-            asset_balances: std::collections::HashMap::from([
-                ("rgb:asset-1".to_string(), 500u64),
-            ]),
+            asset_balances: std::collections::HashMap::from([("rgb:asset-1".to_string(), 500u64)]),
         };
         assert_eq!(*balance.asset_balances.get("rgb:asset-1").unwrap(), 500);
     }
