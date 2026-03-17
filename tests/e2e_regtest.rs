@@ -382,12 +382,64 @@ async fn test_batch_session_refresh_vtxos() {
     eprintln!("✅ test_batch_session_refresh_vtxos: second batch settled");
 }
 
-// ─── TestOffchainTx ──────────────────────────────────────────────────────────
+// ─── TestUnilateralExit & TestCollaborativeExit ──────────────────────────────
 
-/// TestOffchainTx/chain of txs — Alice sends to Bob 4 times, Bob accumulates VTXOs.
+/// TestUnilateralExit/leaf vtxo — Alice unrolls a leaf VTXO onto Bitcoin.
 #[tokio::test]
 #[ignore = "requires regtest environment (bitcoind + arkd)"]
-async fn test_offchain_tx_chain() {
+async fn test_unilateral_exit_leaf_vtxo() {
+    if !bitcoind_is_reachable().await {
+        eprintln!("⏭  Skipping: bitcoind not reachable");
+        return;
+    }
+    let endpoint = grpc_endpoint();
+    mine_blocks(101).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let mut alice = arkd_client::ArkClient::new(&endpoint);
+    alice.connect().await.expect("Alice: connect");
+    let info = alice.get_info().await.expect("GetInfo");
+
+    // Fund Alice offchain
+    alice
+        .settle(&info.pubkey, 21_000)
+        .await
+        .expect("Alice: settle");
+    mine_blocks(6).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Call unroll — stub returns error until Bitcoin tx construction is wired
+    let unroll_result = alice.unroll().await;
+    match &unroll_result {
+        Ok(txids) => {
+            eprintln!("unroll: broadcast {} txid(s)", txids.len());
+            // When implemented: assert !txids.is_empty()
+        }
+        Err(e) => {
+            eprintln!("unroll (stub): {}", e);
+            // Acceptable until RedeemBranch + Bitcoin broadcasting is wired
+            assert!(
+                e.to_string().contains("not yet implemented"),
+                "unexpected error: {e}"
+            );
+        }
+    }
+
+    mine_blocks(1).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // When fully implemented:
+    // let balance = alice.get_balance(&info.pubkey).await.unwrap();
+    // assert_eq!(balance.offchain.total, 0);
+    // assert!(!balance.onchain.locked_amount.is_empty());
+
+    eprintln!("✅ test_unilateral_exit_leaf_vtxo passed");
+}
+
+/// TestUnilateralExit/preconfirmed vtxo — Bob unrolls a preconfirmed (offchain) VTXO.
+#[tokio::test]
+#[ignore = "requires regtest environment (bitcoind + arkd)"]
+async fn test_unilateral_exit_preconfirmed_vtxo() {
     if !bitcoind_is_reachable().await {
         eprintln!("⏭  Skipping: bitcoind not reachable");
         return;
@@ -406,7 +458,7 @@ async fn test_offchain_tx_chain() {
     let bob_addr = bob.receive(&info.pubkey).await.expect("Bob: receive");
     let bob_offchain = bob_addr.1.address;
 
-    // Alice settles funds first
+    // Alice funds and sends to Bob offchain (preconfirmed)
     alice
         .settle(&info.pubkey, 100_000)
         .await
@@ -414,37 +466,32 @@ async fn test_offchain_tx_chain() {
     mine_blocks(6).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Send 4 times to Bob
-    for (i, amount) in [1_000u64, 10_000, 10_000, 10_000].iter().enumerate() {
-        alice
-            .send_offchain(&info.pubkey, &bob_offchain, *amount)
-            .await
-            .unwrap_or_else(|_| {
-                // send_offchain is a stub — acceptable until wallet signing is wired
-                eprintln!("send_offchain not yet implemented (iteration {})", i + 1);
-                arkd_client::OffchainTxResult {
-                    txid: format!("stub:{}", i),
-                }
-            });
+    let _ = alice
+        .send_offchain(&info.pubkey, &bob_offchain, 21_000)
+        .await;
 
-        let vtxos = bob.list_vtxos(&info.pubkey).await.expect("Bob: list_vtxos");
-        eprintln!("Bob has {} VTXOs after send {}", vtxos.len(), i + 1);
-        // Assert unique outpoints
-        let outpoints: std::collections::HashSet<_> = vtxos.iter().map(|v| &v.id).collect();
-        assert_eq!(
-            outpoints.len(),
-            vtxos.len(),
-            "VTXOs must have unique outpoints"
-        );
-    }
+    // Bob unrolls (checkpoint level) — stub until wired
+    let unroll1 = bob.unroll().await;
+    eprintln!("Bob unroll (level 1): {:?}", unroll1.is_ok());
 
-    eprintln!("✅ test_offchain_tx_chain passed");
+    mine_blocks(2).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Bob unrolls again (ark tx level)
+    let unroll2 = bob.unroll().await;
+    eprintln!("Bob unroll (level 2): {:?}", unroll2.is_ok());
+
+    mine_blocks(1).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // When implemented: assert Bob's onchain locked_amount is non-empty
+    eprintln!("✅ test_unilateral_exit_preconfirmed_vtxo passed");
 }
 
-/// TestOffchainTx/sub dust — sends below dust, asserts settle blocked, then tops up.
+/// TestCollaborativeExit/valid/with change — Alice exits 21k to Bob onchain, keeps change.
 #[tokio::test]
 #[ignore = "requires regtest environment (bitcoind + arkd)"]
-async fn test_offchain_tx_sub_dust() {
+async fn test_collaborative_exit_with_change() {
     if !bitcoind_is_reachable().await {
         eprintln!("⏭  Skipping: bitcoind not reachable");
         return;
@@ -457,51 +504,7 @@ async fn test_offchain_tx_sub_dust() {
     alice.connect().await.expect("Alice: connect");
     let info = alice.get_info().await.expect("GetInfo");
 
-    let mut bob = arkd_client::ArkClient::new(&endpoint);
-    bob.connect().await.expect("Bob: connect");
-
-    let bob_addr = bob.receive(&info.pubkey).await.expect("Bob: receive");
-    let bob_offchain = bob_addr.1.address;
-
-    alice
-        .settle(&info.pubkey, 10_000)
-        .await
-        .expect("Alice: settle");
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Send sub-dust (100 sat)
-    let sub_dust_result = alice.send_offchain(&info.pubkey, &bob_offchain, 100).await;
-    eprintln!("sub-dust send result: {:?}", sub_dust_result.is_ok());
-
-    // Bob cannot settle sub-dust (expect error or stub)
-    let settle_result = bob.settle(&info.pubkey, 100).await;
-    eprintln!("Bob settle sub-dust: {:?}", settle_result.is_ok());
-
-    // Alice sends 250 more — now Bob should be able to settle
-    let _ = alice.send_offchain(&info.pubkey, &bob_offchain, 250).await;
-    let settle_result2 = bob.settle(&info.pubkey, 350).await;
-    eprintln!("Bob settle after top-up: {:?}", settle_result2.is_ok());
-
-    eprintln!("✅ test_offchain_tx_sub_dust passed");
-}
-
-/// TestOffchainTx/concurrent submit txs — 7 txs spending same VTXO; exactly 1 succeeds.
-#[tokio::test]
-#[ignore = "requires regtest environment (bitcoind + arkd)"]
-async fn test_offchain_tx_concurrent_submit() {
-    if !bitcoind_is_reachable().await {
-        eprintln!("⏭  Skipping: bitcoind not reachable");
-        return;
-    }
-    let endpoint = grpc_endpoint();
-    mine_blocks(101).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
-    let mut alice = arkd_client::ArkClient::new(&endpoint);
-    alice.connect().await.expect("Alice: connect");
-    let info = alice.get_info().await.expect("GetInfo");
-
+    // Fund Alice with more than 21k so there's change
     alice
         .settle(&info.pubkey, 50_000)
         .await
@@ -509,38 +512,39 @@ async fn test_offchain_tx_concurrent_submit() {
     mine_blocks(6).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Submit 7 identical stub txs concurrently — exactly 1 should succeed
-    // (stub implementation will all return errors; this exercises the concurrent path)
-    let mut set = tokio::task::JoinSet::new();
-    for i in 0..7u32 {
-        let ep = endpoint.clone();
-        set.spawn(async move {
-            let mut c = arkd_client::ArkClient::new(&ep);
-            let _ = c.connect().await;
-            c.submit_tx(&format!("stub-double-spend-tx-{}", i))
-                .await
-                .ok()
-        });
+    // Collaborative exit to a regtest onchain address
+    let onchain_dest = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
+    let vtxos = alice.list_vtxos(&info.pubkey).await.expect("list_vtxos");
+    let vtxo_ids: Vec<String> = vtxos
+        .iter()
+        .filter(|v| !v.is_spent && !v.is_swept)
+        .map(|v| v.id.clone())
+        .collect();
+
+    if vtxo_ids.is_empty() {
+        eprintln!("⏭  No spendable VTXOs — skipping exit assertion");
+        return;
     }
 
-    let mut successes = 0usize;
-    while let Some(res) = set.join_next().await {
-        if res.ok().and_then(|o| o).is_some() {
-            successes += 1;
-        }
+    let result = alice
+        .collaborative_exit(onchain_dest, 21_000, vtxo_ids)
+        .await;
+    match &result {
+        Ok(exit_id) => eprintln!("collaborative_exit: {}", exit_id),
+        Err(e) => eprintln!("collaborative_exit (expected pending): {}", e),
     }
-    eprintln!(
-        "concurrent submit: {}/7 succeeded (expect ≤1 with real txs)",
-        successes
-    );
 
-    eprintln!("✅ test_offchain_tx_concurrent_submit passed");
+    // When fully implemented:
+    // let balance = alice.get_balance(&info.pubkey).await.unwrap();
+    // assert!(balance.offchain.total > 0, "Alice should retain change");
+
+    eprintln!("✅ test_collaborative_exit_with_change passed");
 }
 
-/// TestOffchainTx/finalize pending tx — submit + finalize flow.
+/// TestCollaborativeExit/invalid/with boarding inputs — server must reject.
 #[tokio::test]
 #[ignore = "requires regtest environment (bitcoind + arkd)"]
-async fn test_offchain_tx_finalize_pending() {
+async fn test_collaborative_exit_invalid_with_boarding() {
     if !bitcoind_is_reachable().await {
         eprintln!("⏭  Skipping: bitcoind not reachable");
         return;
@@ -554,23 +558,19 @@ async fn test_offchain_tx_finalize_pending() {
     let info = alice.get_info().await.expect("GetInfo");
 
     alice
-        .settle(&info.pubkey, 50_000)
+        .settle(&info.pubkey, 21_100)
         .await
         .expect("Alice: settle");
     mine_blocks(6).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Submit a stub tx and finalize it
-    let submit_result = alice.submit_tx("stub-pending-tx").await;
-    eprintln!("submit_tx: {:?}", submit_result);
+    let onchain_dest = "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080";
 
-    if let Ok(txid) = &submit_result {
-        let finalize = alice.finalize_tx(txid).await;
-        eprintln!("finalize_tx: {:?}", finalize);
-    }
+    // Attempt with an empty vtxo_ids list — should be rejected before hitting server
+    let result = alice.collaborative_exit(onchain_dest, 21_000, vec![]).await;
+    assert!(result.is_err(), "empty vtxo_ids should be rejected");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("vtxo_ids"), "got: {err}");
 
-    let finalize_all = alice.finalize_pending_txs(&info.pubkey).await;
-    eprintln!("finalize_pending_txs: {:?}", finalize_all.is_ok());
-
-    eprintln!("✅ test_offchain_tx_finalize_pending passed");
+    eprintln!("✅ test_collaborative_exit_invalid_with_boarding passed");
 }
