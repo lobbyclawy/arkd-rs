@@ -36,64 +36,6 @@ message Tapscripts {
   repeated string scripts = 1;
 }
 
-// Intent represents a registration intent with proof.
-message Intent {
-  string proof = 1;
-  string message = 2;
-}
-
-// IntentInfo describes a pending intent in the mempool.
-message IntentInfo {
-  string id = 1;
-  string proof = 2;
-  string message = 3;
-  repeated Output outputs = 4;
-  int64 created_at = 5;
-}
-
-// ScheduledSession describes the next scheduled batch session.
-message ScheduledSession {
-  int64 next_start_time = 1;
-  int64 next_end_time = 2;
-  int64 period = 3;
-  int64 duration = 4;
-  FeeInfo fees = 5;
-}
-
-// FeeInfo contains fee information for a batch session.
-message FeeInfo {
-  IntentFeeInfo intent_fee = 1;
-  string tx_fee_rate = 2;
-}
-
-// IntentFeeInfo contains per-component fee rates for intents.
-message IntentFeeInfo {
-  string offchain_input = 1;
-  string offchain_output = 2;
-  string onchain_input = 3;
-  string onchain_output = 4;
-}
-
-// PendingTx represents a pending offchain transaction.
-message PendingTx {
-  string ark_txid = 1;
-  string final_ark_tx = 2;
-  repeated string signed_checkpoint_txs = 3;
-}
-
-// DeprecatedSigner represents a previously active signer that has been rotated out.
-message DeprecatedSigner {
-  string pubkey = 1;
-  int64 cutoff_date = 2;
-}
-
-// ServiceStatus reports the status of a server subsystem.
-message ServiceStatus {
-  string name = 1;
-  bool available = 2;
-  string details = 3;
-}
-
 // Round represents a protocol round.
 message Round {
   string id = 1;

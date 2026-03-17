@@ -13,17 +13,52 @@ use arkd_core::ports::{OffchainTxRepository, RoundRepository};
 
 use crate::proto::ark_v1::ark_service_server::ArkService as ArkServiceTrait;
 use crate::proto::ark_v1::{
-    ConfirmRegistrationRequest, ConfirmRegistrationResponse, DeleteIntentRequest,
-    DeleteIntentResponse, EstimateIntentFeeRequest, EstimateIntentFeeResponse, FinalizeTxRequest,
-    FinalizeTxResponse, GetEventStreamRequest, GetEventStreamResponse, GetInfoRequest,
-    GetInfoResponse, GetIntentRequest, GetIntentResponse, GetPendingTxRequest,
-    GetPendingTxResponse, GetRoundRequest, GetRoundResponse, GetTransactionsStreamRequest,
-    GetTransactionsStreamResponse, GetVtxosRequest, GetVtxosResponse, Heartbeat, ListRoundsRequest,
-    ListRoundsResponse, RegisterForRoundRequest, RegisterForRoundResponse, RegisterIntentRequest,
-    RegisterIntentResponse, RequestExitRequest, RequestExitResponse, ScheduledSession,
-    StreamStartedEvent, SubmitSignedForfeitTxsRequest, SubmitSignedForfeitTxsResponse,
-    SubmitTreeNoncesRequest, SubmitTreeNoncesResponse, SubmitTreeSignaturesRequest,
-    SubmitTreeSignaturesResponse, SubmitTxRequest, SubmitTxResponse, UpdateStreamTopicsRequest,
+    // New Go arkd parity RPCs
+    ConfirmRegistrationRequest,
+    ConfirmRegistrationResponse,
+    // Legacy RPCs
+    DeleteIntentRequest,
+    DeleteIntentResponse,
+    EstimateIntentFeeRequest,
+    EstimateIntentFeeResponse,
+    FinalizeTxRequest,
+    FinalizeTxResponse,
+    GetEventStreamRequest,
+    GetInfoRequest,
+    GetInfoResponse,
+    GetIntentRequest,
+    GetIntentResponse,
+    GetPendingTxRequest,
+    GetPendingTxResponse,
+    GetRoundRequest,
+    GetRoundResponse,
+    GetTransactionsStreamRequest,
+    GetVtxosRequest,
+    GetVtxosResponse,
+    ListRoundsRequest,
+    ListRoundsResponse,
+    RegisterForRoundRequest,
+    RegisterForRoundResponse,
+    RegisterIntentRequest,
+    RegisterIntentResponse,
+    RequestExitRequest,
+    RequestExitResponse,
+    RoundEvent,
+    RoundHeartbeatEvent,
+    ScheduledSession,
+    ServiceStatus,
+    SignedVtxoInput,
+    SubmitSignedForfeitTxsRequest,
+    SubmitSignedForfeitTxsResponse,
+    SubmitTreeNoncesRequest,
+    SubmitTreeNoncesResponse,
+    SubmitTreeSignaturesRequest,
+    SubmitTreeSignaturesResponse,
+    SubmitTxRequest,
+    SubmitTxResponse,
+    TransactionEvent,
+    TransactionHeartbeatEvent,
+    UpdateStreamTopicsRequest,
     UpdateStreamTopicsResponse,
 };
 
@@ -99,6 +134,10 @@ impl ArkGrpcService {
 type GetEventStreamStream =
     Pin<Box<dyn Stream<Item = Result<RoundEvent, Status>> + Send + 'static>>;
 
+/// Server-streaming response type for GetTransactionsStream.
+type GetTransactionsStreamStream =
+    Pin<Box<dyn Stream<Item = Result<TransactionEvent, Status>> + Send + 'static>>;
+
 #[tonic::async_trait]
 impl ArkServiceTrait for ArkGrpcService {
     type GetEventStreamStream = GetEventStreamStream;
@@ -146,12 +185,9 @@ impl ArkServiceTrait for ArkGrpcService {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        let _scheduled_session = Some(ScheduledSession {
-            next_start_time: now,
-            next_end_time: now + info.session_duration,
-            period: info.session_duration,
-            duration: info.session_duration,
-            fees: None,
+        let scheduled_session = Some(ScheduledSession {
+            start_time: now,
+            end_time: now + info.session_duration,
         });
 
         Ok(Response::new(GetInfoResponse {
@@ -370,8 +406,6 @@ impl ArkServiceTrait for ArkGrpcService {
         }
     }
 
-    // ─── Existing RPCs (updated to match Go proto signatures) ───────────────
-
     async fn get_event_stream(
         &self,
         _request: Request<GetEventStreamRequest>,
@@ -394,69 +428,7 @@ impl ArkServiceTrait for ArkGrpcService {
             // Forward events from the broker
             loop {
                 match rx.recv().await {
-                    Ok(event) => {
-                        // Convert old RoundEvent to new GetEventStreamResponse
-                        if let Some(round_evt) = event.event {
-                            use crate::proto::ark_v1::round_event::Event as RE;
-                            use crate::proto::ark_v1::get_event_stream_response::Event as SE;
-                            let new_event = match round_evt {
-                                RE::BatchStarted(e) => {
-                                    Some(SE::BatchStarted(
-                                        crate::proto::ark_v1::BatchStartedEvent {
-                                            id: e.round_id,
-                                            intent_id_hashes: vec![],
-                                            batch_expiry: e.timestamp,
-                                        },
-                                    ))
-                                }
-                                RE::BatchFinalization(e) => {
-                                    Some(SE::BatchFinalization(
-                                        crate::proto::ark_v1::BatchFinalizationEvent {
-                                            id: e.round_id,
-                                            commitment_tx: String::new(),
-                                        },
-                                    ))
-                                }
-                                RE::BatchFinalized(e) => {
-                                    Some(SE::BatchFinalized(
-                                        crate::proto::ark_v1::BatchFinalizedEvent {
-                                            id: e.round_id,
-                                            commitment_txid: e.txid,
-                                        },
-                                    ))
-                                }
-                                RE::BatchFailed(e) => {
-                                    Some(SE::BatchFailed(
-                                        crate::proto::ark_v1::BatchFailedEvent {
-                                            id: e.round_id,
-                                            reason: e.reason,
-                                        },
-                                    ))
-                                }
-                                RE::Heartbeat(_) => {
-                                    Some(SE::Heartbeat(Heartbeat {}))
-                                }
-                                RE::TreeSigningStarted(e) => {
-                                    Some(SE::TreeSigningStarted(e))
-                                }
-                                RE::TreeNoncesAggregated(e) => {
-                                    Some(SE::TreeNoncesAggregated(e))
-                                }
-                                RE::TreeTx(e) => {
-                                    Some(SE::TreeTx(e))
-                                }
-                                RE::TreeSignature(e) => {
-                                    Some(SE::TreeSignature(e))
-                                }
-                                RE::StreamStarted(e) => {
-                                    Some(SE::StreamStarted(e))
-                                }
-                            };
-                            if let Some(evt) = new_event {
-                                yield Ok(GetEventStreamResponse { event: Some(evt) });
-                            }
-                        }
-                    }
+                    Ok(event) => yield Ok(event),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         warn!(skipped = n, "Event stream client lagged, skipped events");
                         // Continue receiving — don't break
@@ -644,27 +616,53 @@ impl ArkServiceTrait for ArkGrpcService {
         request: Request<RegisterIntentRequest>,
     ) -> Result<Response<RegisterIntentResponse>, Status> {
         let req = request.into_inner();
-        info!("RegisterIntent called (Go arkd parity)");
+        info!(
+            outputs = req.outputs.len(),
+            "RegisterIntent called (Go arkd parity)"
+        );
 
-        // Extract the Intent message (proof + message)
-        let intent_proto = req
+        // Extract descriptor
+        let descriptor = req
+            .descriptor
+            .ok_or_else(|| Status::invalid_argument("descriptor is required"))?;
+
+        // Extract intent proof
+        let intent_proof = descriptor
             .intent
-            .ok_or_else(|| Status::invalid_argument("intent is required"))?;
+            .ok_or_else(|| Status::invalid_argument("intent proof is required"))?;
 
-        if intent_proto.proof.is_empty() {
+        if intent_proof.proof.is_empty() {
             return Err(Status::invalid_argument("intent proof is required"));
         }
 
         // TODO(#40): Verify BIP-322 intent proof signature
         // For now, extract pubkey from the proof message
-        let pubkey = intent_proto.message.clone();
+        let pubkey = intent_proof.message.clone();
 
-        // Create intent with proof (no boarding inputs in this proto shape)
+        // Calculate total output amount
+        let total_amount: u64 = req.outputs.iter().map(|o| o.amount).sum();
+
+        // Build VTXO inputs from boarding inputs (if any)
+        let inputs: Vec<arkd_core::domain::Vtxo> = descriptor
+            .boarding_inputs
+            .iter()
+            .filter_map(|bi| {
+                bi.outpoint.as_ref().map(|op| {
+                    arkd_core::domain::Vtxo::new(
+                        arkd_core::domain::VtxoOutpoint::new(op.txid.clone(), op.vout),
+                        bi.amount,
+                        pubkey.clone(),
+                    )
+                })
+            })
+            .collect();
+
+        // Create intent with proof
         let intent = arkd_core::domain::Intent::new(
             "grpc-register-intent".to_string(),
             pubkey.clone(),
-            intent_proto.proof.clone(),
-            vec![],
+            intent_proof.proof.clone(),
+            inputs,
         )
         .map_err(|e| Status::invalid_argument(format!("Invalid intent: {e}")))?;
 
@@ -674,7 +672,7 @@ impl ArkServiceTrait for ArkGrpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        info!(intent_id = %intent_id, "Intent registered");
+        info!(intent_id = %intent_id, amount = total_amount, "Intent registered");
 
         Ok(Response::new(RegisterIntentResponse { intent_id }))
     }
@@ -702,7 +700,9 @@ impl ArkServiceTrait for ArkGrpcService {
                 _ => Status::internal(e.to_string()),
             })?;
 
-        Ok(Response::new(ConfirmRegistrationResponse {}))
+        Ok(Response::new(ConfirmRegistrationResponse {
+            confirmed: true,
+        }))
     }
 
     /// GetIntent retrieves an intent by txid filter.
@@ -711,39 +711,49 @@ impl ArkServiceTrait for ArkGrpcService {
         request: Request<GetIntentRequest>,
     ) -> Result<Response<GetIntentResponse>, Status> {
         let req = request.into_inner();
+        info!(txid = %req.txid, "GetIntent called");
 
-        // Extract txid from the oneof filter
-        let txid = match req.filter {
-            Some(crate::proto::ark_v1::get_intent_request::Filter::Txid(t)) => t,
-            None => return Err(Status::invalid_argument("txid filter is required")),
-        };
-
-        info!(txid = %txid, "GetIntent called");
-
-        if txid.is_empty() {
+        if req.txid.is_empty() {
             return Err(Status::invalid_argument("txid filter is required"));
         }
 
         // Look for the intent in the current round
         let intent_opt = self
             .core
-            .get_intent_by_id(&txid)
+            .get_intent_by_id(&req.txid)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
         match intent_opt {
             Some(intent) => {
-                let intent_proto = crate::proto::ark_v1::Intent {
-                    proof: intent.proof.clone(),
-                    message: intent.message.clone(),
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                // Derive pubkey from first input VTXO, or use proof txid as fallback
+                let pubkey = intent
+                    .inputs
+                    .first()
+                    .map(|v| v.pubkey.clone())
+                    .unwrap_or_else(|| intent.txid.clone());
+                let intent_info = crate::proto::ark_v1::IntentInfo {
+                    intent_id: intent.id.clone(),
+                    pubkey,
+                    amount: intent.inputs.iter().map(|v| v.amount).sum(),
+                    proof_message: intent.message.clone(),
+                    cosigners_public_keys: vec![],
+                    boarding_inputs: vec![],
+                    status: "pending".to_string(),
+                    created_at: now,
+                    round_id: String::new(),
                 };
                 Ok(Response::new(GetIntentResponse {
-                    intent: Some(intent_proto),
+                    intent: Some(intent_info),
                 }))
             }
             None => Err(Status::not_found(format!(
                 "Intent with txid {} not found",
-                txid
+                req.txid
             ))),
         }
     }
@@ -775,7 +785,7 @@ impl ArkServiceTrait for ArkGrpcService {
         let nonces: Vec<u8> = req
             .tree_nonces
             .values()
-            .flat_map(|v| v.as_bytes().iter().copied())
+            .flat_map(|v| v.iter().copied())
             .collect();
 
         self.core
@@ -783,7 +793,7 @@ impl ArkServiceTrait for ArkGrpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        Ok(Response::new(SubmitTreeNoncesResponse {}))
+        Ok(Response::new(SubmitTreeNoncesResponse { accepted: true }))
     }
 
     /// SubmitTreeSignatures submits MuSig2 tree partial signatures.
@@ -815,7 +825,7 @@ impl ArkServiceTrait for ArkGrpcService {
         let signatures: Vec<u8> = req
             .tree_signatures
             .values()
-            .flat_map(|v| v.as_bytes().iter().copied())
+            .flat_map(|v| v.iter().copied())
             .collect();
 
         self.core
@@ -823,7 +833,9 @@ impl ArkServiceTrait for ArkGrpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        Ok(Response::new(SubmitTreeSignaturesResponse {}))
+        Ok(Response::new(SubmitTreeSignaturesResponse {
+            accepted: true,
+        }))
     }
 
     /// SubmitSignedForfeitTxs submits signed forfeit transactions.
@@ -833,10 +845,14 @@ impl ArkServiceTrait for ArkGrpcService {
     ) -> Result<Response<SubmitSignedForfeitTxsResponse>, Status> {
         let req = request.into_inner();
         info!(
+            batch_id = %req.batch_id,
             forfeit_count = req.signed_forfeit_txs.len(),
             "SubmitSignedForfeitTxs called"
         );
 
+        if req.batch_id.is_empty() {
+            return Err(Status::invalid_argument("batch_id is required"));
+        }
         if req.signed_forfeit_txs.is_empty() {
             return Err(Status::invalid_argument(
                 "signed_forfeit_txs must not be empty",
@@ -844,11 +860,13 @@ impl ArkServiceTrait for ArkGrpcService {
         }
 
         self.core
-            .submit_signed_forfeit_txs(&req.signed_commitment_tx, req.signed_forfeit_txs)
+            .submit_signed_forfeit_txs(&req.batch_id, req.signed_forfeit_txs)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        Ok(Response::new(SubmitSignedForfeitTxsResponse {}))
+        Ok(Response::new(SubmitSignedForfeitTxsResponse {
+            accepted: true,
+        }))
     }
 
     /// GetTransactionsStream opens a server-streaming connection for transaction events.
@@ -860,9 +878,13 @@ impl ArkServiceTrait for ArkGrpcService {
 
         let output = stream! {
             // Yield an initial heartbeat so the client knows the stream is alive
-            yield Ok(GetTransactionsStreamResponse {
-                data: Some(crate::proto::ark_v1::get_transactions_stream_response::Data::Heartbeat(
-                    Heartbeat {},
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            yield Ok(TransactionEvent {
+                event: Some(crate::proto::ark_v1::transaction_event::Event::Heartbeat(
+                    TransactionHeartbeatEvent { timestamp: now },
                 )),
             });
 
@@ -870,9 +892,13 @@ impl ArkServiceTrait for ArkGrpcService {
             // For now, keep the stream alive with periodic heartbeats
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                yield Ok(GetTransactionsStreamResponse {
-                    data: Some(crate::proto::ark_v1::get_transactions_stream_response::Data::Heartbeat(
-                        Heartbeat {},
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                yield Ok(TransactionEvent {
+                    event: Some(crate::proto::ark_v1::transaction_event::Event::Heartbeat(
+                        TransactionHeartbeatEvent { timestamp: now },
                     )),
                 });
             }
