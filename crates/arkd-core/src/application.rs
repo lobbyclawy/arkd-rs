@@ -20,14 +20,13 @@ use crate::domain::{
 use crate::domain::{OffchainTx, VtxoInput, VtxoOutput};
 use crate::error::{ArkError, ArkResult};
 use crate::ports::{
-    Alerts, ArkEvent, BanRepository, BlockchainScanner, BoardingRepository, CacheService,
+    ArkEvent, BanRepository, BlockchainScanner, BoardingRepository, CacheService,
     CheckpointRepository, ConfigService, ConfirmationStore, ConvictionRepository, EventPublisher,
-    FeeManagerService, ForfeitRepository, FraudDetector, IndexerService, IndexerStats, NoopAlerts,
+    FeeManagerService, ForfeitRepository, FraudDetector, IndexerService, IndexerStats,
     NoopBlockchainScanner, NoopBoardingRepository, NoopCheckpointRepository, NoopConfirmationStore,
     NoopConvictionRepository, NoopFeeManager, NoopForfeitRepository, NoopFraudDetector,
-    NoopIndexerService, NoopOffchainTxRepository, NoopSweepService, NoopTxDecoder,
-    NotificationService, OffchainTxRepository, SignerService, SigningSessionStore, SweepService,
-    TxBuilder, TxDecoder, Unlocker, VtxoRepository, WalletService,
+    NoopIndexerService, NoopOffchainTxRepository, NoopSweepService, OffchainTxRepository,
+    SignerService, SigningSessionStore, SweepService, TxBuilder, VtxoRepository, WalletService,
 };
 
 /// Round timing configuration (matches Go arkd's `roundTiming`)
