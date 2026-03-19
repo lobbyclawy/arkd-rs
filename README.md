@@ -284,7 +284,7 @@ See [`config.example.toml`](config.example.toml) for a fully documented template
 | Async runtime | goroutines | tokio |
 | Performance | ~Good | **Excellent** |
 | Memory safety | Runtime checks | **Compile-time** |
-| Ecosystem | Mature | **Growing fast** |
+
 
 ---
 
