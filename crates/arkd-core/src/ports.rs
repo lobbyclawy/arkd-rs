@@ -624,6 +624,16 @@ pub trait BlockchainScanner: Send + Sync {
     fn notification_channel(&self) -> tokio::sync::broadcast::Receiver<ScriptSpentEvent>;
     /// Get current chain tip height.
     async fn tip_height(&self) -> ArkResult<u32>;
+
+    /// Check if a UTXO is unspent on-chain.
+    ///
+    /// Used for boarding input validation — verifies the UTXO exists and
+    /// has not been spent before accepting it in a round.
+    ///
+    /// Default implementation returns `Ok(true)` (optimistic, no on-chain check).
+    async fn is_utxo_unspent(&self, _outpoint: &crate::domain::VtxoOutpoint) -> ArkResult<bool> {
+        Ok(true)
+    }
 }
 
 /// No-op blockchain scanner for dev/test environments within arkd-core.
