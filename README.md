@@ -24,7 +24,7 @@ arkd is a server implementation of the **Ark protocol**, a Bitcoin scaling solut
 
 ## What's Implemented
 
-arkd-rs is a full behavioral-parity Rust reimplementation of the Go arkd server. It covers the complete Ark protocol: VTXO tree construction, round management, MuSig2 signing (BIP-327), fraud detection, forfeit verification (Tapscript), SQLite persistence, Esplora scanning, gRPC API (ArkService + AdminService + WalletService + IndexerService), config hot-reload, and a regtest E2E integration test suite.
+arkd-rs is a full behavioral-parity Rust reimplementation of the Go arkd server. It covers the complete Ark protocol: VTXO tree construction, round management, MuSig2 signing (BIP-327), fraud detection, forfeit verification (Tapscript), SQLite/PostgreSQL persistence, Esplora scanning, gRPC API (ArkService + AdminService + WalletService + IndexerService + SignerManagerService), CEL-based fee programs, macaroon auth + TLS auto-generation, Nostr VTXO notifications, OpenTelemetry scaffolding, and a regtest E2E integration test suite.
 
 ---
 
@@ -32,24 +32,58 @@ arkd-rs is a full behavioral-parity Rust reimplementation of the Go arkd server.
 
 ```
 arkd-rs/
-├── crates/
-│   ├── arkd-core/        # Core business logic (rounds, VTXOs, batching)
-│   ├── arkd-wallet/      # Bitcoin wallet integration (liquidity provider)
-│   ├── arkd-api/         # gRPC/REST API (tonic + prost)
-│   ├── arkd-db/          # Database layer (Postgres, SQLite, Redis)
-│   ├── arkd-bitcoin/     # Bitcoin primitives (transactions, scripts)
-│   ├── arkd-nostr/       # Nostr event publishing
-│   ├── arkd-client/      # Client SDK crate
-│   └── ark-cli/          # Command-line client
 ├── src/
-│   └── main.rs           # Server binary entry point
-├── proto/                # Protocol Buffer definitions
-├── migrations/           # Database migrations
-├── tests/                # Integration tests
+│   ├── main.rs           # Server binary entry point
+│   ├── cli.rs            # CLI argument parsing
+│   ├── config.rs         # Configuration loading
+│   └── telemetry.rs      # OpenTelemetry setup
+├── crates/
+│   ├── arkd-core/        # Core domain models and business logic (rounds, VTXOs, exits)
+│   ├── arkd-bitcoin/     # Bitcoin primitives (PSBTs, Tapscript, MuSig2, TxBuilder)
+│   ├── arkd-wallet/      # BDK-based Bitcoin wallet service (UTXO management, signing)
+│   ├── arkd-api/         # gRPC API layer (tonic + prost) — all gRPC services
+│   ├── arkd-client/      # gRPC client library for arkd-rs
+│   ├── arkd-db/          # Database layer (SQLite, PostgreSQL, migrations)
+│   ├── arkd-live-store/  # Ephemeral round state (in-memory + Redis)
+│   ├── arkd-fee-manager/ # Fee estimation (static + Bitcoin Core RPC + CEL programs)
+│   ├── arkd-scanner/     # Blockchain scanner for on-chain VTXO watching (Esplora)
+│   ├── arkd-scheduler/   # Time-based and block-height-based round schedulers
+│   ├── arkd-nostr/       # Nostr event publishing for VTXO notifications
+│   └── ark-cli/          # Command-line client for testing interactively
+├── proto/                # Protocol Buffer definitions (Ark v1)
+├── tests/
+│   ├── e2e_regtest.rs    # E2E regtest integration test suite
+│   └── integration/      # Integration tests
+├── scripts/
+│   ├── e2e-test.sh       # E2E test runner
+│   └── gen-tls-certs.sh  # TLS certificate generation
+├── contrib/
+│   ├── arkd.service      # systemd service unit
+│   ├── config.example.toml
+│   └── install.sh        # Bare-metal install script
+├── config/
+│   └── arkd.light.toml   # Light-mode config template
+├── docs/
+│   ├── light-mode.md     # Light mode deployment guide
+│   ├── runbook.md        # Operational runbook
+│   └── testing.md        # Testing guide
+├── benches/              # Benchmarks
+├── config.example.toml   # Fully documented config template
+├── Justfile              # Task runner (build, test, e2e, lint)
+├── Dockerfile            # Dev image
+├── Dockerfile.prod       # Distroless production image
+├── docker-compose.yml            # Full stack (arkd + Bitcoin Core + Postgres + Redis)
+├── docker-compose.prod.yml       # Production compose
+├── docker-compose.light.yml      # Light mode (no external deps)
+├── docker-compose.ci.yml         # CI compose
+├── prometheus.yml        # Prometheus scrape config
+├── deny.toml             # cargo-deny config (licenses, advisories)
+├── buf.work.yaml         # Buf workspace config (proto linting)
+├── SECURITY.md
+├── WORKFLOW.md
 └── Cargo.toml            # Workspace configuration
 ```
 
----
 ---
 
 ## Quick Start
@@ -77,12 +111,21 @@ cargo build --release
 cargo test
 
 # Run the server (dev mode)
-cargo run -- --network regtest --config config.toml
+cargo run -- --network regtest --config config.example.toml
+```
+
+### Using Just
+
+```bash
+just build    # Build the binary
+just test     # Run all tests
+just e2e      # Run E2E regtest suite
+just lint     # Run clippy + fmt check
 ```
 
 ### Configuration
 
-Create `config.toml`:
+Create `config.toml` (see `config.example.toml` for full reference):
 
 ```toml
 [server]
@@ -152,9 +195,6 @@ The script starts arkd, hits `GetInfo` via gRPC, and cleans up on exit.
 
 ---
 
-
----
-
 ## Deployment
 
 ### Docker (Quickstart)
@@ -176,6 +216,16 @@ Or use the production compose file (includes Bitcoin Core regtest):
 ```bash
 docker compose -f docker-compose.prod.yml up -d
 ```
+
+### Light Mode (no external deps)
+
+For single-process deployments with no Postgres or Redis:
+
+```bash
+docker compose -f docker-compose.light.yml up -d
+```
+
+See [`docs/light-mode.md`](docs/light-mode.md) for details.
 
 ### Docker Image (GHCR)
 
@@ -210,7 +260,7 @@ journalctl -u arkd -f
 
 ### Configuration Reference
 
-See [`contrib/config.example.toml`](contrib/config.example.toml) for a fully documented template.
+See [`config.example.toml`](config.example.toml) for a fully documented template.
 
 | Section | Key Fields | Description |
 |---------|-----------|-------------|
@@ -220,6 +270,8 @@ See [`contrib/config.example.toml`](contrib/config.example.toml) for a fully doc
 | `[wallet]` | `descriptor` | BDK wallet configuration |
 | `[nostr]` | `relay_url`, `private_key_hex` | Optional Nostr integration |
 | `[fees]` | `base_fee`, `*_input_fee`, `*_output_fee` | Fee schedule |
+
+---
 
 ## Comparison: Go vs Rust
 
