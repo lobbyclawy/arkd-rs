@@ -17,13 +17,13 @@ use thiserror::Error;
 
 pub mod cache;
 pub mod config;
+pub mod embedded_kv;
 pub mod migrations;
 #[cfg(feature = "sqlite")]
 pub mod pool;
 #[cfg(feature = "postgres")]
 pub mod pool_postgres;
 pub mod repos;
-pub mod embedded_kv;
 
 pub use config::DatabaseConfig;
 #[cfg(feature = "sqlite")]
