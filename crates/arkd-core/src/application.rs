@@ -17,7 +17,7 @@ use crate::domain::{
     DEFAULT_UNILATERAL_EXIT_DELAY, DEFAULT_UTXO_MAX_AMOUNT, DEFAULT_UTXO_MIN_AMOUNT,
     DEFAULT_VTXO_EXPIRY_SECS, MIN_VTXO_AMOUNT_SATS,
 };
-use crate::domain::{OffchainTx, VtxoInput, VtxoOutput};
+use crate::domain::{FeeProgram, OffchainTx, VtxoInput, VtxoOutput};
 use crate::error::{ArkError, ArkResult};
 use crate::ports::{
     ArkEvent, BanRepository, BlockchainScanner, BoardingRepository, CacheService,
@@ -130,6 +130,8 @@ pub struct ArkConfig {
     /// Whether to allow CSV block-type timelocks (vs time-based).
     /// Passed from ServerConfig; controls round scheduling behavior.
     pub allow_csv_block_type: bool,
+    /// Fee program for intent fee calculation (CEL-based fee programs, #242)
+    pub fee_program: FeeProgram,
 }
 
 impl Default for ArkConfig {
@@ -158,6 +160,7 @@ impl Default for ArkConfig {
             nostr_relay_url: None,
             nostr_private_key: None,
             allow_csv_block_type: false,
+            fee_program: FeeProgram::default(),
         }
     }
 }
@@ -294,6 +297,11 @@ impl ArkService {
     /// Get the Ark configuration.
     pub fn config(&self) -> &ArkConfig {
         &self.config
+    }
+
+    /// Get the fee program configuration.
+    pub fn get_fee_program(&self) -> &FeeProgram {
+        &self.config.fee_program
     }
 
     /// Reload config from the underlying [`ConfigService`].
