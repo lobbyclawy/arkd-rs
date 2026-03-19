@@ -1170,6 +1170,26 @@ impl ArkService {
         }
     }
 
+    /// Remove an intent from the current round by its ID.
+    ///
+    /// Returns `Ok(())` if the intent was found and removed,
+    /// or `ArkError::NotFound` if no active round or intent not found.
+    pub async fn unregister_intent(&self, intent_id: &str) -> ArkResult<()> {
+        let mut guard = self.current_round.write().await;
+        let round = guard
+            .as_mut()
+            .ok_or_else(|| ArkError::NotFound("No active round".to_string()))?;
+        if round.intents.remove(intent_id).is_some() {
+            info!(intent_id = %intent_id, "Intent unregistered");
+            Ok(())
+        } else {
+            Err(ArkError::NotFound(format!(
+                "Intent {} not found in active round",
+                intent_id
+            )))
+        }
+    }
+
     /// Submit MuSig2 tree nonces for the current batch.
     ///
     /// Called by cosigners during the tree signing phase.
