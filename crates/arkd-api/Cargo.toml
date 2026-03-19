@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 # gRPC
 tonic = { version = "0.12", features = ["tls"] }
+tonic-reflection = "0.12"
 prost = "0.13"
 tonic-web = "0.12"  # For REST/gRPC gateway
 
