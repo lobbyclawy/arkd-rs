@@ -1,0 +1,61 @@
+# =============================================================================
+# arkd-rs Configuration
+# =============================================================================
+# Copy this file to /etc/arkd/config.toml (systemd) or
+# ~/.arkd/config.toml (Docker/manual) and adjust values.
+
+[server]
+# Network: bitcoin, testnet, signet, regtest
+network = "bitcoin"
+
+# gRPC listen address (public API)
+# grpc_addr = "0.0.0.0:7070"
+
+# Admin gRPC listen address (operator API)
+# admin_addr = "127.0.0.1:7071"
+
+# Round interval in seconds
+# round_interval = 10
+
+# VTXO tree UTXO amount in satoshis
+# utxo_amount = 3000
+
+[bitcoin]
+# Bitcoin Core RPC URL
+rpc_url = "http://127.0.0.1:8332"
+rpc_user = "user"
+rpc_password = "password"
+
+# Esplora API URL (alternative to bitcoind RPC for chain scanning)
+# esplora_url = "http://localhost:5000"
+
+[database]
+# Database backend: "sqlite" or "postgres"
+type = "sqlite"
+
+# SQLite path (relative to working directory)
+# url = "arkd.db"
+
+# PostgreSQL connection string
+# url = "postgres://user:pass@localhost/arkd"
+
+[wallet]
+# BDK wallet descriptor (taproot recommended)
+# descriptor = "tr(xprv.../84'/0'/0'/0/*)"
+
+[nostr]
+# Nostr relay for event publishing (optional)
+# relay_url = "wss://relay.damus.io"
+# private_key_hex = "<64-char-hex-nsec>"
+
+[fees]
+# Fee schedule for Ark operations (satoshis)
+# base_fee = 0
+# offchain_input_fee = 0
+# onchain_input_fee = 0
+# offchain_output_fee = 0
+# onchain_output_fee = 0
+
+[logging]
+# Log level: error, warn, info, debug, trace
+# Controlled via RUST_LOG env var; this section is reserved for future use.
