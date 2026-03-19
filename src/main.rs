@@ -199,6 +199,13 @@ async fn main() -> Result<()> {
     // --- Core service (with stub impls for now) ---
     let ark_config = arkd_core::ArkConfig {
         allow_csv_block_type: config.allow_csv_block_type,
+        fee_program: arkd_core::domain::FeeProgram {
+            offchain_input_fee: file_config.fees.offchain_input_fee.unwrap_or(0),
+            onchain_input_fee: file_config.fees.onchain_input_fee.unwrap_or(0),
+            offchain_output_fee: file_config.fees.offchain_output_fee.unwrap_or(0),
+            onchain_output_fee: file_config.fees.onchain_output_fee.unwrap_or(0),
+            base_fee: file_config.fees.base_fee.unwrap_or(0),
+        },
         ..Default::default()
     };
 
