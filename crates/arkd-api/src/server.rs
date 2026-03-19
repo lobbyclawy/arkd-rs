@@ -123,8 +123,9 @@ impl Server {
             return Ok(None);
         }
 
-        let default_dir = dirs_next::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
+        let default_dir = std::env::var("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("."))
             .join(".arkd");
         let cert_path = self
             .config

@@ -147,6 +147,7 @@ impl Authenticator {
         macaroon
             .serialize(macaroon::Format::V2)
             .expect("failed to serialize admin macaroon")
+            .into_bytes()
     }
 
     /// Verify a raw macaroon token (bytes, not base64).
