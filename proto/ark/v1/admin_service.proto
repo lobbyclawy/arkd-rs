@@ -176,7 +176,12 @@ message ScheduledSweep {
 }
 
 message GetScheduledSweepResponse {
-  repeated ScheduledSweep scheduled_sweeps = 1;
+  // Deprecated singular fields kept for backward compatibility
+  int64 scheduled_at = 1;
+  uint32 vtxo_count = 2;
+  uint64 total_amount = 3;
+  // List of all scheduled sweeps (new field, non-breaking addition)
+  repeated ScheduledSweep scheduled_sweeps = 4;
 }
 
 message SweepRequest {}

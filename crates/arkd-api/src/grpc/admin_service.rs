@@ -304,6 +304,9 @@ impl AdminServiceTrait for AdminGrpcService {
         // TODO: populate from SweepScheduler once available.
         // For now return an empty list of scheduled sweeps.
         Ok(Response::new(GetScheduledSweepResponse {
+            scheduled_at: 0,
+            vtxo_count: 0,
+            total_amount: 0,
             scheduled_sweeps: vec![],
         }))
     }
