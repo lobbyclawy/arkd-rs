@@ -734,6 +734,11 @@ impl ArkService {
         self.indexer.get_stats().await
     }
 
+    /// Look up a round by its commitment transaction ID via the indexer.
+    pub async fn get_round_by_commitment_txid(&self, txid: &str) -> ArkResult<Option<Round>> {
+        self.indexer.get_round_by_commitment_txid(txid).await
+    }
+
     // ── Exit Mechanisms ─────────────────────────────────────────────
 
     /// Request a collaborative exit

@@ -74,6 +74,10 @@ impl IndexerService for RepositoryIndexer {
         self.round_repo.get_round_with_id(round_id).await
     }
 
+    async fn get_round_by_commitment_txid(&self, txid: &str) -> ArkResult<Option<Round>> {
+        self.round_repo.get_round_by_commitment_txid(txid).await
+    }
+
     async fn list_forfeits(&self, round_id: &str) -> ArkResult<Vec<ForfeitRecord>> {
         self.forfeit_repo.list_by_round(round_id).await
     }
