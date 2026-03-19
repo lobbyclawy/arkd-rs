@@ -152,14 +152,10 @@ async fn main() -> Result<()> {
             "Initialising BDK wallet service"
         );
 
-        let bdk_wallet = arkd_wallet::BdkWalletService::new(
-            descriptor,
-            change_descriptor,
-            network,
-            esplora_url,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("BDK wallet init failed: {e}"))?;
+        let bdk_wallet =
+            arkd_wallet::BdkWalletService::new(descriptor, change_descriptor, network, esplora_url)
+                .await
+                .map_err(|e| anyhow::anyhow!("BDK wallet init failed: {e}"))?;
 
         // TODO(#238): Initial sync could be slow on mainnet; consider async background sync.
         if let Err(e) = bdk_wallet.sync().await {
