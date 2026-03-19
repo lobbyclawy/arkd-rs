@@ -501,9 +501,7 @@ impl ArkServiceTrait for ArkGrpcService {
         if req.intent_id.is_empty() {
             return Err(Status::invalid_argument("intent_id is required"));
         }
-        if req.proof.is_empty() {
-            return Err(Status::invalid_argument("proof is required"));
-        }
+        // proof is optional in dev/test mode (BIP-322 verification is TODO(#40))
 
         // Look for the intent in any active round
         // Since we don't have a direct intent lookup, check if the round repo
