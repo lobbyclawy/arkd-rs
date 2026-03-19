@@ -17,6 +17,7 @@ use thiserror::Error;
 
 pub mod cache;
 pub mod config;
+pub mod embedded_kv;
 pub mod migrations;
 #[cfg(feature = "sqlite")]
 pub mod pool;
