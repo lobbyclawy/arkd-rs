@@ -176,6 +176,33 @@ async fn main() -> Result<()> {
     };
 
     // --- Core service ---
+
+    // --- Fraud detector ---
+    let _fraud_detector: Arc<dyn arkd_core::ports::FraudDetector> =
+        if let Some(ref esplora_url) = config.esplora_url {
+            info!(url = %esplora_url, "Using EsploraFraudDetector for on-chain fraud detection");
+            Arc::new(arkd_scanner::EsploraFraudDetector::new(esplora_url))
+        } else {
+            info!("No esplora_url — using NoopFraudDetector");
+            Arc::new(arkd_core::NoopFraudDetector)
+        };
+
+    // --- Sweep service ---
+    let sweep_service: Arc<dyn arkd_core::ports::SweepService> =
+        if let Some(ref esplora_url) = config.esplora_url {
+            info!(url = %esplora_url, "Using EsploraSweepService for VTXO sweep monitoring");
+            Arc::new(arkd_scanner::EsploraSweepService::new(esplora_url))
+        } else {
+            info!("No esplora_url — using NoopSweepService");
+            Arc::new(arkd_core::NoopSweepService)
+        };
+
+    // --- Core service (with stub impls for now) ---
+    let ark_config = arkd_core::ArkConfig {
+        allow_csv_block_type: config.allow_csv_block_type,
+        ..Default::default()
+    };
+
     let core = Arc::new(
         arkd_core::ArkService::new(
             wallet,
@@ -186,9 +213,10 @@ async fn main() -> Result<()> {
             Arc::new(arkd_core::LoggingEventPublisher::new(
                 arkd_core::DEFAULT_EVENT_CHANNEL_CAPACITY,
             )),
-            arkd_core::ArkConfig::default(),
+            ark_config,
         )
-        .with_scanner(scanner),
+        .with_scanner(scanner)
+        .with_sweep_service(sweep_service),
     );
 
     // --- Unlocker ---
