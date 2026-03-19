@@ -818,6 +818,8 @@ async fn test_delete_intent_empty_id() {
 async fn test_delete_intent_empty_proof() {
     let mut client = start_ark_server().await;
 
+    // Empty proof is accepted in dev/test mode (BIP-322 verification is TODO(#40)).
+    // With no active round, we expect NotFound (not InvalidArgument).
     let result = client
         .delete_intent(DeleteIntentRequest {
             intent_id: "some-intent-id".to_string(),
@@ -825,7 +827,7 @@ async fn test_delete_intent_empty_proof() {
         })
         .await;
     assert!(result.is_err());
-    assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+    assert_eq!(result.unwrap_err().code(), tonic::Code::NotFound);
 }
 
 #[tokio::test]
