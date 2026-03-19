@@ -146,15 +146,15 @@ impl AdminServiceTrait for AdminGrpcService {
             .ok_or_else(|| Status::not_found(format!("Round {} not found", req.round_id)))?;
 
         // Compute aggregate amounts and collect VTXO IDs from round intents.
-        let mut forfeited_amount: u64 = 0;
+        let forfeited_amount: u64 = 0;
         let mut total_vtxos_amount: u64 = 0;
         let mut total_exit_amount: u64 = 0;
-        let mut total_fee_amount: u64 = 0;
+        let total_fee_amount: u64 = 0;
         let mut inputs_vtxos: Vec<String> = Vec::new();
         let mut outputs_vtxos: Vec<String> = Vec::new();
         let mut exit_addresses: Vec<String> = Vec::new();
 
-        for (_id, intent) in &round.intents {
+        for intent in round.intents.values() {
             total_vtxos_amount += intent.total_input_amount();
             for input in &intent.inputs {
                 inputs_vtxos.push(format!("{}:{}", input.outpoint.txid, input.outpoint.vout));
