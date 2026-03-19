@@ -1,0 +1,54 @@
+# =============================================================================
+# Stage 1: Builder
+# =============================================================================
+FROM rust:1.75-slim AS builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    libsodium-dev \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy workspace manifests first for layer caching
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY src/ src/
+COPY proto/ proto/
+COPY migrations/ migrations/
+
+# Build the release binary
+RUN SODIUM_USE_PKG_CONFIG=1 cargo build --release --bin arkd
+
+# =============================================================================
+# Stage 2: Runtime
+# =============================================================================
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libsodium23 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -r -m -s /bin/false arkd \
+    && mkdir -p /home/arkd/.arkd /etc/arkd \
+    && chown -R arkd:arkd /home/arkd
+
+WORKDIR /app
+
+# Copy binary and example config
+COPY --from=builder /build/target/release/arkd /usr/local/bin/arkd
+
+USER arkd
+ENV HOME=/home/arkd
+ENV RUST_LOG=info
+
+# gRPC + Admin ports
+EXPOSE 7070 7071
+
+ENTRYPOINT ["/usr/local/bin/arkd"]
+CMD ["--config", "/home/arkd/.arkd/config.toml"]
