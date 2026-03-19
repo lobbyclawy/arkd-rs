@@ -500,7 +500,7 @@ impl IndexerServiceTrait for IndexerGrpcService {
         // Search all rounds' vtxo_tree for matching txids.
         // TODO(#237): Add a dedicated virtual-tx index for efficient lookups
         // instead of scanning rounds.
-        let mut txs: Vec<String> = Vec::new();
+        let txs: Vec<String> = Vec::new();
 
         for txid in &req.txids {
             // Try to find this txid in the VTXO tree of any round.
