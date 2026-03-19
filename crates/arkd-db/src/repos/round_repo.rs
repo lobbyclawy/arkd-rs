@@ -498,6 +498,24 @@ impl RoundRepository for SqliteRoundRepository {
         }))
     }
 
+    async fn get_round_by_commitment_txid(&self, txid: &str) -> ArkResult<Option<Round>> {
+        debug!(commitment_txid = %txid, "Fetching round by commitment txid");
+
+        // Look up the round id by commitment_txid, then delegate to get_round_with_id
+        // which already loads all associated data (forfeit txs, vtxo tree, etc.).
+        let maybe_id =
+            sqlx::query_scalar::<_, String>("SELECT id FROM rounds WHERE commitment_txid = ?1")
+                .bind(txid)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| ArkError::DatabaseError(e.to_string()))?;
+
+        match maybe_id {
+            Some(id) => self.get_round_with_id(&id).await,
+            None => Ok(None),
+        }
+    }
+
     async fn confirm_intent(&self, round_id: &str, intent_id: &str) -> ArkResult<()> {
         debug!(round_id = %round_id, intent_id = %intent_id, "Confirming intent");
 

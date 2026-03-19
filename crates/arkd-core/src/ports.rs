@@ -47,6 +47,10 @@ pub trait IndexerService: Send + Sync {
     async fn list_forfeits(&self, round_id: &str) -> ArkResult<Vec<ForfeitRecord>>;
     /// Get aggregated statistics.
     async fn get_stats(&self) -> ArkResult<IndexerStats>;
+    /// Look up a round by its commitment transaction ID.
+    async fn get_round_by_commitment_txid(&self, _txid: &str) -> ArkResult<Option<Round>> {
+        Ok(None)
+    }
 }
 
 /// No-op indexer that returns empty/default for every query.
@@ -71,6 +75,9 @@ impl IndexerService for NoopIndexerService {
     }
     async fn get_stats(&self) -> ArkResult<IndexerStats> {
         Ok(IndexerStats::default())
+    }
+    async fn get_round_by_commitment_txid(&self, _txid: &str) -> ArkResult<Option<Round>> {
+        Ok(None)
     }
 }
 
@@ -396,6 +403,11 @@ pub trait RoundRepository: Send + Sync {
     async fn confirm_intent(&self, round_id: &str, intent_id: &str) -> ArkResult<()>;
     /// Get intent IDs that have not yet confirmed in a round
     async fn get_pending_confirmations(&self, round_id: &str) -> ArkResult<Vec<String>>;
+    /// Look up a round by its commitment transaction ID.
+    /// Default returns None; SQLite/Postgres repos override with a real query.
+    async fn get_round_by_commitment_txid(&self, _txid: &str) -> ArkResult<Option<Round>> {
+        Ok(None)
+    }
 }
 
 /// Offchain transaction repository
