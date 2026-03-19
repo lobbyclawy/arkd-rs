@@ -10,6 +10,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Configuration for the telemetry subsystem.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TelemetryConfig {
     /// Optional OTLP endpoint for OpenTelemetry export (e.g. "http://localhost:4317").
     /// When `None`, only the fmt (console) layer is enabled.
