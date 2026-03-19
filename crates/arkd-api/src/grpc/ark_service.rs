@@ -646,11 +646,11 @@ impl ArkServiceTrait for ArkGrpcService {
                         use crate::proto::ark_v1::output::Destination;
                         match d {
                             Destination::VtxoScript(pk) => Some(pk.clone()),
-                            Destination::Address(addr) => Some(addr.clone()),
+                            Destination::OnchainAddress(addr) => Some(addr.clone()),
                         }
                     })
                     .unwrap_or_default();
-                (pubkey, vec![])
+                (pubkey, String::new())
             }
         };
 
