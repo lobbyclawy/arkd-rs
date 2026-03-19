@@ -127,6 +127,9 @@ pub struct ArkConfig {
     pub nostr_relay_url: Option<String>,
     /// Nostr private key (32-byte hex) for signing notification events
     pub nostr_private_key: Option<String>,
+    /// Whether to allow CSV block-type timelocks (vs time-based).
+    /// Passed from ServerConfig; controls round scheduling behavior.
+    pub allow_csv_block_type: bool,
 }
 
 impl Default for ArkConfig {
@@ -154,6 +157,7 @@ impl Default for ArkConfig {
             note_uri_prefix: None,
             nostr_relay_url: None,
             nostr_private_key: None,
+            allow_csv_block_type: false,
         }
     }
 }
@@ -701,6 +705,17 @@ impl ArkService {
                 });
             }
         }
+        // TODO(#246): validate boarding UTXOs exist on-chain via BlockchainScanner
+        // For each boarding input in the intent, verify the UTXO is unspent:
+        // for input in &intent.inputs {
+        //     if !self.scanner.is_utxo_unspent(&input.outpoint).await? {
+        //         return Err(ArkError::Internal(format!(
+        //             "Boarding UTXO {}:{} is already spent on-chain",
+        //             input.outpoint.txid, input.outpoint.vout
+        //         )));
+        //     }
+        // }
+
         let id = intent.id.clone();
         round.register_intent(intent).map_err(ArkError::Internal)?;
         info!(intent_id = %id, "Intent registered");
