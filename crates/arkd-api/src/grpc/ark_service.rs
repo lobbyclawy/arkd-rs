@@ -627,11 +627,11 @@ impl ArkServiceTrait for ArkGrpcService {
                     .outputs
                     .first()
                     .and_then(|o| o.destination.as_ref())
-                    .and_then(|d| {
+                    .map(|d| {
                         use crate::proto::ark_v1::output::Destination;
                         match d {
-                            Destination::VtxoScript(pk) => Some(pk.clone()),
-                            Destination::OnchainAddress(addr) => Some(addr.clone()),
+                            Destination::VtxoScript(pk) => pk.clone(),
+                            Destination::OnchainAddress(addr) => addr.clone(),
                         }
                     })
                     .unwrap_or_default();
