@@ -79,12 +79,10 @@ impl EsploraSweepService {
     /// Get the current chain tip height from Esplora.
     async fn tip_height(&self) -> ArkResult<u32> {
         let url = format!("{}/blocks/tip/height", self.base_url);
-        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| ArkError::Internal(format!("Esplora tip height request failed: {e}")))?;
+        let resp =
+            self.client.get(&url).send().await.map_err(|e| {
+                ArkError::Internal(format!("Esplora tip height request failed: {e}"))
+            })?;
 
         if !resp.status().is_success() {
             return Err(ArkError::Internal(format!(
@@ -353,7 +351,10 @@ mod tests {
         let service = EsploraSweepService::new(&server.url());
         let result = service.check_sweepable(txid, 0, 50_000, 144).await.unwrap();
 
-        assert!(result.is_some(), "Output should be sweepable (1000 > 144 CSV)");
+        assert!(
+            result.is_some(),
+            "Output should be sweepable (1000 > 144 CSV)"
+        );
         let output = result.unwrap();
         assert_eq!(output.txid, txid);
         assert_eq!(output.amount, 50_000);
@@ -396,7 +397,10 @@ mod tests {
         let service = EsploraSweepService::new(&server.url());
         let result = service.check_sweepable(txid, 0, 50_000, 144).await.unwrap();
 
-        assert!(result.is_none(), "CSV not elapsed — should not be sweepable");
+        assert!(
+            result.is_none(),
+            "CSV not elapsed — should not be sweepable"
+        );
     }
 
     #[tokio::test]

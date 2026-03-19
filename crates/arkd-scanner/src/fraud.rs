@@ -221,7 +221,10 @@ mod tests {
 
         let detector = EsploraFraudDetector::new(&server.url());
         let vtxo_id = format!("{}:2", txid);
-        let result = detector.detect_double_spend(&vtxo_id, "round-1").await.unwrap();
+        let result = detector
+            .detect_double_spend(&vtxo_id, "round-1")
+            .await
+            .unwrap();
         assert!(result, "Should detect double-spend");
 
         mock.assert_async().await;
@@ -248,14 +251,8 @@ mod tests {
     async fn test_drain_pending_forfeits() {
         let detector = EsploraFraudDetector::new("http://localhost:3000");
 
-        detector
-            .react_to_fraud("vtxo_a:0", "hex_a")
-            .await
-            .unwrap();
-        detector
-            .react_to_fraud("vtxo_b:1", "hex_b")
-            .await
-            .unwrap();
+        detector.react_to_fraud("vtxo_a:0", "hex_a").await.unwrap();
+        detector.react_to_fraud("vtxo_b:1", "hex_b").await.unwrap();
 
         let drained = detector.drain_pending_forfeits().await;
         assert_eq!(drained.len(), 2);
@@ -265,7 +262,9 @@ mod tests {
     #[tokio::test]
     async fn test_invalid_vtxo_id_format() {
         let detector = EsploraFraudDetector::new("http://localhost:3000");
-        let result = detector.detect_double_spend("invalid_no_colon", "round-1").await;
+        let result = detector
+            .detect_double_spend("invalid_no_colon", "round-1")
+            .await;
         assert!(result.is_err());
     }
 }
