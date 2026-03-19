@@ -23,19 +23,11 @@ use crate::ports::{
     ArkEvent, AssetRepository, BanRepository, BlockchainScanner, BoardingRepository, CacheService,
     CheckpointRepository, ConfigService, ConfirmationStore, ConvictionRepository, EventPublisher,
     FeeManagerService, ForfeitRepository, FraudDetector, IndexerService, IndexerStats,
-<<<<<<< HEAD
     NoopAssetRepository, NoopBlockchainScanner, NoopBoardingRepository, NoopCheckpointRepository,
     NoopConfirmationStore, NoopConvictionRepository, NoopFeeManager, NoopForfeitRepository,
     NoopFraudDetector, NoopIndexerService, NoopOffchainTxRepository, NoopSweepService,
     OffchainTxRepository, SignerService, SigningSessionStore, SweepService, TxBuilder,
     VtxoRepository, WalletService,
-=======
-    NoopBlockchainScanner, NoopBoardingRepository, NoopCheckpointRepository, NoopConfirmationStore,
-    NoopConvictionRepository, NoopFeeManager, NoopForfeitRepository, NoopFraudDetector,
-    NoopIndexerService, NoopNotifier, NoopOffchainTxRepository, NoopSweepService, Notifier,
-    OffchainTxRepository, SignerService, SigningSessionStore, SweepService, TxBuilder,
-    VtxoRepository, WalletService,
->>>>>>> 11535c7 (style: run cargo fmt)
 };
 
 /// Round timing configuration (matches Go arkd's `roundTiming`)
