@@ -8,8 +8,8 @@ CONFIG="tests/nigiri-config.toml"
 
 echo "=== arkd-rs E2E Test ==="
 
-# 1. Check Nigiri is running
-if ! curl -sf http://localhost:3000/blocks/tip/height > /dev/null 2>&1; then
+# 1. Check Nigiri is running (Esplora on port 5000)
+if ! curl -sf http://localhost:5000/blocks/tip/height > /dev/null 2>&1; then
   echo "ERROR: Nigiri not running. Start with: nigiri start"
   exit 1
 fi
