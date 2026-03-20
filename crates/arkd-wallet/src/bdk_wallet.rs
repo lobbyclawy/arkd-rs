@@ -345,7 +345,9 @@ impl WalletService for BdkWalletService {
 
 /// Builder for [`BdkWalletService`].
 ///
-/// ```rust,ignore
+/// ```rust,no_run
+/// # use arkd_wallet::bdk_wallet::WalletBuilder;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let svc = WalletBuilder {
 ///     descriptor: "tr(...)".into(),
 ///     change_descriptor: "tr(...)".into(),
@@ -354,6 +356,7 @@ impl WalletService for BdkWalletService {
 /// }
 /// .build()
 /// .await?;
+/// # Ok(()) }
 /// ```
 pub struct WalletBuilder {
     pub descriptor: String,

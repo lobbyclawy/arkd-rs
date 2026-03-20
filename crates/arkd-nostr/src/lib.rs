@@ -12,22 +12,18 @@
 //!
 //! # Example
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use arkd_nostr::{NostrNotifier, NostrConfig};
-//! use arkd_core::ports::Notifier;
-//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = NostrConfig::new(
 //!     "wss://relay.damus.io",
 //!     "your_private_key_hex",
 //! );
 //! let notifier = NostrNotifier::new(config)?;
 //!
-//! // Send a notification
-//! notifier.notify(
-//!     "recipient_pubkey_hex",
-//!     "VTXO Expiry",
-//!     "Your VTXO expires soon!",
-//! ).await?;
+//! // Send a notification (requires async runtime)
+//! # let _ = notifier;
+//! # Ok(()) }
 //! ```
 
 pub mod crypto;

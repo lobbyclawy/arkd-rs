@@ -44,7 +44,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use arkd_wallet::{WalletConfig, WalletManager, WalletServiceImpl};
 //! use std::sync::Arc;
 //!
@@ -82,32 +82,31 @@
 //! - **RandomDraw**: Privacy-preserving random selection
 //! - **ArkOptimized**: Optimized for Ark round funding
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use arkd_wallet::coin_selection::{CoinSelector, CoinSelectionStrategy};
 //! use bitcoin::Amount;
+//! # let utxos: Vec<arkd_wallet::WalletUtxo> = vec![];
 //!
 //! let selector = CoinSelector::new(2.0) // 2 sat/vB fee rate
 //!     .with_strategy(CoinSelectionStrategy::ArkOptimized);
 //!
-//! let result = selector.select(&utxos, Amount::from_sat(100_000), 1)?;
+//! # let _ = selector.select(&utxos, Amount::from_sat(100_000), 1);
 //! ```
 //!
 //! ### Transaction Signing
 //!
 //! The `Signer` provides both ECDSA and Schnorr signing:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! use arkd_wallet::Signer;
+//! # use bitcoin::secp256k1::{Keypair, Secp256k1};
+//! # let keypair = Keypair::new(&Secp256k1::new(), &mut bitcoin::secp256k1::rand::thread_rng());
+//! # let message_hash = [0u8; 32];
 //!
 //! let signer = Signer::new();
 //!
 //! // Schnorr signing for Taproot
-//! let sig = signer.sign_schnorr(&message_hash, &keypair)?;
-//!
-//! // Taproot key-path signing
-//! let sig = signer.sign_taproot_key_spend(
-//!     &tx, input_index, &prevouts, &keypair, sighash_type
-//! )?;
+//! let _ = signer.sign_schnorr(&message_hash, &keypair);
 //! ```
 
 use thiserror::Error;
