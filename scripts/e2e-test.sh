@@ -83,11 +83,21 @@ fi
 # ─── Start arkd if not running ─────────────────────────────────────────────
 if [ -z "$ARKD_PID" ]; then
     echo ""
+    echo "→ Writing light-mode config for e2e..."
+    cat > /tmp/arkd-e2e-config.toml <<'TOMLEOF'
+[deployment]
+mode = "light"
+
+[server]
+esplora_url = "http://localhost:5000"
+TOMLEOF
+    echo "  ✅ Config written to /tmp/arkd-e2e-config.toml"
+
     echo "→ Starting arkd..."
     if [ "${ARKD_VERBOSE:-}" = "1" ]; then
-        ${BINARY} &
+        ${BINARY} --config /tmp/arkd-e2e-config.toml --grpc-addr 0.0.0.0:7070 &
     else
-        ${BINARY} > /dev/null 2>&1 &
+        ${BINARY} --config /tmp/arkd-e2e-config.toml --grpc-addr 0.0.0.0:7070 > /dev/null 2>&1 &
     fi
     ARKD_PID=$!
     trap "echo '→ Stopping arkd (PID ${ARKD_PID})...'; kill ${ARKD_PID} 2>/dev/null || true; wait ${ARKD_PID} 2>/dev/null || true" EXIT
@@ -143,6 +153,16 @@ fi
 
 echo "→ cargo test ${TEST_ARGS}"
 echo ""
+
+# Verify arkd is still alive before running tests
+if [ -n "${ARKD_PID:-}" ]; then
+    if ! kill -0 "$ARKD_PID" 2>/dev/null; then
+        echo "ERROR: arkd (PID ${ARKD_PID}) died before tests could run."
+        echo "  Check logs with: ARKD_VERBOSE=1 $0"
+        exit 1
+    fi
+    echo "  ✅ arkd still running (PID ${ARKD_PID})"
+fi
 
 # Run tests and capture exit code
 set +e

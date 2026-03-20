@@ -56,6 +56,11 @@ async fn main() -> Result<()> {
     let mut config = arkd_api::ServerConfig::default();
     if let Some(addr) = args.grpc_addr.or(file_config.server.grpc_addr) {
         config.grpc_addr = addr;
+    } else if let Some(port) = args.grpc_port {
+        config.grpc_addr = format!("0.0.0.0:{}", port);
+    }
+    if let Some(port) = args.admin_port {
+        config.admin_grpc_addr = Some(format!("0.0.0.0:{}", port));
     }
     if let Some(v) = file_config.server.rest_addr {
         config.rest_addr = Some(v);

@@ -11,6 +11,14 @@ pub struct Cli {
     #[arg(long)]
     pub grpc_addr: Option<String>,
 
+    /// Override gRPC listen port (ignored if --grpc-addr is set)
+    #[arg(long)]
+    pub grpc_port: Option<u16>,
+
+    /// Override admin gRPC listen port
+    #[arg(long)]
+    pub admin_port: Option<u16>,
+
     /// Override log level (trace/debug/info/warn/error)
     #[arg(long, default_value = "info")]
     pub log_level: String,
