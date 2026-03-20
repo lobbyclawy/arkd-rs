@@ -1155,27 +1155,22 @@ mod tests {
     async fn test_issue_asset_returns_not_implemented() {
         let mut c = ArkClient::new("http://localhost:50051");
         let result = c.issue_asset(1_000, None, None).await;
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("not yet implemented"), "got: {msg}");
+        // Now calls gRPC; without a live server it fails with a transport/connection error.
+        assert!(result.is_err(), "expected error from disconnected client");
     }
 
     #[tokio::test]
     async fn test_reissue_asset_returns_not_implemented() {
         let mut c = ArkClient::new("http://localhost:50051");
         let result = c.reissue_asset("asset-id-123", 500).await;
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("not yet implemented"), "got: {msg}");
+        assert!(result.is_err(), "expected error from disconnected client");
     }
 
     #[tokio::test]
     async fn test_burn_asset_returns_not_implemented() {
         let mut c = ArkClient::new("http://localhost:50051");
         let result = c.burn_asset("asset-id-123", 100).await;
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("not yet implemented"), "got: {msg}");
+        assert!(result.is_err(), "expected error from disconnected client");
     }
 
     #[test]
