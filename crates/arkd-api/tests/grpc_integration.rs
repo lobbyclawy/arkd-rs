@@ -742,8 +742,8 @@ async fn test_estimate_intent_fee_basic() {
         .unwrap();
 
     let fee = resp.into_inner();
-    // Fee is 0 with default zero-rate FeeProgram; assert non-negative
-    assert!(fee.fee_sats >= 0, "fee_sats should be non-negative");
+    // Fee is 0 with default zero-rate FeeProgram; just verify we got a response
+    let _ = fee.fee_sats; // fee_sats is u64, always non-negative
 }
 
 #[tokio::test]
