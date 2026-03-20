@@ -8,8 +8,8 @@ use bitcoin::Transaction;
 
 /// A decoder that parses hex-encoded PSBTs or raw Bitcoin transactions.
 ///
-/// The trait implementation ([`arkd_core::TxDecoder`]) lives in
-/// `arkd-core::tx_decoder_impl` to avoid a circular dependency.
+/// The `TxDecoder` trait implementation lives in
+/// `arkd_core::tx_decoder_impl` to avoid a circular dependency.
 #[derive(Debug, Clone, Default)]
 pub struct BitcoinTxDecoder;
 

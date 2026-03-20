@@ -69,7 +69,7 @@ mod tests {
             }],
             output: vec![TxOut {
                 value: Amount::from_sat(50_000),
-                script_pubkey: ScriptBuf::from_bytes(vec![0x00, 0x14, 0xaa; 22]),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x00, 0x14, 0xaa, 0xbb, 0xcc]),
             }],
         }
     }
