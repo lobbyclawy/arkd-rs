@@ -334,6 +334,14 @@ async fn main() -> Result<()> {
         "Round loop started"
     );
 
+    // Start the first round synchronously before accepting connections.
+    // This eliminates the race where a client connects and calls register_intent
+    // before the async round-loop task has had a chance to process its first tick.
+    match core.start_round().await {
+        Ok(r) => info!(round_id = %r.id, "Initial round started"),
+        Err(e) => info!("Initial round skipped: {e}"),
+    }
+
     let server = arkd_api::Server::new(
         config,
         core,
