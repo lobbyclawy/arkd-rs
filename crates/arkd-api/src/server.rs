@@ -318,7 +318,14 @@ impl Server {
         }))
     }
 
-    /// Spawn the admin gRPC server on a separate port.
+    /// Spawn the admin gRPC + REST server on a separate port.
+    ///
+    /// The admin port serves both:
+    /// - gRPC services (AdminService, WalletService, optionally SignerManagerService)
+    /// - REST/JSON endpoints under `/v1/admin/...` for HTTP clients (e.g. Go e2e tests)
+    ///
+    /// REST handlers delegate directly to the same gRPC service implementations,
+    /// so behavior is identical regardless of transport.
     fn spawn_admin_server(
         &self,
         tls_config: Option<tonic::transport::ServerTlsConfig>,
@@ -328,14 +335,18 @@ impl Server {
             .parse()
             .map_err(|e| crate::ApiError::StartupError(format!("Invalid admin address: {e}")))?;
 
-        let admin_service = AdminGrpcService::new_with_auth(
+        // Create gRPC service implementations (shared with REST via Arc)
+        let admin_service = Arc::new(AdminGrpcService::new_with_auth(
             Arc::clone(&self.core),
             Arc::clone(&self.authenticator),
-        );
-        let admin_svc = tonic_web::enable(AdminServiceServer::new(admin_service));
+        ));
+        let wallet_service = Arc::new(WalletGrpcService::new(self.core.wallet()));
 
-        let wallet_service = WalletGrpcService::new(self.core.wallet());
-        let wallet_svc = tonic_web::enable(WalletServiceServer::new(wallet_service));
+        // Wrap in tonic-web for gRPC
+        let admin_svc =
+            tonic_web::enable(AdminServiceServer::from_arc(Arc::clone(&admin_service)));
+        let wallet_svc =
+            tonic_web::enable(WalletServiceServer::from_arc(Arc::clone(&wallet_service)));
 
         // Build optional SignerManagerService (only if swappable_signer was configured)
         let signer_mgr_svc = self.swappable_signer.as_ref().map(|signer| {
@@ -343,13 +354,20 @@ impl Server {
             tonic_web::enable(SignerManagerServiceServer::new(signer_mgr))
         });
 
+        // Build the REST router sharing the same service instances
+        let rest_state = crate::rest::RestState {
+            wallet_svc: wallet_service,
+            admin_svc: admin_service,
+        };
+        let rest_router = crate::rest::build_rest_router(rest_state);
+
         let cancel = self.cancel.clone();
 
         let has_signer_mgr = signer_mgr_svc.is_some();
         let tls_enabled = tls_config.is_some();
         info!(
             %addr, tls = tls_enabled, signer_manager = has_signer_mgr,
-            "Spawning admin gRPC server (AdminService + WalletService{})",
+            "Spawning admin server (gRPC + REST) (AdminService + WalletService{})",
             if has_signer_mgr { " + SignerManagerService" } else { "" }
         );
 
@@ -358,20 +376,33 @@ impl Server {
             if let Some(tls) = tls_config {
                 builder = builder.tls_config(tls).expect("invalid TLS configuration");
             }
-            let router = builder
+            let mut grpc_routes = builder
                 .accept_http1(true)
                 .add_service(admin_svc)
                 .add_service(wallet_svc);
 
             // Conditionally add SignerManagerService
             if let Some(signer_svc) = signer_mgr_svc {
-                router
-                    .add_service(signer_svc)
-                    .serve_with_shutdown(addr, cancel.cancelled())
-                    .await
-            } else {
-                router.serve_with_shutdown(addr, cancel.cancelled()).await
+                grpc_routes = grpc_routes.add_service(signer_svc);
             }
+
+            // Convert tonic router to axum and merge with REST routes.
+            // gRPC paths (e.g. /ark.v1.AdminService/...) and REST paths
+            // (e.g. /v1/admin/...) don't overlap, so merging is safe.
+            #[allow(deprecated)] // into_router deprecated in favor of Routes::into_axum_router
+            let grpc_axum = grpc_routes.into_router();
+            let combined = grpc_axum.merge(rest_router);
+
+            // Serve the combined router via axum
+            let listener = tokio::net::TcpListener::bind(addr)
+                .await
+                .expect("bind admin address");
+            axum::serve(listener, combined)
+                .with_graceful_shutdown(cancel.cancelled_owned())
+                .await
+                .expect("admin server error");
+
+            Ok::<(), tonic::transport::Error>(())
         }))
     }
 

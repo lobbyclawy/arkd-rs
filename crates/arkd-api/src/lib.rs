@@ -23,6 +23,7 @@ pub mod config;
 pub mod grpc;
 pub mod handlers;
 pub mod monitoring;
+pub mod rest;
 pub mod server;
 
 /// Generated protobuf types and service traits.
