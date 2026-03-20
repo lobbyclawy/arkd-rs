@@ -14,3 +14,6 @@ breaking:
   ignore:
     # Intentional breaking changes to match Go arkd upstream proto API
     - ark/v1/wallet_service.proto
+    # Intentional go_package change: arkd → dark rename
+    - ark/v1/signer_service.proto
+    - ark/v1/signer_manager_service.proto
