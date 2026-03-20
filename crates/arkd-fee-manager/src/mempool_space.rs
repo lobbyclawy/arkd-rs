@@ -57,7 +57,7 @@ struct CacheEntry {
 
 /// mempool.space recommended fees response.
 ///
-/// See: https://mempool.space/docs/api/rest#get-recommended-fees
+/// See: <https://mempool.space/docs/api/rest#get-recommended-fees>
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RecommendedFees {
