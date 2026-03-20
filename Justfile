@@ -178,8 +178,11 @@ watch:
 # E2E / Integration
 # =============================================================================
 
-# Run E2E regtest suite (starts Nigiri, runs tests, stops Nigiri)
+# Run E2E regtest suite (starts Nigiri, waits for readiness, runs tests, stops Nigiri)
 e2e *args:
     nigiri start
+    @echo "⏳ Waiting for Esplora to be ready..."
+    @until curl -sf http://localhost:5000/blocks/tip/height > /dev/null 2>&1; do sleep 1; done
+    @echo "✅ Esplora ready"
     ./scripts/e2e-test.sh {{args}}
     nigiri stop
