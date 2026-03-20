@@ -58,7 +58,6 @@ impl RoundPhase {
 mod inner {
     use super::*;
     use std::sync::atomic::{AtomicU8, Ordering};
-    use std::sync::Arc;
     use tracing::{info, warn};
 
     /// Global round-phase state for Pyroscope labels.
@@ -94,7 +93,7 @@ mod inner {
 
     /// Handle to the running Pyroscope agent. Drop to stop profiling.
     pub struct ProfilingAgent {
-        _agent: pyroscope::PyroscopeAgent<pyroscope_pprofrs::Pprof>,
+        _agent: pyroscope::pyroscope::PyroscopeAgent<pyroscope::pyroscope::PyroscopeAgentRunning>,
     }
 
     /// Start the Pyroscope continuous profiling agent.
@@ -112,7 +111,7 @@ mod inner {
 
         let agent = pyroscope::PyroscopeAgent::builder(url, &config.pyroscope_app_name)
             .tags([("service", "arkd-rs")].to_vec())
-            .backend(pyroscope_pprofrs::Pprof::new(
+            .backend(pyroscope_pprofrs::pprof_backend(
                 pyroscope_pprofrs::PprofConfig::new().sample_rate(100),
             ))
             .build();
