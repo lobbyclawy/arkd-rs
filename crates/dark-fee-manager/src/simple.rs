@@ -1,8 +1,8 @@
 //! Simple flat-rate fee manager implementation.
 
+use async_trait::async_trait;
 use dark_core::error::ArkResult;
 use dark_core::ports::FeeManagerService;
-use async_trait::async_trait;
 
 /// Simple fee manager with a flat fee rate and minimum fee.
 ///

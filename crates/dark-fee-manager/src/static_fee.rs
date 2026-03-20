@@ -1,8 +1,8 @@
 //! Static fee manager — returns a fixed fee rate (useful for dev/test).
 
+use async_trait::async_trait;
 use dark_core::error::ArkResult;
 use dark_core::ports::{FeeManager, FeeStrategy};
-use async_trait::async_trait;
 
 /// A fee manager that always returns a fixed fee rate.
 ///

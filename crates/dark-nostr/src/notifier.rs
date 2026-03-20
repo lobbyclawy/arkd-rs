@@ -2,9 +2,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use dark_core::error::{ArkError, ArkResult};
 use dark_core::ports::Notifier;
-use async_trait::async_trait;
 
 use crate::crypto::{nip04_encrypt, sign_event, NostrKeypair};
 use crate::relay::RelayConnection;

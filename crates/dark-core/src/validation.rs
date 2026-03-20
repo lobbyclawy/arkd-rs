@@ -318,10 +318,10 @@ mod tests {
 
     mod intent_proof_tests {
         use super::*;
-        use dark_bitcoin::bip322::{self, Bip322Proof};
         use bitcoin::key::{Keypair, TapTweak};
         use bitcoin::secp256k1::Secp256k1;
         use bitcoin::Network;
+        use dark_bitcoin::bip322::{self, Bip322Proof};
 
         /// Helper to create a valid BIP-322 proof for testing.
         fn make_valid_proof(intent_id: &str) -> Bip322Proof {

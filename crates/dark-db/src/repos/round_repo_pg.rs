@@ -1,12 +1,12 @@
 //! Round repository — PostgreSQL implementation of `dark_core::ports::RoundRepository`
 
+use async_trait::async_trait;
 use dark_core::domain::{
     ConfirmationStatus, ForfeitTx, Intent, Receiver, Round, RoundStage, RoundStats, Stage,
     TxTreeNode, Vtxo, VtxoOutpoint,
 };
 use dark_core::error::{ArkError, ArkResult};
 use dark_core::ports::RoundRepository;
-use async_trait::async_trait;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tracing::debug;

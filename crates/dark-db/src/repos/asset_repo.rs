@@ -2,10 +2,10 @@
 //!
 //! Implements [`AssetRepository`] for persistent asset storage.
 
+use async_trait::async_trait;
 use dark_core::domain::asset::{Asset, AssetIssuance};
 use dark_core::error::ArkResult;
 use dark_core::ports::AssetRepository;
-use async_trait::async_trait;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 

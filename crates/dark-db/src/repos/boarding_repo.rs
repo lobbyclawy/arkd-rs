@@ -1,9 +1,9 @@
 //! Boarding repository — SQLite implementation of `dark_core::ports::BoardingRepository`
 
+use async_trait::async_trait;
 use dark_core::domain::BoardingTransaction;
 use dark_core::error::{ArkError, ArkResult};
 use dark_core::ports::BoardingRepository;
-use async_trait::async_trait;
 use sqlx::SqlitePool;
 use tracing::debug;
 
@@ -132,9 +132,9 @@ struct BoardingRow {
 
 impl BoardingRow {
     fn try_into_boarding_tx(self) -> Option<BoardingTransaction> {
-        use dark_core::domain::BoardingStatus;
         use bitcoin::{Amount, XOnlyPublicKey};
         use chrono::DateTime;
+        use dark_core::domain::BoardingStatus;
         use std::str::FromStr;
         use uuid::Uuid;
 

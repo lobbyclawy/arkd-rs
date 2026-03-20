@@ -3,10 +3,10 @@
 //! Stores a singleton config under key `sched_session::config`.
 
 use crate::embedded_kv::SledKvStore;
+use async_trait::async_trait;
 use dark_core::domain::ScheduledSessionConfig;
 use dark_core::error::{ArkError, ArkResult};
 use dark_core::ports::ScheduledSessionRepository;
-use async_trait::async_trait;
 use std::sync::Arc;
 
 const CONFIG_KEY: &[u8] = b"sched_session::config";

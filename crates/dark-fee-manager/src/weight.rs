@@ -8,10 +8,10 @@
 //! - P2TR input: 57.5 vbytes
 //! - P2TR output: 43 vbytes
 
+use async_trait::async_trait;
 use dark_core::domain::Vtxo;
 use dark_core::error::ArkResult;
 use dark_core::ports::{BoardingInput, FeeManagerService};
-use async_trait::async_trait;
 
 /// Transaction overhead in milli-vbytes (10.5 vbytes = 10_500 mvB).
 const TX_OVERHEAD_MVB: u64 = 10_500;

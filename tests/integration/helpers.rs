@@ -5,12 +5,12 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use bitcoin::XOnlyPublicKey;
 use dark_core::domain::{Intent, Receiver, Vtxo, VtxoOutpoint};
 use dark_core::error::ArkResult;
 use dark_core::ports::*;
 use dark_core::{ArkConfig, ArkService};
-use async_trait::async_trait;
-use bitcoin::XOnlyPublicKey;
 use secp256k1::{rand::rngs::OsRng, Secp256k1};
 use std::str::FromStr;
 use tokio::sync::RwLock;

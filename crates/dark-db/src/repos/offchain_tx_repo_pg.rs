@@ -1,9 +1,9 @@
 //! Offchain transaction repository — PostgreSQL implementation
 
+use async_trait::async_trait;
 use dark_core::domain::{OffchainTx, OffchainTxStage, VtxoInput, VtxoOutput};
 use dark_core::error::{ArkError, ArkResult};
 use dark_core::ports::OffchainTxRepository;
-use async_trait::async_trait;
 use sqlx::PgPool;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;

@@ -25,11 +25,11 @@ use dark_api::grpc::ark_service::ArkGrpcService;
 
 // ─── Mock infrastructure ────────────────────────────────────────────
 
+use async_trait::async_trait;
+use bitcoin::XOnlyPublicKey;
 use dark_core::domain::{Vtxo, VtxoOutpoint};
 use dark_core::error::ArkResult;
 use dark_core::ports::*;
-use async_trait::async_trait;
-use bitcoin::XOnlyPublicKey;
 
 struct MockWallet;
 #[async_trait]

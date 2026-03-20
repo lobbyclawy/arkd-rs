@@ -6,9 +6,9 @@
 //!
 //! Both implement `dark_core::ports::CacheService`.
 
+use async_trait::async_trait;
 use dark_core::error::{ArkError, ArkResult};
 use dark_core::ports::CacheService;
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

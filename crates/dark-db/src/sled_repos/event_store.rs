@@ -4,9 +4,9 @@
 //! sequence is a zero-padded monotonic counter per aggregate.
 
 use crate::embedded_kv::SledKvStore;
+use async_trait::async_trait;
 use dark_core::error::{ArkError, ArkResult};
 use dark_core::ports::EventStore;
-use async_trait::async_trait;
 use std::sync::Arc;
 
 /// Sled-backed event store for aggregate event persistence.

@@ -1,8 +1,8 @@
 //! Signing session store — SQLite implementation of `dark_core::ports::SigningSessionStore`
 
+use async_trait::async_trait;
 use dark_core::error::{ArkError, ArkResult};
 use dark_core::ports::SigningSessionStore;
-use async_trait::async_trait;
 use sqlx::SqlitePool;
 use tracing::debug;
 

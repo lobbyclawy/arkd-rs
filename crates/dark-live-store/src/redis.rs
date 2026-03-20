@@ -1,8 +1,8 @@
 //! Redis-backed implementation of [`LiveStore`] for production use.
 
+use async_trait::async_trait;
 use dark_core::error::{ArkError, ArkResult};
 use dark_core::ports::LiveStore;
-use async_trait::async_trait;
 use redis::AsyncCommands;
 
 /// Redis-backed ephemeral live-store.

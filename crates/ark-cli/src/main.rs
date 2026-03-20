@@ -1,6 +1,6 @@
 use anyhow::Result;
-use dark_client::ArkClient;
 use clap::{Parser, Subcommand};
+use dark_client::ArkClient;
 
 /// Command-line client for dark
 #[derive(Parser, Debug)]

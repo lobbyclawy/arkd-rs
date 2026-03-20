@@ -6,10 +6,10 @@
 //! - `conv::script::{script}::{id}` → id (script index)
 
 use crate::embedded_kv::SledKvStore;
+use async_trait::async_trait;
 use dark_core::domain::{Conviction, ConvictionKind, CrimeType};
 use dark_core::error::{ArkError, ArkResult};
 use dark_core::ports::ConvictionRepository;
-use async_trait::async_trait;
 use std::sync::Arc;
 
 /// Sled-backed conviction repository.

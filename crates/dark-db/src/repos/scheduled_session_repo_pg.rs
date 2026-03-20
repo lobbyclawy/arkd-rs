@@ -1,10 +1,10 @@
 //! Scheduled-session config repository — PostgreSQL implementation of
 //! `dark_core::ports::ScheduledSessionRepository`
 
+use async_trait::async_trait;
 use dark_core::domain::ScheduledSessionConfig;
 use dark_core::error::{ArkError, ArkResult};
 use dark_core::ports::ScheduledSessionRepository;
-use async_trait::async_trait;
 use sqlx::PgPool;
 use tracing::debug;
 

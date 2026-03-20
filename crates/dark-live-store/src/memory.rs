@@ -3,13 +3,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use dark_core::domain::{Intent, SigningSession as DomainSigningSession, SigningSessionStatus};
 use dark_core::error::ArkResult;
 use dark_core::ports::{
     ConfirmationStore, CurrentRoundStore, ForfeitTxsStore, IntentsQueue, LiveStore,
     SigningSessionStore,
 };
-use async_trait::async_trait;
 use tokio::sync::{Mutex, RwLock};
 
 // ---------------------------------------------------------------------------

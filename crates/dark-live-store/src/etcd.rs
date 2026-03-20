@@ -1,8 +1,8 @@
 //! etcd-backed implementation of [`LiveStore`] for clustered deployments.
 
+use async_trait::async_trait;
 use dark_core::error::{ArkError, ArkResult};
 use dark_core::ports::LiveStore;
-use async_trait::async_trait;
 use etcd_client::{Client, GetOptions, PutOptions};
 
 /// etcd-backed ephemeral live-store.

@@ -1,8 +1,8 @@
 //! Logging implementation of the `NotificationService` port.
 
+use async_trait::async_trait;
 use dark_core::error::ArkResult;
 use dark_core::ports::NotificationService;
-use async_trait::async_trait;
 
 /// Logs all notifications via `tracing` — useful for development and debugging.
 pub struct LoggingNotificationService;
