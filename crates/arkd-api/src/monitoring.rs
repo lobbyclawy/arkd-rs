@@ -95,10 +95,7 @@ async fn pprof_handler(Query(params): Query<PprofParams>) -> impl IntoResponse {
 
             let report = guard.report().build()?;
             let profile = report.pprof()?;
-            let mut body = Vec::new();
-            profile
-                .write_to_vec(&mut body)
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+            let body = prost::Message::encode_to_vec(&profile);
             Ok(body)
         })
         .await

@@ -153,11 +153,8 @@ mod inner {
                 std::thread::sleep(duration);
 
                 let report = guard.report().build()?;
-                let mut body = Vec::new();
-                report
-                    .pprof()?
-                    .write_to_vec(&mut body)
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+                let profile = report.pprof()?;
+                let body = prost::Message::encode_to_vec(&profile);
                 Ok(body)
             },
         )
