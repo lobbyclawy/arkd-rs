@@ -13,6 +13,9 @@ use arkd_core::ports::{OffchainTxRepository, RoundRepository};
 
 use crate::proto::ark_v1::ark_service_server::ArkService as ArkServiceTrait;
 use crate::proto::ark_v1::{
+    // Asset & note RPCs
+    BurnAssetRequest,
+    BurnAssetResponse,
     // New Go arkd parity RPCs
     ConfirmRegistrationRequest,
     ConfirmRegistrationResponse,
@@ -37,12 +40,18 @@ use crate::proto::ark_v1::{
     GetVtxosRequest,
     GetVtxosResponse,
     IntentFeeInfo,
+    IssueAssetRequest,
+    IssueAssetResponse,
     ListRoundsRequest,
     ListRoundsResponse,
+    RedeemNotesRequest,
+    RedeemNotesResponse,
     RegisterForRoundRequest,
     RegisterForRoundResponse,
     RegisterIntentRequest,
     RegisterIntentResponse,
+    ReissueAssetRequest,
+    ReissueAssetResponse,
     RequestExitRequest,
     RequestExitResponse,
     RoundEvent,
@@ -62,15 +71,6 @@ use crate::proto::ark_v1::{
     TransactionHeartbeatEvent,
     UpdateStreamTopicsRequest,
     UpdateStreamTopicsResponse,
-    // Asset & note RPCs
-    BurnAssetRequest,
-    BurnAssetResponse,
-    IssueAssetRequest,
-    IssueAssetResponse,
-    RedeemNotesRequest,
-    RedeemNotesResponse,
-    ReissueAssetRequest,
-    ReissueAssetResponse,
 };
 use std::collections::HashSet;
 
