@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    extract::{Query, State},
+    extract::State,
     http::StatusCode,
     response::IntoResponse,
     routing::get,
@@ -64,59 +64,22 @@ async fn health_handler(State(state): State<Arc<MonitoringState>>) -> impl IntoR
     (StatusCode::OK, Json(response))
 }
 
-/// Query parameters for the pprof endpoint.
-#[derive(serde::Deserialize)]
-struct PprofParams {
-    /// Profile duration in seconds (default: 30, max: 300).
-    seconds: Option<u64>,
-}
-
-/// GET /debug/pprof — capture an on-demand CPU profile.
+/// GET /debug/pprof — informational endpoint.
 ///
-/// Returns a flamegraph SVG. Open in a browser to visualize CPU hotspots, or
-/// compatible viewers. Requires the `profiling` feature flag.
-///
-/// Query params:
-/// - `seconds` — profile duration (default 30, max 300)
-#[cfg(feature = "profiling")]
-async fn pprof_handler(Query(params): Query<PprofParams>) -> impl IntoResponse {
-    let seconds = params.seconds.unwrap_or(30).min(300).max(1);
-
-    info!(duration_secs = seconds, "Starting on-demand CPU profile");
-
-    let result: Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> =
-        tokio::task::spawn_blocking(move || {
-            let guard = pprof::ProfilerGuardBuilder::default()
-                .frequency(99)
-                .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-                .build()?;
-
-            std::thread::sleep(std::time::Duration::from_secs(seconds));
-
-            let report = guard.report().build()?;
-            let mut body = Vec::new();
-            report.flamegraph(&mut body)?;
-            Ok(body)
-        })
-        .await
-        .unwrap_or_else(|e| Err(Box::new(e) as _));
-
-    match result {
-        Ok(body) => (StatusCode::OK, [("content-type", "image/svg+xml")], body).into_response(),
-        Err(e) => {
-            let msg = format!("pprof capture failed: {e}");
-            tracing::warn!("{}", msg);
-            (StatusCode::SERVICE_UNAVAILABLE, msg).into_response()
-        }
-    }
-}
-
-/// GET /debug/pprof — stub when profiling feature is disabled.
-#[cfg(not(feature = "profiling"))]
+/// On-demand pprof capture is not available; continuous profiling is provided
+/// via Pyroscope when the `profiling` feature flag is enabled. Connect the
+/// Pyroscope UI to view CPU profiles.
 async fn pprof_handler() -> impl IntoResponse {
+    #[cfg(feature = "profiling")]
+    return (
+        StatusCode::OK,
+        "Continuous CPU profiling is active via Pyroscope. \
+         Connect your Pyroscope UI to view profiles.",
+    );
+    #[cfg(not(feature = "profiling"))]
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        "pprof endpoint requires the `profiling` feature flag. Rebuild with `--features profiling`.",
+        "Profiling is disabled. Rebuild with `--features profiling` to enable Pyroscope.",
     )
 }
 

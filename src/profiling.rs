@@ -1,14 +1,10 @@
 //! Continuous profiling integration for arkd-rs.
 //!
-//! Provides two complementary profiling capabilities behind the `profiling` feature flag:
+//! Provides continuous CPU profiling behind the `profiling` feature flag via Pyroscope.
 //!
-//! 1. **Pyroscope continuous profiling** — When `pyroscope_url` is configured, a background
-//!    agent continuously sends CPU profiling data to a Pyroscope server. Round-phase labels
-//!    (idle, registration, signing, finalization) are attached for fine-grained analysis.
-//!
-//! 2. **On-demand pprof endpoint** — A `/debug/pprof` HTTP endpoint on the admin/monitoring
-//!    port that captures a CPU profile for the requested duration and returns it as a
-//!    protobuf-encoded pprof profile.
+//! When `pyroscope_url` is configured, a background agent continuously sends CPU profiling
+//! data to a Pyroscope server. Round-phase labels (idle, registration, signing, finalization)
+//! are attached for fine-grained analysis. Connect the Pyroscope UI to view profiles.
 //!
 //! See: <https://github.com/lobbyclawy/arkd-rs/issues/274>
 
@@ -134,33 +130,6 @@ mod inner {
         }
     }
 
-    /// Build a pprof CPU profile for the given duration and return the
-    /// protobuf-encoded bytes.
-    pub async fn capture_pprof_profile(
-        duration_secs: u64,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-        let duration = std::time::Duration::from_secs(duration_secs);
-
-        // pprof::ProfilerGuard is !Send, so run in a blocking task
-        let bytes = tokio::task::spawn_blocking(
-            move || -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-                let guard = pprof::ProfilerGuardBuilder::default()
-                    .frequency(99)
-                    .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-                    .build()?;
-
-                std::thread::sleep(duration);
-
-                let report = guard.report().build()?;
-                let mut body = Vec::new();
-                report.flamegraph(&mut body)?;
-                Ok(body)
-            },
-        )
-        .await??;
-
-        Ok(bytes)
-    }
 }
 
 #[cfg(not(feature = "profiling"))]
@@ -190,12 +159,6 @@ mod inner {
         None
     }
 
-    /// Returns an error when profiling feature is disabled.
-    pub async fn capture_pprof_profile(
-        _duration_secs: u64,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-        Err("pprof endpoint requires the `profiling` feature flag".into())
-    }
 }
 
 // Re-export from the active implementation

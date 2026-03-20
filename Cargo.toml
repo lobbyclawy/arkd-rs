@@ -10,7 +10,7 @@ repository = "https://github.com/lobbyclawy/arkd-rs"
 [features]
 default = []
 light = []
-profiling = ["pyroscope", "pyroscope_pprofrs", "pprof", "arkd-api/profiling"]
+profiling = ["pyroscope", "pyroscope_pprofrs", "arkd-api/profiling"]
 
 [workspace]
 members = [
@@ -85,7 +85,6 @@ async-trait = "0.1"
 # Profiling (behind `profiling` feature flag)
 pyroscope = { version = "0.5", optional = true }
 pyroscope_pprofrs = { version = "0.2", optional = true }
-pprof = { version = "0.15", features = ["flamegraph", "protobuf", "prost-codec"], optional = true }
 
 # Utilities
 hex = "0.4"
