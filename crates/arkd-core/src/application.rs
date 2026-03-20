@@ -20,14 +20,14 @@ use crate::domain::{
 use crate::domain::{FeeProgram, OffchainTx, VtxoInput, VtxoOutput};
 use crate::error::{ArkError, ArkResult};
 use crate::ports::{
-    ArkEvent, AssetRepository, BanRepository, BlockchainScanner, BoardingRepository, CacheService,
-    CheckpointRepository, ConfigService, ConfirmationStore, ConvictionRepository, EventPublisher,
-    FeeManagerService, ForfeitRepository, FraudDetector, IndexerService, IndexerStats,
-    NoopAssetRepository, NoopBlockchainScanner, NoopBoardingRepository, NoopCheckpointRepository,
-    NoopConfirmationStore, NoopConvictionRepository, NoopFeeManager, NoopForfeitRepository,
-    NoopFraudDetector, NoopIndexerService, NoopOffchainTxRepository, NoopSweepService,
-    OffchainTxRepository, SignerService, SigningSessionStore, SweepService, TxBuilder,
-    VtxoRepository, WalletService,
+    Alerts, ArkEvent, AssetRepository, BanRepository, BlockchainScanner, BoardingRepository,
+    CacheService, CheckpointRepository, ConfigService, ConfirmationStore, ConvictionRepository,
+    EventPublisher, FeeManagerService, ForfeitRepository, FraudDetector, IndexerService,
+    IndexerStats, NoopAlerts, NoopAssetRepository, NoopBlockchainScanner, NoopBoardingRepository,
+    NoopCheckpointRepository, NoopConfirmationStore, NoopConvictionRepository, NoopFeeManager,
+    NoopForfeitRepository, NoopFraudDetector, NoopIndexerService, NoopOffchainTxRepository,
+    NoopSweepService, OffchainTxRepository, SignerService, SigningSessionStore, SweepService,
+    TxBuilder, VtxoRepository, WalletService,
 };
 
 /// Round timing configuration (matches Go arkd's `roundTiming`)
@@ -191,6 +191,7 @@ pub struct ArkService {
     signing_session_store: Arc<dyn crate::ports::SigningSessionStore>,
     asset_repo: Arc<dyn AssetRepository>,
     notifier: Arc<dyn crate::ports::Notifier>,
+    alerts: Arc<dyn Alerts>,
     config: ArkConfig,
     config_service: Arc<dyn ConfigService>,
     current_round: RwLock<Option<Round>>,
@@ -234,6 +235,7 @@ impl ArkService {
             signing_session_store: Arc::new(crate::ports::NoopSigningSessionStore),
             asset_repo: Arc::new(NoopAssetRepository),
             notifier: Arc::new(crate::ports::NoopNotifier),
+            alerts: Arc::new(NoopAlerts),
             config,
             config_service,
             current_round: RwLock::new(None),
@@ -295,6 +297,13 @@ impl ArkService {
     }
 
     /// Set a custom notifier for VTXO expiry notifications (Issue #247).
+    /// Set a custom alerts implementation (e.g. Prometheus Alertmanager).
+    pub fn with_alerts(mut self, alerts: Arc<dyn Alerts>) -> Self {
+        self.alerts = alerts;
+        self
+    }
+
+    /// Set a custom notifier for VTXO expiry notifications.
     pub fn with_notifier(mut self, notifier: Arc<dyn crate::ports::Notifier>) -> Self {
         self.notifier = notifier;
         self
