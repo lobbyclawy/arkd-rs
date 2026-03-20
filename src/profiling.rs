@@ -9,6 +9,7 @@
 //! See: <https://github.com/lobbyclawy/arkd-rs/issues/274>
 
 /// Configuration for continuous profiling.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ProfilingConfig {
     /// Pyroscope server URL (e.g. "http://localhost:4040").
@@ -28,6 +29,7 @@ impl Default for ProfilingConfig {
 }
 
 /// Round phase labels for Pyroscope tag filtering.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoundPhase {
     Idle,
@@ -140,6 +142,7 @@ mod inner {
 }
 
 #[cfg(not(feature = "profiling"))]
+#[allow(dead_code)]
 mod inner {
     use super::*;
     use tracing::info;
