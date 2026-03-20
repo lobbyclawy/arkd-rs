@@ -55,7 +55,7 @@ fn esplora_url() -> String {
 
 /// Returns the gRPC endpoint where arkd is expected to listen.
 fn grpc_endpoint() -> String {
-    std::env::var("ARKD_GRPC_URL").unwrap_or_else(|_| "http://[::1]:7070".to_string())
+    std::env::var("ARKD_GRPC_URL").unwrap_or_else(|_| "http://127.0.0.1:7070".to_string())
 }
 
 /// Returns the admin HTTP URL from the environment, or the default.

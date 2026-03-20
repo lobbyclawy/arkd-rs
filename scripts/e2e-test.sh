@@ -16,7 +16,7 @@ set -euo pipefail
 # ─── Configuration ─────────────────────────────────────────────────────────
 ESPLORA_URL="${ESPLORA_URL:-http://localhost:5000}"
 BITCOIN_RPC_URL="${BITCOIN_RPC_URL:-http://admin1:123@127.0.0.1:18443}"
-ARKD_GRPC_URL="${ARKD_GRPC_URL:-http://[::1]:7070}"
+ARKD_GRPC_URL="${ARKD_GRPC_URL:-http://127.0.0.1:7070}"
 ARKD_ADMIN_URL="${ARKD_ADMIN_URL:-http://localhost:7071}"
 GRPC_HOST="${GRPC_HOST:-localhost:7070}"
 FILTER=""
