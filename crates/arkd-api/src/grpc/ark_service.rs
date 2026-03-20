@@ -999,7 +999,10 @@ impl ArkServiceTrait for ArkGrpcService {
         request: Request<ReissueAssetRequest>,
     ) -> Result<Response<ReissueAssetResponse>, Status> {
         let req = request.into_inner();
-        info!("ArkService::ReissueAsset called (stub) asset_id={}", req.asset_id);
+        info!(
+            "ArkService::ReissueAsset called (stub) asset_id={}",
+            req.asset_id
+        );
         Ok(Response::new(ReissueAssetResponse {
             txid: format!("stub-reissue-tx-{}", req.asset_id),
         }))
@@ -1010,7 +1013,10 @@ impl ArkServiceTrait for ArkGrpcService {
         request: Request<BurnAssetRequest>,
     ) -> Result<Response<BurnAssetResponse>, Status> {
         let req = request.into_inner();
-        info!("ArkService::BurnAsset called (stub) asset_id={}", req.asset_id);
+        info!(
+            "ArkService::BurnAsset called (stub) asset_id={}",
+            req.asset_id
+        );
         Ok(Response::new(BurnAssetResponse {
             txid: format!("stub-burn-tx-{}", req.asset_id),
         }))
@@ -1021,7 +1027,10 @@ impl ArkServiceTrait for ArkGrpcService {
         request: Request<RedeemNotesRequest>,
     ) -> Result<Response<RedeemNotesResponse>, Status> {
         let req = request.into_inner();
-        info!("ArkService::RedeemNotes called (stub) notes={}", req.notes.len());
+        info!(
+            "ArkService::RedeemNotes called (stub) notes={}",
+            req.notes.len()
+        );
         Ok(Response::new(RedeemNotesResponse {
             txid: "stub-redeem-notes-tx".to_string(),
             amount_redeemed: 0,
