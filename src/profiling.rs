@@ -38,6 +38,7 @@ pub enum RoundPhase {
 
 impl RoundPhase {
     /// Returns the label value string for this phase.
+    #[allow(dead_code)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "idle",
