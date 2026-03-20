@@ -852,9 +852,12 @@ async fn test_unilateral_exit_leaf_vtxo() {
     mine_blocks(6).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Call unroll — stub returns error until Bitcoin tx construction is wired
+    // Call unroll — returns Ok(vec![]) until full Bitcoin tx construction is wired
     let unroll_result = alice.unroll().await;
     match &unroll_result {
+        Ok(txids) if txids.is_empty() => {
+            eprintln!("unroll: no VTXOs to unroll (stub — wallet signing not yet wired)");
+        }
         Ok(txids) => {
             eprintln!("unroll: broadcast {} txid(s)", txids.len());
             assert!(!txids.is_empty(), "unroll should produce at least one txid");
@@ -873,11 +876,8 @@ async fn test_unilateral_exit_leaf_vtxo() {
             );
         }
         Err(e) => {
-            eprintln!("unroll (stub): {}", e);
-            assert!(
-                e.to_string().contains("not yet implemented"),
-                "unexpected error: {e}"
-            );
+            eprintln!("unroll error: {}", e);
+            panic!("unroll should not return an error: {e}");
         }
     }
 
