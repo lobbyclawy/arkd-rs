@@ -26,6 +26,7 @@ members = [
     "crates/arkd-client",
     "crates/arkd-nostr",
     "crates/arkd-signer",
+    "crates/arkd-wallet-bin",
 ]
 
 [dependencies]
