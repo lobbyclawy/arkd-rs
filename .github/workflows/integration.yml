@@ -46,9 +46,10 @@ jobs:
             sleep 2
           done
 
-          # Mine 101 blocks so wallet has spendable UTXOs
-          docker exec bitcoind bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 \
-            generatetoaddress 101 "$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 getnewaddress)"
+          # Create wallet and mine 101 blocks so wallet has spendable UTXOs
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 createwallet "default"
+          ADDR=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 getnewaddress)
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 generatetoaddress 101 "$ADDR"
 
           # Start Electrs (Esplora API) pointing at bitcoind
           docker run -d --name electrs \
