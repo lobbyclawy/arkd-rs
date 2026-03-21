@@ -385,6 +385,13 @@ pub trait VtxoRepository: Send + Sync {
         let _ = before_timestamp;
         Ok(Vec::new())
     }
+    /// List all VTXOs without filtering by pubkey.
+    ///
+    /// Returns (spendable, spent) VTXOs. Default implementation returns empty;
+    /// override in concrete repos for full indexer support.
+    async fn list_all(&self) -> ArkResult<(Vec<Vtxo>, Vec<Vtxo>)> {
+        Ok((Vec::new(), Vec::new()))
+    }
 }
 
 /// Round repository
@@ -407,6 +414,19 @@ pub trait RoundRepository: Send + Sync {
     /// Default returns None; SQLite/Postgres repos override with a real query.
     async fn get_round_by_commitment_txid(&self, _txid: &str) -> ArkResult<Option<Round>> {
         Ok(None)
+    }
+    /// List rounds with pagination.
+    ///
+    /// Returns rounds ordered by creation time (newest first), with offset/limit.
+    /// Default returns empty; override in concrete repos for full indexer support.
+    async fn list_rounds(&self, _offset: u32, _limit: u32) -> ArkResult<Vec<Round>> {
+        Ok(Vec::new())
+    }
+    /// Count total rounds in the repository.
+    ///
+    /// Used for indexer stats. Default returns 0.
+    async fn count_rounds(&self) -> ArkResult<u64> {
+        Ok(0)
     }
 }
 

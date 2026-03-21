@@ -253,6 +253,40 @@ impl VtxoRepository for PgVtxoRepository {
 
         Ok(vtxos)
     }
+
+    async fn list_all(&self) -> ArkResult<(Vec<Vtxo>, Vec<Vtxo>)> {
+        debug!("Listing all VTXOs (PG)");
+
+        let rows = sqlx::query_as::<_, PgVtxoRow>(
+            r#"
+            SELECT txid, vout, pubkey, amount, root_commitment_txid,
+                   settled_by, spent_by, ark_txid, spent, unrolled, swept,
+                   preconfirmed, expires_at, created_at
+            FROM vtxos
+            WHERE unrolled = FALSE
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ArkError::DatabaseError(e.to_string()))?;
+
+        let mut spendable = Vec::new();
+        let mut spent = Vec::new();
+
+        for row in rows {
+            let commitment_txids = self
+                .get_commitment_txids(&row.txid, row.vout as u32)
+                .await?;
+            let vtxo = row.into_vtxo(commitment_txids);
+            if vtxo.spent || vtxo.swept {
+                spent.push(vtxo);
+            } else {
+                spendable.push(vtxo);
+            }
+        }
+
+        Ok((spendable, spent))
+    }
 }
 
 impl PgVtxoRepository {

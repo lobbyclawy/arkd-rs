@@ -554,6 +554,43 @@ impl RoundRepository for SqliteRoundRepository {
 
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
+
+    async fn list_rounds(&self, offset: u32, limit: u32) -> ArkResult<Vec<Round>> {
+        debug!(offset, limit, "Listing rounds with pagination");
+
+        let rows = sqlx::query_as::<_, (String,)>(
+            r#"
+            SELECT id FROM rounds
+            ORDER BY starting_timestamp DESC
+            LIMIT ?1 OFFSET ?2
+            "#,
+        )
+        .bind(limit as i32)
+        .bind(offset as i32)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ArkError::DatabaseError(e.to_string()))?;
+
+        let mut rounds = Vec::with_capacity(rows.len());
+        for (id,) in rows {
+            if let Some(round) = self.get_round_with_id(&id).await? {
+                rounds.push(round);
+            }
+        }
+
+        Ok(rounds)
+    }
+
+    async fn count_rounds(&self) -> ArkResult<u64> {
+        debug!("Counting total rounds");
+
+        let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM rounds")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| ArkError::DatabaseError(e.to_string()))?;
+
+        Ok(count as u64)
+    }
 }
 
 // ─── Row types ──────────────────────────────────────────────────────────────
@@ -835,5 +872,62 @@ mod tests {
 
         let result = repo.get_round_stats("nonexistent").await.unwrap();
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_rounds_pagination() {
+        let (_db, repo) = setup().await;
+
+        // Create several rounds with different timestamps
+        for i in 0..5 {
+            let mut round = make_round(&format!("round-{i}"));
+            round.starting_timestamp = 1700000000 + (i as i64 * 100);
+            round.start_registration().unwrap();
+            repo.add_or_update_round(&round).await.unwrap();
+        }
+
+        // List first 2 rounds (should be the newest)
+        let page1 = repo.list_rounds(0, 2).await.unwrap();
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1[0].id, "round-4"); // newest first
+        assert_eq!(page1[1].id, "round-3");
+
+        // List next 2 rounds
+        let page2 = repo.list_rounds(2, 2).await.unwrap();
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2[0].id, "round-2");
+        assert_eq!(page2[1].id, "round-1");
+
+        // List remaining
+        let page3 = repo.list_rounds(4, 2).await.unwrap();
+        assert_eq!(page3.len(), 1);
+        assert_eq!(page3[0].id, "round-0");
+    }
+
+    #[tokio::test]
+    async fn test_count_rounds() {
+        let (_db, repo) = setup().await;
+
+        // Initially no rounds
+        let count = repo.count_rounds().await.unwrap();
+        assert_eq!(count, 0);
+
+        // Add some rounds
+        for i in 0..3 {
+            let mut round = make_round(&format!("round-{i}"));
+            round.start_registration().unwrap();
+            repo.add_or_update_round(&round).await.unwrap();
+        }
+
+        let count = repo.count_rounds().await.unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[tokio::test]
+    async fn test_list_rounds_empty() {
+        let (_db, repo) = setup().await;
+
+        let rounds = repo.list_rounds(0, 10).await.unwrap();
+        assert!(rounds.is_empty());
     }
 }

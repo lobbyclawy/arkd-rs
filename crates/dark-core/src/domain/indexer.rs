@@ -46,10 +46,11 @@ impl IndexerService for RepositoryIndexer {
                 Ok(all)
             }
             None => {
-                // VtxoRepository doesn't expose a list-all method yet.
-                // Return empty until a `list_all` query is added to the repo trait.
-                // TODO(#133): add VtxoRepository::list_all for unfiltered listing
-                Ok(Vec::new())
+                // Use the list_all method for unfiltered listing
+                let (spendable, spent) = self.vtxo_repo.list_all().await?;
+                let mut all = spendable;
+                all.extend(spent);
+                Ok(all)
             }
         }
     }
@@ -64,10 +65,8 @@ impl IndexerService for RepositoryIndexer {
         Ok(vtxos.into_iter().next())
     }
 
-    async fn list_rounds(&self, _offset: u32, _limit: u32) -> ArkResult<Vec<Round>> {
-        // RoundRepository doesn't expose paginated listing yet.
-        // TODO(#133): add RoundRepository::list_rounds(offset, limit)
-        Ok(Vec::new())
+    async fn list_rounds(&self, offset: u32, limit: u32) -> ArkResult<Vec<Round>> {
+        self.round_repo.list_rounds(offset, limit).await
     }
 
     async fn get_round(&self, round_id: &str) -> ArkResult<Option<Round>> {
@@ -83,10 +82,22 @@ impl IndexerService for RepositoryIndexer {
     }
 
     async fn get_stats(&self) -> ArkResult<IndexerStats> {
-        // Without list-all queries on the repos we can only return defaults.
-        // Real stats will be populated once repo list methods are added.
-        // TODO(#133): compute real stats from repos
-        Ok(IndexerStats::default())
+        // Compute real stats from the repositories
+        let (spendable, spent) = self.vtxo_repo.list_all().await?;
+        let total_vtxos = (spendable.len() + spent.len()) as u64;
+        let total_sats_locked: u64 = spendable.iter().map(|v| v.amount).sum();
+        let total_rounds = self.round_repo.count_rounds().await?;
+
+        // For forfeit count, we'd need a count method on ForfeitRepository.
+        // For now, return 0 (could be added in a future PR).
+        let total_forfeits = 0;
+
+        Ok(IndexerStats {
+            total_vtxos,
+            total_rounds,
+            total_forfeits,
+            total_sats_locked,
+        })
     }
 }
 
@@ -177,5 +188,156 @@ mod tests {
     fn test_indexer_service_trait_object_safe() {
         fn _assert<T: ?Sized>() {}
         _assert::<dyn IndexerService>();
+    }
+
+    // ── Tests with populated repos ──────────────────────────────────
+
+    struct PopulatedVtxoRepo {
+        vtxos: Vec<Vtxo>,
+    }
+
+    impl PopulatedVtxoRepo {
+        fn new(vtxos: Vec<Vtxo>) -> Self {
+            Self { vtxos }
+        }
+    }
+
+    #[async_trait]
+    impl VtxoRepository for PopulatedVtxoRepo {
+        async fn add_vtxos(&self, _: &[Vtxo]) -> ArkResult<()> {
+            Ok(())
+        }
+        async fn get_vtxos(&self, _: &[VtxoOutpoint]) -> ArkResult<Vec<Vtxo>> {
+            Ok(vec![])
+        }
+        async fn get_all_vtxos_for_pubkey(&self, pk: &str) -> ArkResult<(Vec<Vtxo>, Vec<Vtxo>)> {
+            let (spendable, spent): (Vec<_>, Vec<_>) = self
+                .vtxos
+                .iter()
+                .filter(|v| v.pubkey == pk)
+                .cloned()
+                .partition(|v| !v.spent && !v.swept);
+            Ok((spendable, spent))
+        }
+        async fn spend_vtxos(&self, _: &[(VtxoOutpoint, String)], _: &str) -> ArkResult<()> {
+            Ok(())
+        }
+        async fn list_all(&self) -> ArkResult<(Vec<Vtxo>, Vec<Vtxo>)> {
+            let (spendable, spent): (Vec<_>, Vec<_>) = self
+                .vtxos
+                .iter()
+                .cloned()
+                .partition(|v| !v.spent && !v.swept);
+            Ok((spendable, spent))
+        }
+    }
+
+    struct PopulatedRoundRepo {
+        rounds: Vec<Round>,
+    }
+
+    impl PopulatedRoundRepo {
+        fn new(rounds: Vec<Round>) -> Self {
+            Self { rounds }
+        }
+    }
+
+    #[async_trait]
+    impl RoundRepository for PopulatedRoundRepo {
+        async fn add_or_update_round(&self, _: &Round) -> ArkResult<()> {
+            Ok(())
+        }
+        async fn get_round_with_id(&self, id: &str) -> ArkResult<Option<Round>> {
+            Ok(self.rounds.iter().find(|r| r.id == id).cloned())
+        }
+        async fn get_round_stats(&self, _: &str) -> ArkResult<Option<crate::domain::RoundStats>> {
+            Ok(None)
+        }
+        async fn confirm_intent(&self, _: &str, _: &str) -> ArkResult<()> {
+            Ok(())
+        }
+        async fn get_pending_confirmations(&self, _: &str) -> ArkResult<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn list_rounds(&self, offset: u32, limit: u32) -> ArkResult<Vec<Round>> {
+            let start = offset as usize;
+            let end = std::cmp::min(start + limit as usize, self.rounds.len());
+            if start >= self.rounds.len() {
+                return Ok(vec![]);
+            }
+            Ok(self.rounds[start..end].to_vec())
+        }
+        async fn count_rounds(&self) -> ArkResult<u64> {
+            Ok(self.rounds.len() as u64)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_indexer_list_vtxos_all() {
+        let v1 = Vtxo::new(VtxoOutpoint::new("tx1".into(), 0), 100_000, "pk1".into());
+        let v2 = Vtxo::new(VtxoOutpoint::new("tx2".into(), 0), 200_000, "pk2".into());
+        let vtxo_repo = Arc::new(PopulatedVtxoRepo::new(vec![v1, v2]));
+
+        let idx = RepositoryIndexer::new(
+            vtxo_repo,
+            Arc::new(EmptyRoundRepo),
+            Arc::new(NoopForfeitRepository),
+        );
+
+        // list_vtxos(None) should return all VTXOs
+        let all = idx.list_vtxos(None).await.unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_indexer_list_rounds_pagination() {
+        let rounds = (0..5)
+            .map(|i| {
+                let mut r = Round::new();
+                r.id = format!("round-{i}");
+                r
+            })
+            .collect();
+        let round_repo = Arc::new(PopulatedRoundRepo::new(rounds));
+
+        let idx = RepositoryIndexer::new(
+            Arc::new(EmptyVtxoRepo),
+            round_repo,
+            Arc::new(NoopForfeitRepository),
+        );
+
+        let page1 = idx.list_rounds(0, 2).await.unwrap();
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1[0].id, "round-0");
+        assert_eq!(page1[1].id, "round-1");
+
+        let page2 = idx.list_rounds(2, 2).await.unwrap();
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2[0].id, "round-2");
+    }
+
+    #[tokio::test]
+    async fn test_indexer_stats_with_data() {
+        let v1 = Vtxo::new(VtxoOutpoint::new("tx1".into(), 0), 100_000, "pk1".into());
+        let v2 = Vtxo::new(VtxoOutpoint::new("tx2".into(), 0), 200_000, "pk2".into());
+        let vtxo_repo = Arc::new(PopulatedVtxoRepo::new(vec![v1, v2]));
+
+        let rounds = (0..3).map(|i| {
+            let mut r = Round::new();
+            r.id = format!("round-{i}");
+            r
+        }).collect();
+        let round_repo = Arc::new(PopulatedRoundRepo::new(rounds));
+
+        let idx = RepositoryIndexer::new(
+            vtxo_repo,
+            round_repo,
+            Arc::new(NoopForfeitRepository),
+        );
+
+        let stats = idx.get_stats().await.unwrap();
+        assert_eq!(stats.total_vtxos, 2);
+        assert_eq!(stats.total_rounds, 3);
+        assert_eq!(stats.total_sats_locked, 300_000);
     }
 }

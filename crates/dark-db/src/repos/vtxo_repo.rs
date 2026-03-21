@@ -254,6 +254,40 @@ impl VtxoRepository for SqliteVtxoRepository {
 
         Ok(vtxos)
     }
+
+    async fn list_all(&self) -> ArkResult<(Vec<Vtxo>, Vec<Vtxo>)> {
+        debug!("Listing all VTXOs");
+
+        let rows = sqlx::query_as::<_, VtxoRow>(
+            r#"
+            SELECT txid, vout, pubkey, amount, root_commitment_txid,
+                   settled_by, spent_by, ark_txid, spent, unrolled, swept,
+                   preconfirmed, expires_at, created_at
+            FROM vtxos
+            WHERE unrolled = FALSE
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ArkError::DatabaseError(e.to_string()))?;
+
+        let mut spendable = Vec::new();
+        let mut spent = Vec::new();
+
+        for row in rows {
+            let commitment_txids = self
+                .get_commitment_txids(&row.txid, row.vout as u32)
+                .await?;
+            let vtxo = row.into_vtxo(commitment_txids);
+            if vtxo.spent || vtxo.swept {
+                spent.push(vtxo);
+            } else {
+                spendable.push(vtxo);
+            }
+        }
+
+        Ok((spendable, spent))
+    }
 }
 
 impl SqliteVtxoRepository {
@@ -510,5 +544,48 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].amount, 50_000);
         assert_eq!(result[1].amount, 60_000);
+    }
+
+    #[tokio::test]
+    async fn test_list_all_vtxos() {
+        let (_db, repo) = setup().await;
+
+        // Add VTXOs for different pubkeys
+        let v1 = make_vtxo("tx1", 0, "pk_alice", 100_000);
+        let v2 = make_vtxo("tx2", 0, "pk_bob", 200_000);
+        let mut v3 = make_vtxo("tx3", 0, "pk_alice", 50_000);
+        v3.spent = true;
+        v3.spent_by = "forfeit_tx".to_string();
+
+        repo.add_vtxos(&[v1, v2, v3]).await.unwrap();
+
+        let (spendable, spent) = repo.list_all().await.unwrap();
+
+        // Should have 2 spendable (alice + bob) and 1 spent (alice)
+        assert_eq!(spendable.len(), 2);
+        assert_eq!(spent.len(), 1);
+        assert_eq!(spent[0].outpoint.txid, "tx3");
+
+        // Total amount in spendable
+        let total: u64 = spendable.iter().map(|v| v.amount).sum();
+        assert_eq!(total, 300_000);
+    }
+
+    #[tokio::test]
+    async fn test_list_all_excludes_unrolled() {
+        let (_db, repo) = setup().await;
+
+        let v1 = make_vtxo("tx1", 0, "pk1", 100_000);
+        let mut v2 = make_vtxo("tx2", 0, "pk1", 50_000);
+        v2.unrolled = true;
+
+        repo.add_vtxos(&[v1, v2]).await.unwrap();
+
+        let (spendable, spent) = repo.list_all().await.unwrap();
+
+        // Only v1 should be returned (v2 is unrolled)
+        assert_eq!(spendable.len(), 1);
+        assert_eq!(spent.len(), 0);
+        assert_eq!(spendable[0].outpoint.txid, "tx1");
     }
 }

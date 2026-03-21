@@ -548,6 +548,43 @@ impl RoundRepository for PgRoundRepository {
 
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
+
+    async fn list_rounds(&self, offset: u32, limit: u32) -> ArkResult<Vec<Round>> {
+        debug!(offset, limit, "Listing rounds with pagination (PG)");
+
+        let rows = sqlx::query_as::<_, (String,)>(
+            r#"
+            SELECT id FROM rounds
+            ORDER BY starting_timestamp DESC
+            LIMIT $1 OFFSET $2
+            "#,
+        )
+        .bind(limit as i32)
+        .bind(offset as i32)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ArkError::DatabaseError(e.to_string()))?;
+
+        let mut rounds = Vec::with_capacity(rows.len());
+        for (id,) in rows {
+            if let Some(round) = self.get_round_with_id(&id).await? {
+                rounds.push(round);
+            }
+        }
+
+        Ok(rounds)
+    }
+
+    async fn count_rounds(&self) -> ArkResult<u64> {
+        debug!("Counting total rounds (PG)");
+
+        let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM rounds")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| ArkError::DatabaseError(e.to_string()))?;
+
+        Ok(count as u64)
+    }
 }
 
 // ─── Row types (PG) ─────────────────────────────────────────────────────────
