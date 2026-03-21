@@ -111,8 +111,8 @@ async fn test_unilateral_exit_flow() {
     assert_eq!(exit.exit_type, ExitType::Unilateral);
     assert_eq!(exit.status, ExitStatus::Pending);
     assert_eq!(exit.amount, bitcoin::Amount::from_sat(300_000));
-    // claimable_height = 800_000 (mock block height) + 512 (default delay)
-    assert_eq!(exit.claimable_height, Some(800_512));
+    // claimable_height = 800_000 (mock block height) + 144 (86400s / 600s per block)
+    assert_eq!(exit.claimable_height, Some(800_144));
 }
 
 #[tokio::test]
