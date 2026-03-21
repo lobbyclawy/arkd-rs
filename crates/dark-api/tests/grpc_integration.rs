@@ -471,10 +471,10 @@ async fn test_get_info_default_values_are_sensible() {
     assert_eq!(info.utxo_min_amount, 1000);
     // Default utxo_max_amount should be 1 BTC (100_000_000 sats)
     assert_eq!(info.utxo_max_amount, 100_000_000);
-    // Default boarding_exit_delay should be 512 blocks
-    assert_eq!(info.boarding_exit_delay, 512);
-    // Default public_unilateral_exit_delay should be 512 blocks
-    assert_eq!(info.public_unilateral_exit_delay, 512);
+    // Default boarding_exit_delay should be 7776000 seconds (~3 months)
+    assert_eq!(info.boarding_exit_delay, 7_776_000);
+    // Default public_unilateral_exit_delay should be 86400 seconds (~24 hours)
+    assert_eq!(info.public_unilateral_exit_delay, 86_400);
     // Default max_tx_weight should be 400_000
     assert_eq!(info.max_tx_weight, 400_000);
 }

@@ -51,8 +51,11 @@ pub const DEFAULT_VTXO_EXPIRY_SECS: i64 = 7 * 24 * 60 * 60;
 pub const DEFAULT_MIN_INTENTS: u32 = 1;
 /// Default max intents
 pub const DEFAULT_MAX_INTENTS: u32 = 128;
-/// Default unilateral exit delay (blocks)
-pub const DEFAULT_UNILATERAL_EXIT_DELAY: u32 = 512;
+/// Average seconds per Bitcoin block (~10 minutes).
+/// Used to convert between seconds and block counts.
+pub const SECS_PER_BLOCK: u32 = 600;
+/// Default unilateral exit delay (seconds, ~24 hours)
+pub const DEFAULT_UNILATERAL_EXIT_DELAY: u32 = 86_400;
 /// Min VTXO amount (dust limit)
 pub const MIN_VTXO_AMOUNT_SATS: u64 = 546;
 /// Default session duration (seconds)
@@ -61,10 +64,10 @@ pub const DEFAULT_SESSION_DURATION_SECS: u64 = 10;
 pub const DEFAULT_UTXO_MIN_AMOUNT: u64 = 1_000;
 /// Default max UTXO amount for boarding (sats)
 pub const DEFAULT_UTXO_MAX_AMOUNT: u64 = 100_000_000;
-/// Default CSV delay for public unilateral exits (blocks)
-pub const DEFAULT_PUBLIC_UNILATERAL_EXIT_DELAY: u32 = 512;
-/// Default CSV delay for boarding inputs (blocks)
-pub const DEFAULT_BOARDING_EXIT_DELAY: u32 = 512;
+/// Default CSV delay for public unilateral exits (seconds, ~24 hours)
+pub const DEFAULT_PUBLIC_UNILATERAL_EXIT_DELAY: u32 = 86_400;
+/// Default CSV delay for boarding inputs (seconds, ~3 months)
+pub const DEFAULT_BOARDING_EXIT_DELAY: u32 = 7_776_000;
 /// Default max commitment tx weight
 pub const DEFAULT_MAX_TX_WEIGHT: u64 = 400_000;
 /// Default event channel capacity for broadcast subscribers

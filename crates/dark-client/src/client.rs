@@ -247,7 +247,7 @@ impl ArkClient {
         // ── Boarding address ──────────────────────────────────────────────
         // The boarding output is a P2TR locked with two leaves:
         //   1. Cooperative path: <user_pubkey> + <server_forfeit_pubkey>
-        //   2. Exit path: <user_pubkey> CHECKSEQUENCEVERIFY after unilateral_exit_delay blocks
+        //   2. Exit path: <user_pubkey> CHECKSEQUENCEVERIFY after unilateral_exit_delay seconds
         let coop_leaf = format!(
             "OP_CHECKSIG pubkey:{} AND pubkey:{}",
             pubkey, info.forfeit_pubkey
