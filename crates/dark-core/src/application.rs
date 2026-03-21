@@ -905,7 +905,11 @@ impl ArkService {
 
         // Calculate claimable height (convert exit delay from seconds to blocks)
         let block_time = self.wallet.get_current_block_time().await?;
-        let delay_blocks = self.config.unilateral_exit_delay / crate::domain::SECS_PER_BLOCK;
+        // Ceiling division: ensure at least 1 block delay for any non-zero seconds value.
+        let delay_blocks = self
+            .config
+            .unilateral_exit_delay
+            .div_ceil(crate::domain::SECS_PER_BLOCK);
         let claimable_height = block_time.height as u32 + delay_blocks;
 
         let exit = Exit::unilateral(
@@ -1877,8 +1881,8 @@ mod tests {
         let config = ArkConfig::default();
         assert_eq!(config.utxo_min_amount, 1_000);
         assert_eq!(config.utxo_max_amount, 100_000_000);
-        assert_eq!(config.public_unilateral_exit_delay, 86_400);
-        assert_eq!(config.boarding_exit_delay, 7_776_000);
+        assert_eq!(config.public_unilateral_exit_delay, 512);
+        assert_eq!(config.boarding_exit_delay, 1_024);
         assert_eq!(config.max_tx_weight, 400_000);
     }
 
