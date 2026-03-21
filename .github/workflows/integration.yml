@@ -100,6 +100,29 @@ jobs:
       - name: Build dark
         run: cargo build --bin dark
 
+      - name: Start dark server
+        env:
+          BITCOIN_RPC_URL: "http://admin1:123@localhost:18443"
+        run: |
+          mkdir -p /tmp/dark-data
+          RUST_LOG=info ./target/debug/dark \
+            --data-dir /tmp/dark-data \
+            --network regtest \
+            --grpc-port 7070 \
+            --admin-port 7071 \
+            --bitcoind-rpc-url http://admin1:123@localhost:18443 \
+            > /tmp/dark.log 2>&1 &
+          echo "dark PID: $!"
+          # Wait for gRPC port to open (up to 30s)
+          for i in $(seq 1 30); do
+            if nc -z localhost 7070 2>/dev/null; then
+              echo "✅ dark gRPC ready"
+              break
+            fi
+            echo "Waiting for dark... ($i/30)"
+            sleep 1
+          done
+
       - name: Run e2e tests
         env:
           INTEGRATION_TEST: "1"
