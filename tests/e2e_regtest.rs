@@ -1351,8 +1351,8 @@ async fn test_sweep_batch() {
         .expect("settle failed");
     eprintln!("✅ settled — commitment: {}", batch.commitment_txid);
 
-    // Mine past the expiry (unilateral_exit_delay + buffer).
-    let sweep_blocks = info.unilateral_exit_delay + 10;
+    // Mine past the expiry (convert seconds → blocks, plus buffer).
+    let sweep_blocks = info.unilateral_exit_delay / 600 + 10;
     mine_blocks(sweep_blocks).await;
     eprintln!("⛏  mined {} blocks past expiry", sweep_blocks);
 
@@ -1435,7 +1435,7 @@ async fn test_sweep_force_by_admin() {
         .await
         .expect("settle failed");
 
-    mine_blocks(info.unilateral_exit_delay + 10).await;
+    mine_blocks(info.unilateral_exit_delay / 600 + 10).await;
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Force sweep via admin REST API.

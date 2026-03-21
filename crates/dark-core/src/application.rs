@@ -90,7 +90,7 @@ pub struct ArkConfig {
     pub session_duration_secs: u64,
     /// Round timing configuration
     pub round_timing: RoundTiming,
-    /// Unilateral exit delay (blocks)
+    /// Unilateral exit delay (seconds)
     pub unilateral_exit_delay: u32,
     /// Min intents per round
     pub min_intents: u32,
@@ -106,9 +106,9 @@ pub struct ArkConfig {
     pub utxo_min_amount: u64,
     /// Max UTXO amount for boarding (sats, 0 = boarding disabled)
     pub utxo_max_amount: u64,
-    /// CSV delay for public unilateral exits (blocks)
+    /// CSV delay for public unilateral exits (seconds)
     pub public_unilateral_exit_delay: u32,
-    /// CSV delay for boarding inputs (blocks)
+    /// CSV delay for boarding inputs (seconds)
     pub boarding_exit_delay: u32,
     /// Max commitment tx weight
     pub max_tx_weight: u64,
@@ -903,9 +903,10 @@ impl ArkService {
             return Err(ArkError::VtxoAlreadySpent(vtxo.outpoint.to_string()));
         }
 
-        // Calculate claimable height
+        // Calculate claimable height (convert exit delay from seconds to blocks)
         let block_time = self.wallet.get_current_block_time().await?;
-        let claimable_height = block_time.height as u32 + self.config.unilateral_exit_delay;
+        let delay_blocks = self.config.unilateral_exit_delay / crate::domain::SECS_PER_BLOCK;
+        let claimable_height = block_time.height as u32 + delay_blocks;
 
         let exit = Exit::unilateral(
             request.vtxo_id,
@@ -1635,9 +1636,9 @@ pub struct ServiceInfo {
     pub utxo_min_amount: u64,
     /// Max UTXO amount for boarding (sats)
     pub utxo_max_amount: u64,
-    /// CSV delay for public unilateral exits (blocks)
+    /// CSV delay for public unilateral exits (seconds)
     pub public_unilateral_exit_delay: u32,
-    /// CSV delay for boarding inputs (blocks)
+    /// CSV delay for boarding inputs (seconds)
     pub boarding_exit_delay: u32,
     /// Max commitment tx weight
     pub max_tx_weight: u64,
@@ -1876,8 +1877,8 @@ mod tests {
         let config = ArkConfig::default();
         assert_eq!(config.utxo_min_amount, 1_000);
         assert_eq!(config.utxo_max_amount, 100_000_000);
-        assert_eq!(config.public_unilateral_exit_delay, 512);
-        assert_eq!(config.boarding_exit_delay, 512);
+        assert_eq!(config.public_unilateral_exit_delay, 86_400);
+        assert_eq!(config.boarding_exit_delay, 7_776_000);
         assert_eq!(config.max_tx_weight, 400_000);
     }
 

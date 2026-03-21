@@ -160,11 +160,11 @@ utxo_min_amount = 1000
 # Maximum UTXO amount for boarding (satoshis, 0 = boarding disabled)
 utxo_max_amount = 100_000_000  # 1 BTC
 
-# CSV delay for public unilateral exits (blocks)
-public_unilateral_exit_delay = 512
+# CSV delay for public unilateral exits (seconds, ~24 hours)
+public_unilateral_exit_delay = 86400
 
-# CSV delay for boarding inputs (blocks)
-boarding_exit_delay = 512
+# CSV delay for boarding inputs (seconds, ~3 months)
+boarding_exit_delay = 7776000
 
 # Maximum commitment transaction weight
 max_tx_weight = 400_000

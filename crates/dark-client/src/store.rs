@@ -22,7 +22,7 @@ pub struct ClientConfig {
     pub server_pubkey: String,
     /// Round session duration in seconds.
     pub session_duration: u32,
-    /// Unilateral exit delay in blocks.
+    /// Unilateral exit delay in seconds.
     pub unilateral_exit_delay: u32,
     /// Dust limit in satoshis.
     pub dust: u64,

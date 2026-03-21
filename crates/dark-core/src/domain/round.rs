@@ -340,7 +340,7 @@ pub struct RoundConfig {
     pub session_duration_secs: u64,
     /// VTXO tree expiry (seconds)
     pub vtxo_tree_expiry_secs: i64,
-    /// Unilateral exit delay
+    /// Unilateral exit delay (seconds)
     pub unilateral_exit_delay: u32,
     /// How long participants have to confirm after selection (seconds)
     pub confirmation_timeout_secs: u64,
@@ -353,7 +353,7 @@ impl Default for RoundConfig {
             max_intents: 128,
             session_duration_secs: 10,
             vtxo_tree_expiry_secs: 604_800,
-            unilateral_exit_delay: 512,
+            unilateral_exit_delay: 86_400,
             confirmation_timeout_secs: 10,
         }
     }
