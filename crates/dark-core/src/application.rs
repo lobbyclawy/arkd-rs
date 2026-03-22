@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, instrument};
+use tracing::{error, info, instrument};
 
 use crate::domain::ban::BanReason;
 use crate::domain::config_service::StaticConfigService;
@@ -654,12 +654,30 @@ impl ArkService {
             }
         }
 
+        info!(
+            vtxo_count_to_persist = vtxos.len(),
+            "About to persist VTXOs"
+        );
         if !vtxos.is_empty() {
-            self.vtxo_repo.add_vtxos(&vtxos).await?;
-            info!(
-                vtxo_count = vtxos.len(),
-                "VTXOs persisted after round completion"
-            );
+            for v in &vtxos {
+                info!(
+                    txid = %v.outpoint.txid,
+                    vout = v.outpoint.vout,
+                    pubkey = %v.pubkey,
+                    amount = v.amount,
+                    "VTXO to persist"
+                );
+            }
+            match self.vtxo_repo.add_vtxos(&vtxos).await {
+                Ok(()) => info!(
+                    vtxo_count = vtxos.len(),
+                    "VTXOs persisted after round completion"
+                ),
+                Err(e) => {
+                    error!(error = %e, "FAILED to persist VTXOs!");
+                    return Err(e);
+                }
+            }
 
             for vtxo in &vtxos {
                 let _ = self
