@@ -221,7 +221,7 @@ impl LocalTxBuilder {
         }
 
         let commitment_tx = Transaction {
-            version: Version::TWO,
+            version: Version::non_standard(3),
             lock_time: LockTime::ZERO,
             input: inputs,
             output: outputs,
@@ -230,7 +230,10 @@ impl LocalTxBuilder {
         // Wrap in PSBT
         let psbt = Psbt::from_unsigned_tx(commitment_tx.clone())
             .map_err(|e| format!("Failed to create PSBT: {e}"))?;
-        let commitment_psbt_hex = hex::encode(psbt.serialize());
+        let commitment_psbt_hex = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(psbt.serialize())
+        };
 
         let commitment_txid = commitment_tx.compute_txid();
 
@@ -320,11 +323,40 @@ impl LocalTxBuilder {
             }];
         }
 
-        if receivers.len() == 1 {
-            // Single receiver: the commitment output IS the leaf VTXO
+        // For 1-2 receivers, create a single leaf transaction spending the parent
+        if receivers.len() <= VTXO_TREE_RADIX {
+            let outputs: Vec<TxOut> = leaf_outputs
+                .iter()
+                .map(|(script, amount)| TxOut {
+                    value: Amount::from_sat(*amount),
+                    script_pubkey: script.clone(),
+                })
+                .collect();
+
+            let tx = Transaction {
+                version: Version::non_standard(3),
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: parent_txid,
+                        vout: parent_vout,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::default(),
+                }],
+                output: outputs,
+            };
+
+            let txid = tx.compute_txid();
+            let psbt = Psbt::from_unsigned_tx(tx).expect("valid unsigned tx");
+
             return vec![TreeNode {
-                txid: parent_txid.to_string(),
-                tx: String::new(),
+                txid: txid.to_string(),
+                tx: {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD.encode(psbt.serialize())
+                },
                 children: HashMap::new(),
             }];
         }
@@ -364,7 +396,7 @@ impl LocalTxBuilder {
                 .collect();
 
             let tx = Transaction {
-                version: Version::TWO,
+                version: Version::non_standard(3),
                 lock_time: LockTime::ZERO,
                 input: vec![TxIn {
                     previous_output: OutPoint {
@@ -386,7 +418,10 @@ impl LocalTxBuilder {
 
             tree_nodes.push(TreeNode {
                 txid: txid.to_string(),
-                tx: hex::encode(psbt.serialize()),
+                tx: {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD.encode(psbt.serialize())
+                },
                 children,
             });
             return;
@@ -415,7 +450,7 @@ impl LocalTxBuilder {
             .collect();
 
         let intermediate_tx = Transaction {
-            version: Version::TWO,
+            version: Version::non_standard(3),
             lock_time: LockTime::ZERO,
             input: vec![TxIn {
                 previous_output: OutPoint {
@@ -456,7 +491,10 @@ impl LocalTxBuilder {
 
         tree_nodes.push(TreeNode {
             txid: intermediate_txid.to_string(),
-            tx: hex::encode(psbt.serialize()),
+            tx: {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(psbt.serialize())
+            },
             children: children_map,
         });
     }
@@ -507,7 +545,7 @@ impl LocalTxBuilder {
             .collect();
 
         let tx = Transaction {
-            version: Version::TWO,
+            version: Version::non_standard(3),
             lock_time: LockTime::ZERO,
             input: vec![TxIn {
                 previous_output: OutPoint {
@@ -526,7 +564,10 @@ impl LocalTxBuilder {
 
         vec![TreeNode {
             txid: txid.to_string(),
-            tx: hex::encode(psbt.serialize()),
+            tx: {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(psbt.serialize())
+            },
             children: HashMap::new(),
         }]
     }

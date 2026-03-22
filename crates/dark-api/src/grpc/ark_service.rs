@@ -837,12 +837,13 @@ impl ArkServiceTrait for ArkGrpcService {
             return Err(Status::invalid_argument("tree_nonces must not be empty"));
         }
 
-        // Flatten tree nonces map into a single byte vector for the store.
-        let nonces: Vec<u8> = req
-            .tree_nonces
-            .values()
-            .flat_map(|v| v.iter().copied())
-            .collect();
+        // tree_nonces is map[txid → nonce_hex] where each value is a hex-encoded 66-byte MuSig2 nonce pair.
+        // Decode the first (and typically only) nonce value to raw bytes.
+        let nonces: Vec<u8> = if let Some(nonce_hex) = req.tree_nonces.values().next() {
+            hex::decode(nonce_hex).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         self.core
             .submit_tree_nonces(&req.batch_id, &req.pubkey, nonces)
