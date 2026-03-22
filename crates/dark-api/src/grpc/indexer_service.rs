@@ -390,11 +390,23 @@ impl IndexerServiceTrait for IndexerGrpcService {
             .collect();
         let pubkey_filter = script_tapkeys.first().map(|s| s.as_str());
 
+        info!(
+            raw_scripts = ?req.scripts,
+            extracted_tapkeys = ?script_tapkeys,
+            pubkey_filter = ?pubkey_filter,
+            "GetVtxos: script → tapkey extraction"
+        );
+
         let vtxos = self
             .core
             .list_vtxos(pubkey_filter)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        info!(
+            vtxo_count = vtxos.len(),
+            "GetVtxos: vtxos returned from store"
+        );
 
         // Apply client-requested filters.
         let filtered: Vec<IndexerVtxo> = vtxos
