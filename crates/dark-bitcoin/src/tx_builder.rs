@@ -182,7 +182,15 @@ impl LocalTxBuilder {
         let mut outputs = Vec::new();
 
         // Output 0: VTXO tree root amount
-        let vtxo_root_amount = total_receiver_amount;
+        // Subtract connector + fee from the VTXO root to ensure inputs >= outputs
+        let connector_needed =
+            std::cmp::max(CONNECTOR_DUST, receivers.len() as u64 * CONNECTOR_DUST);
+        let vtxo_root_amount = if total_boarding > 0 {
+            // When funded by boarding inputs, fit within budget
+            total_boarding.saturating_sub(connector_needed + TREE_TX_FEE)
+        } else {
+            total_receiver_amount
+        };
         let vtxo_root_script = if !vtxo_leaf_outputs.is_empty() {
             // For a single receiver, use its script directly as root.
             // For multiple, use ASP key as intermediate (tree root).
