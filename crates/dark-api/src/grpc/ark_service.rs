@@ -903,6 +903,7 @@ impl ArkServiceTrait for ArkGrpcService {
         let req = request.into_inner();
         info!(
             forfeit_count = req.signed_forfeit_txs.len(),
+            signed_commitment_tx_len = req.signed_commitment_tx.len(),
             "SubmitSignedForfeitTxs called"
         );
 
