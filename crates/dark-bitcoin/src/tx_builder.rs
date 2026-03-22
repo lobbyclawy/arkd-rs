@@ -182,15 +182,7 @@ impl LocalTxBuilder {
         let mut outputs = Vec::new();
 
         // Output 0: VTXO tree root amount
-        // Subtract connector + fee from the VTXO root to ensure inputs >= outputs
-        let connector_needed =
-            std::cmp::max(CONNECTOR_DUST, receivers.len() as u64 * CONNECTOR_DUST);
-        let vtxo_root_amount = if total_boarding > 0 {
-            // When funded by boarding inputs, fit within budget
-            total_boarding.saturating_sub(connector_needed + TREE_TX_FEE)
-        } else {
-            total_receiver_amount
-        };
+        let vtxo_root_amount = total_receiver_amount;
         let vtxo_root_script = if !vtxo_leaf_outputs.is_empty() {
             // For a single receiver, use its script directly as root.
             // For multiple, use ASP key as intermediate (tree root).
@@ -208,20 +200,25 @@ impl LocalTxBuilder {
             script_pubkey: vtxo_root_script,
         });
 
-        // Output 1: connector output
-        let connector_amount =
-            std::cmp::max(CONNECTOR_DUST, receivers.len() as u64 * CONNECTOR_DUST);
-        outputs.push(TxOut {
-            value: Amount::from_sat(connector_amount),
-            script_pubkey: connector_script.clone(),
-        });
+        // Output 1: connector output + change (only if budget allows)
+        let budget_after_vtxo = total_boarding.saturating_sub(vtxo_root_amount + TREE_TX_FEE);
+        let connector_amount = if budget_after_vtxo >= CONNECTOR_DUST {
+            CONNECTOR_DUST
+        } else {
+            0
+        };
+        if connector_amount > 0 {
+            outputs.push(TxOut {
+                value: Amount::from_sat(connector_amount),
+                script_pubkey: connector_script.clone(),
+            });
+        }
 
-        // Output 2: change (if boarding inputs exceed needed amount)
+        // Change output (remaining budget after vtxo root + connector + fee)
         let total_out = vtxo_root_amount + connector_amount;
         if total_boarding > total_out + TREE_TX_FEE {
             let change = total_boarding - total_out - TREE_TX_FEE;
             if change > CONNECTOR_DUST {
-                // Change back to ASP
                 outputs.push(TxOut {
                     value: Amount::from_sat(change),
                     script_pubkey: connector_script.clone(),
