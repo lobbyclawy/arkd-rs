@@ -8,12 +8,12 @@ use crate::types::{
     OffchainBalance, OnchainBalance, RoundInfo, RoundSummary, ServerInfo, TxEvent, Vtxo,
 };
 use dark_api::proto::ark_v1::{
-    ark_service_client::ArkServiceClient, indexer_service_client::IndexerServiceClient, output,
+    ark_service_client::ArkServiceClient, indexer_service_client::IndexerServiceClient,
     round_event, transaction_event, BurnAssetRequest, ConfirmRegistrationRequest,
     DeleteIntentRequest, FinalizeTxRequest, GetEventStreamRequest, GetInfoRequest, GetRoundRequest,
-    GetTransactionsStreamRequest, GetVtxosRequest, IntentDescriptor, IssueAssetRequest,
-    ListRoundsRequest, Output, RedeemNotesRequest, RegisterIntentRequest, ReissueAssetRequest,
-    RequestExitRequest, SubmitTxRequest,
+    GetTransactionsStreamRequest, GetVtxosRequest, IssueAssetRequest, ListRoundsRequest,
+    RedeemNotesRequest, RegisterForRoundRequest, ReissueAssetRequest, RequestExitRequest,
+    SubmitTxRequest,
 };
 use tonic::transport::Channel;
 
@@ -276,9 +276,12 @@ impl ArkClient {
                         .collect()
                 }
             };
-            let xonly = pubkey_bytes
-                .as_deref()
-                .and_then(|b| bitcoin::secp256k1::XOnlyPublicKey::from_slice(b).ok());
+            // XOnlyPublicKey expects 32 bytes; compressed pubkeys are 33 bytes
+            // (1-byte parity prefix + 32-byte x-coordinate). Strip the prefix.
+            let xonly = pubkey_bytes.as_deref().and_then(|b| {
+                let x_bytes = if b.len() == 33 { &b[1..] } else { b };
+                bitcoin::secp256k1::XOnlyPublicKey::from_slice(x_bytes).ok()
+            });
             match xonly {
                 Some(xpk) => {
                     let builder = bitcoin::taproot::TaprootBuilder::new();
@@ -461,34 +464,21 @@ impl ArkClient {
 
     /// Register a VTXO intent for the next round.
     ///
-    /// Builds a [`RegisterIntentRequest`] with a single output targeting `pubkey` (as a VTXO
-    /// script) for `amount` satoshis and an empty proof descriptor (sufficient for local
-    /// devnets; production callers should supply a real BIP-322 proof in the descriptor).
+    /// Uses the `RegisterForRound` RPC (simple pubkey+amount API, suitable for dev/test).
+    /// Production callers should use the BIP-322 `RegisterIntent` API directly.
     ///
     /// Returns the server-assigned `intent_id` string on success.
     pub async fn register_intent(&mut self, pubkey: &str, amount: u64) -> ClientResult<String> {
         let client = self.require_client()?;
 
-        let out = Output {
-            amount,
-            destination: Some(output::Destination::VtxoScript(pubkey.to_string())),
-        };
-
-        // An empty descriptor is accepted by the server for dev/test scenarios.
-        // Production callers must populate `descriptor.intent` with a valid BIP-322 proof.
-        let descriptor = IntentDescriptor {
-            intent: None,
-            boarding_inputs: vec![],
-            cosigners_public_keys: vec![],
-        };
-
         let response = client
-            .register_intent(RegisterIntentRequest {
-                outputs: vec![out],
-                descriptor: Some(descriptor),
+            .register_for_round(RegisterForRoundRequest {
+                pubkey: pubkey.to_string(),
+                amount,
+                inputs: vec![],
             })
             .await
-            .map_err(|e| ClientError::Rpc(format!("RegisterIntent failed: {}", e)))?;
+            .map_err(|e| ClientError::Rpc(format!("RegisterForRound failed: {}", e)))?;
 
         Ok(response.into_inner().intent_id)
     }
@@ -987,37 +977,36 @@ impl ArkClient {
 fn proto_round_event_to_domain(event: dark_api::proto::ark_v1::RoundEvent) -> Option<BatchEvent> {
     match event.event? {
         round_event::Event::BatchStarted(e) => Some(BatchEvent::BatchStarted {
-            round_id: e.round_id,
-            timestamp: e.timestamp,
+            round_id: e.id,
+            timestamp: e.batch_expiry,
         }),
         round_event::Event::BatchFinalization(e) => Some(BatchEvent::BatchFinalization {
-            round_id: e.round_id,
-            timestamp: e.timestamp,
-            min_relay_fee_rate: e.min_relay_fee_rate,
+            round_id: e.id,
+            timestamp: 0,
+            min_relay_fee_rate: 0,
         }),
         round_event::Event::BatchFinalized(e) => Some(BatchEvent::BatchFinalized {
-            round_id: e.round_id,
-            txid: e.txid,
+            round_id: e.id,
+            txid: e.commitment_txid,
         }),
         round_event::Event::BatchFailed(e) => Some(BatchEvent::BatchFailed {
-            round_id: e.round_id,
+            round_id: e.id,
             reason: e.reason,
         }),
         round_event::Event::TreeSigningStarted(e) => Some(BatchEvent::TreeSigningStarted {
-            round_id: e.round_id,
-            cosigner_pubkeys: e.cosigner_pubkeys,
-            timestamp: e.timestamp,
+            round_id: e.id,
+            cosigner_pubkeys: e.cosigners_pubkeys,
+            timestamp: 0,
         }),
         round_event::Event::TreeNoncesAggregated(e) => Some(BatchEvent::TreeNoncesAggregated {
-            round_id: e.round_id,
-            timestamp: e.timestamp,
+            round_id: e.id,
+            timestamp: 0,
         }),
-        round_event::Event::Heartbeat(e) => Some(BatchEvent::Heartbeat {
-            timestamp: e.timestamp,
-        }),
+        round_event::Event::Heartbeat(_e) => Some(BatchEvent::Heartbeat { timestamp: 0 }),
         // Internal MuSig2 and connection events — not exposed at this level.
         round_event::Event::TreeTx(_)
         | round_event::Event::TreeSignature(_)
+        | round_event::Event::TreeNonces(_)
         | round_event::Event::StreamStarted(_) => None,
     }
 }

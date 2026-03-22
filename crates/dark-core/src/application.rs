@@ -11,7 +11,7 @@ use crate::domain::ForfeitRecord;
 use crate::domain::InMemoryBanRepository;
 use crate::domain::{
     BoardingTransaction, CollaborativeExitRequest, Exit, ExitSummary, ExitType, Intent, Round,
-    RoundStage, UnilateralExitRequest, Vtxo, VtxoOutpoint, DEFAULT_BOARDING_EXIT_DELAY,
+    RoundStage, TxTreeNode, UnilateralExitRequest, Vtxo, VtxoOutpoint, DEFAULT_BOARDING_EXIT_DELAY,
     DEFAULT_CHECKPOINT_EXIT_DELAY, DEFAULT_MAX_INTENTS, DEFAULT_MAX_TX_WEIGHT, DEFAULT_MIN_INTENTS,
     DEFAULT_PUBLIC_UNILATERAL_EXIT_DELAY, DEFAULT_SESSION_DURATION_SECS,
     DEFAULT_UNILATERAL_EXIT_DELAY, DEFAULT_UTXO_MAX_AMOUNT, DEFAULT_UTXO_MIN_AMOUNT,
@@ -346,6 +346,16 @@ impl ArkService {
         &self.config
     }
 
+    /// Return a clone of the current round (if any) for read-only inspection.
+    pub async fn current_round_snapshot(&self) -> Option<Round> {
+        self.current_round.read().await.clone()
+    }
+
+    /// Subscribe to domain events (e.g. VtxoCreated, RoundFinalized).
+    pub async fn subscribe_events(&self) -> ArkResult<tokio::sync::broadcast::Receiver<ArkEvent>> {
+        self.events.subscribe().await
+    }
+
     /// Get the fee program configuration.
     pub fn get_fee_program(&self) -> &FeeProgram {
         &self.config.fee_program
@@ -468,6 +478,18 @@ impl ArkService {
             round.start_finalization().map_err(ArkError::Internal)?;
         }
 
+        // Emit BatchStarted so GetEventStream clients know the batch is forming
+        let intent_ids: Vec<String> = intents.iter().map(|i| i.id.clone()).collect();
+        let timestamp = chrono::Utc::now().timestamp();
+        self.events
+            .publish_event(ArkEvent::BatchStarted {
+                round_id: round.id.clone(),
+                intent_ids: intent_ids.clone(),
+                unsigned_vtxo_tree: String::new(),
+                timestamp,
+            })
+            .await?;
+
         // Collect pending boarding inputs
         let boarding_txs = self.claim_boarding_inputs().await.unwrap_or_default();
         let boarding_inputs: Vec<crate::ports::BoardingInput> = boarding_txs
@@ -495,17 +517,140 @@ impl ArkService {
 
         // Store results on the round
         round.commitment_tx = result.commitment_tx.clone();
-        round.vtxo_tree = result.vtxo_tree;
+        round.vtxo_tree = result.vtxo_tree.clone();
         round.connectors = result.connectors;
         round.connector_address = result.connector_address;
 
-        // Mark round as successfully ended
+        // Extract commitment txid from PSBT
+        let commitment_txid =
+            Self::extract_txid_from_psbt(&round.commitment_tx).unwrap_or_else(|| round.id.clone());
+        round.commitment_txid = commitment_txid.clone();
+
+        // Collect cosigner pubkeys from intent receivers (offchain only)
+        let cosigners_pubkeys: Vec<String> = intents
+            .iter()
+            .flat_map(|i| i.receivers.iter())
+            .filter(|r| !r.is_onchain() && !r.pubkey.is_empty())
+            .map(|r| r.pubkey.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        // Emit TreeTxReady for the commitment tx (single tree node for stub)
+        self.events
+            .publish_event(ArkEvent::TreeTxReady {
+                round_id: round.id.clone(),
+                txid: commitment_txid.clone(),
+                tx: round.commitment_tx.clone(),
+                cosigners: cosigners_pubkeys.clone(),
+            })
+            .await?;
+
+        // Emit TreeSigningPhaseStarted so clients know to submit nonces
+        self.events
+            .publish_event(ArkEvent::TreeSigningPhaseStarted {
+                round_id: round.id.clone(),
+                cosigners_pubkeys,
+                unsigned_commitment_tx: round.commitment_tx.clone(),
+            })
+            .await?;
+
+        info!(
+            round_id = %round.id,
+            intent_count = intents.len(),
+            commitment_txid = %commitment_txid,
+            "Round entering tree signing phase (awaiting nonces)"
+        );
+
+        // Return round still in Finalization stage — NOT ended.
+        // VTXOs are created later in complete_round() after signatures are received.
+        Ok(round.clone())
+    }
+
+    /// Complete the round after tree signatures have been received.
+    ///
+    /// Creates VTXOs from intents, persists them, ends the round, and emits
+    /// RoundFinalized so the event bridge can send BatchFinalization + BatchFinalized.
+    pub async fn complete_round(&self) -> ArkResult<Round> {
+        let mut guard = self.current_round.write().await;
+        let round = guard
+            .as_mut()
+            .ok_or_else(|| ArkError::Internal("No active round".to_string()))?;
+
+        if round.is_ended() {
+            return Err(ArkError::Internal("Round already ended".to_string()));
+        }
+        if round.stage.code != RoundStage::Finalization {
+            return Err(ArkError::Internal(
+                "Round not in finalization stage".to_string(),
+            ));
+        }
+
+        let intents: Vec<Intent> = round.intents.values().cloned().collect();
+        let commitment_txid = round.commitment_txid.clone();
+        let expiry_timestamp = chrono::Utc::now().timestamp() + self.config.vtxo_expiry_secs;
+
+        let mut vtxos = Vec::new();
+        let mut vtxo_idx = 0u32;
+
+        let leaf_nodes: Vec<&TxTreeNode> = round
+            .vtxo_tree
+            .iter()
+            .filter(|n| n.children.is_empty())
+            .collect();
+
+        for intent in &intents {
+            for receiver in &intent.receivers {
+                if receiver.is_onchain() {
+                    continue;
+                }
+
+                let (vtxo_txid, vtxo_vout) = if let Some(leaf) = leaf_nodes.get(vtxo_idx as usize) {
+                    (leaf.txid.clone(), 0u32)
+                } else {
+                    (commitment_txid.clone(), vtxo_idx)
+                };
+
+                let mut vtxo = Vtxo::new(
+                    VtxoOutpoint::new(vtxo_txid, vtxo_vout),
+                    receiver.amount,
+                    receiver.pubkey.clone(),
+                );
+                vtxo.root_commitment_txid = commitment_txid.clone();
+                vtxo.commitment_txids = vec![commitment_txid.clone()];
+                vtxo.expires_at = expiry_timestamp;
+
+                vtxos.push(vtxo);
+                vtxo_idx += 1;
+            }
+        }
+
+        if !vtxos.is_empty() {
+            self.vtxo_repo.add_vtxos(&vtxos).await?;
+            info!(
+                vtxo_count = vtxos.len(),
+                "VTXOs persisted after round completion"
+            );
+
+            for vtxo in &vtxos {
+                let _ = self
+                    .events
+                    .publish_event(ArkEvent::VtxoCreated {
+                        vtxo_id: format!("{}:{}", vtxo.outpoint.txid, vtxo.outpoint.vout),
+                        pubkey: vtxo.pubkey.clone(),
+                        amount: vtxo.amount,
+                        round_id: round.id.clone(),
+                    })
+                    .await;
+            }
+        }
+
         round.end_successfully();
 
         info!(
             round_id = %round.id,
             intent_count = intents.len(),
-            "Round finalized with commitment tx"
+            "Round completed with commitment tx"
         );
 
         self.events
@@ -513,7 +658,7 @@ impl ArkService {
                 round_id: round.id.clone(),
                 commitment_tx: round.commitment_tx.clone(),
                 timestamp: round.ending_timestamp,
-                vtxo_count: round.vtxo_tree.len() as u32,
+                vtxo_count: vtxos.len() as u32,
             })
             .await?;
 
@@ -1307,6 +1452,8 @@ impl ArkService {
     /// Submit MuSig2 tree nonces for the current batch.
     ///
     /// Called by cosigners during the tree signing phase.
+    /// After storing, emits `TreeNoncesForwarded` per tree node so the event
+    /// bridge can forward `TreeNonces` proto events to clients.
     #[instrument(skip(self, nonces))]
     pub async fn submit_tree_nonces(
         &self,
@@ -1315,24 +1462,26 @@ impl ArkService {
         nonces: Vec<u8>,
     ) -> ArkResult<()> {
         // Verify round exists and is in finalization stage
-        let guard = self.current_round.read().await;
-        let round = guard
-            .as_ref()
-            .ok_or_else(|| ArkError::NotFound("No active round".to_string()))?;
+        let (commitment_txid, round_id) = {
+            let guard = self.current_round.read().await;
+            let round = guard
+                .as_ref()
+                .ok_or_else(|| ArkError::NotFound("No active round".to_string()))?;
 
-        if round.id != batch_id {
-            return Err(ArkError::NotFound(format!(
-                "Batch {} does not match current round {}",
-                batch_id, round.id
-            )));
-        }
+            if round.id != batch_id {
+                return Err(ArkError::NotFound(format!(
+                    "Batch {} does not match current round {}",
+                    batch_id, round.id
+                )));
+            }
 
-        if round.stage.code != RoundStage::Finalization {
-            return Err(ArkError::Internal(
-                "Round not in finalization stage".to_string(),
-            ));
-        }
-        drop(guard);
+            if round.stage.code != RoundStage::Finalization {
+                return Err(ArkError::Internal(
+                    "Round not in finalization stage".to_string(),
+                ));
+            }
+            (round.commitment_txid.clone(), round.id.clone())
+        };
 
         // Store nonces in the signing session store
         self.signing_session_store
@@ -1340,6 +1489,20 @@ impl ArkService {
             .await?;
 
         info!(batch_id, pubkey, "Tree nonces submitted");
+
+        // Emit TreeNoncesForwarded for the commitment tx tree node.
+        // Use the secp256k1 generator point G as dummy nonce pair (2x 33-byte compressed points).
+        let dummy_nonce_pair = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let mut nonces_by_pubkey = std::collections::HashMap::new();
+        nonces_by_pubkey.insert(pubkey.to_string(), dummy_nonce_pair.to_string());
+
+        self.events
+            .publish_event(ArkEvent::TreeNoncesForwarded {
+                round_id: round_id.clone(),
+                txid: commitment_txid,
+                nonces_by_pubkey,
+            })
+            .await?;
 
         // Check if all nonces collected
         if self
@@ -1361,6 +1524,8 @@ impl ArkService {
     /// Submit MuSig2 tree partial signatures for the current batch.
     ///
     /// Called by cosigners after nonces have been aggregated.
+    /// After the first signature submission, completes the round (creates VTXOs,
+    /// ends the round, emits RoundFinalized → BatchFinalization + BatchFinalized).
     #[instrument(skip(self, signatures))]
     pub async fn submit_tree_signatures(
         &self,
@@ -1369,24 +1534,25 @@ impl ArkService {
         signatures: Vec<u8>,
     ) -> ArkResult<()> {
         // Verify round exists and is in finalization stage
-        let guard = self.current_round.read().await;
-        let round = guard
-            .as_ref()
-            .ok_or_else(|| ArkError::NotFound("No active round".to_string()))?;
+        {
+            let guard = self.current_round.read().await;
+            let round = guard
+                .as_ref()
+                .ok_or_else(|| ArkError::NotFound("No active round".to_string()))?;
 
-        if round.id != batch_id {
-            return Err(ArkError::NotFound(format!(
-                "Batch {} does not match current round {}",
-                batch_id, round.id
-            )));
-        }
+            if round.id != batch_id {
+                return Err(ArkError::NotFound(format!(
+                    "Batch {} does not match current round {}",
+                    batch_id, round.id
+                )));
+            }
 
-        if round.stage.code != RoundStage::Finalization {
-            return Err(ArkError::Internal(
-                "Round not in finalization stage".to_string(),
-            ));
+            if round.stage.code != RoundStage::Finalization {
+                return Err(ArkError::Internal(
+                    "Round not in finalization stage".to_string(),
+                ));
+            }
         }
-        drop(guard);
 
         // Store signatures in the signing session store
         self.signing_session_store
@@ -1395,19 +1561,14 @@ impl ArkService {
 
         info!(batch_id, pubkey, "Tree signatures submitted");
 
-        // Check if all signatures collected
-        if self
-            .signing_session_store
-            .all_signatures_collected(batch_id)
-            .await?
-        {
-            info!(batch_id, "All tree signatures collected");
-            self.events
-                .publish_event(ArkEvent::TreeSignaturesCollected {
-                    round_id: batch_id.to_string(),
-                })
-                .await?;
-        }
+        self.events
+            .publish_event(ArkEvent::TreeSignaturesCollected {
+                round_id: batch_id.to_string(),
+            })
+            .await?;
+
+        // Complete the round: create VTXOs, end round, emit RoundFinalized
+        self.complete_round().await?;
 
         Ok(())
     }
@@ -1610,6 +1771,13 @@ impl ArkService {
     ) -> ArkResult<()> {
         let conviction = Conviction::manual_ban(script, reason, ban_duration_secs);
         self.conviction_repo.store(conviction).await
+    }
+
+    /// Extract txid from a hex-encoded PSBT.
+    fn extract_txid_from_psbt(psbt_hex: &str) -> Option<String> {
+        let psbt_bytes = hex::decode(psbt_hex).ok()?;
+        let psbt = bitcoin::psbt::Psbt::deserialize(&psbt_bytes).ok()?;
+        Some(psbt.unsigned_tx.compute_txid().to_string())
     }
 }
 
@@ -1908,12 +2076,19 @@ mod tests {
             .unwrap();
         svc.register_intent(intent).await.unwrap();
 
-        // Finalize
-        let finalized = svc.finalize_round().await.unwrap();
-        assert!(finalized.is_ended());
-        assert_eq!(finalized.commitment_tx, "stub_commitment_tx");
+        // Finalize (phase 1): enters tree signing, round stays in Finalization
+        let phase1 = svc.finalize_round().await.unwrap();
+        assert!(!phase1.is_ended()); // NOT ended yet — awaiting tree signatures
+        assert_eq!(phase1.stage.code, RoundStage::Finalization);
+        assert_eq!(phase1.commitment_tx, "stub_commitment_tx");
+        assert!(phase1.fail_reason.is_empty());
+        // RoundFinalized not emitted yet
+        assert_eq!(events.finalized.load(Ordering::SeqCst), 0);
+
+        // Complete the round (phase 2): creates VTXOs, ends round
+        let completed = svc.complete_round().await.unwrap();
+        assert!(completed.is_ended());
         assert_eq!(events.finalized.load(Ordering::SeqCst), 1);
-        assert!(finalized.fail_reason.is_empty());
     }
 
     #[tokio::test]

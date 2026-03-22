@@ -55,7 +55,6 @@ use crate::proto::ark_v1::{
     RequestExitRequest,
     RequestExitResponse,
     RoundEvent,
-    RoundHeartbeatEvent,
     ScheduledSession,
     SignedVtxoInput,
     SubmitSignedForfeitTxsRequest,
@@ -210,10 +209,10 @@ impl ArkServiceTrait for ArkGrpcService {
                 let fp = self.core.get_fee_program();
                 Some(FeeInfo {
                     intent_fee: Some(IntentFeeInfo {
-                        offchain_input: fp.offchain_input_fee.to_string(),
-                        offchain_output: fp.offchain_output_fee.to_string(),
-                        onchain_input: fp.onchain_input_fee.to_string(),
-                        onchain_output: fp.onchain_output_fee.to_string(),
+                        offchain_input: format!("{}.0", fp.offchain_input_fee),
+                        offchain_output: format!("{}.0", fp.offchain_output_fee),
+                        onchain_input: format!("{}.0", fp.onchain_input_fee),
+                        onchain_output: format!("{}.0", fp.onchain_output_fee),
                     }),
                     tx_fee_rate: self.core.config().default_fee_rate_sats_per_vb.to_string(),
                 })
@@ -420,13 +419,9 @@ impl ArkServiceTrait for ArkGrpcService {
 
         let output = stream! {
             // Yield an initial heartbeat so the client knows the stream is alive
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
             yield Ok(RoundEvent {
                 event: Some(crate::proto::ark_v1::round_event::Event::Heartbeat(
-                    RoundHeartbeatEvent { timestamp: now },
+                    crate::proto::ark_v1::Heartbeat {},
                 )),
             });
 
@@ -617,66 +612,108 @@ impl ArkServiceTrait for ArkGrpcService {
         request: Request<RegisterIntentRequest>,
     ) -> Result<Response<RegisterIntentResponse>, Status> {
         let req = request.into_inner();
+        let intent_proof = req
+            .intent
+            .ok_or_else(|| Status::invalid_argument("intent is required"))?;
+
+        info!("RegisterIntent called (Go arkd parity)");
+
+        // Decode the base64 PSBT proof
+        use base64::Engine;
+        let proof_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&intent_proof.proof)
+            .map_err(|e| Status::invalid_argument(format!("Invalid base64 proof: {e}")))?;
+
+        let psbt = bitcoin::psbt::Psbt::deserialize(&proof_bytes)
+            .map_err(|e| Status::invalid_argument(format!("Invalid PSBT: {e}")))?;
+
+        let unsigned_tx = &psbt.unsigned_tx;
+        let proof_txid = unsigned_tx.compute_txid().to_string();
+
+        // Parse the JSON message to get intent metadata
+        let message_json: serde_json::Value =
+            serde_json::from_str(&intent_proof.message).unwrap_or_default();
+        let onchain_output_indexes: Vec<usize> = message_json
+            .get("onchain_output_indexes")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        // Skip first input (BIP-322 toSpend reference) — remaining are real UTXOs
+        let mut inputs: Vec<dark_core::domain::Vtxo> = Vec::new();
+        for (i, tx_in) in unsigned_tx.input.iter().enumerate().skip(1) {
+            let txid = tx_in.previous_output.txid.to_string();
+            let vout = tx_in.previous_output.vout;
+            // Get amount from PSBT witness_utxo
+            let amount = psbt
+                .inputs
+                .get(i)
+                .and_then(|inp| inp.witness_utxo.as_ref())
+                .map(|utxo| utxo.value.to_sat())
+                .unwrap_or(0);
+            inputs.push(dark_core::domain::Vtxo::new(
+                dark_core::domain::VtxoOutpoint::new(txid, vout),
+                amount,
+                String::new(),
+            ));
+        }
+
+        // Build receivers from PSBT outputs (P2TR → offchain VTXO, otherwise onchain)
+        let mut receivers: Vec<dark_core::domain::Receiver> = Vec::new();
+        for (i, tx_out) in unsigned_tx.output.iter().enumerate() {
+            let amount = tx_out.value.to_sat();
+            if amount == 0 {
+                continue; // skip OP_RETURN or zero-value outputs
+            }
+            if onchain_output_indexes.contains(&i) {
+                let addr =
+                    bitcoin::Address::from_script(&tx_out.script_pubkey, bitcoin::Network::Regtest)
+                        .map(|a| a.to_string())
+                        .unwrap_or_default();
+                receivers.push(dark_core::domain::Receiver::onchain(amount, addr));
+            } else if tx_out.script_pubkey.is_p2tr() {
+                // Extract x-only pubkey from P2TR script: OP_1 OP_PUSH32 <32-byte-key>
+                let script_bytes = tx_out.script_pubkey.as_bytes();
+                let pubkey_hex = if script_bytes.len() >= 34 {
+                    hex::encode(&script_bytes[2..34])
+                } else {
+                    String::new()
+                };
+                receivers.push(dark_core::domain::Receiver::offchain(amount, pubkey_hex));
+            }
+        }
+
+        // Set input pubkeys from first receiver's pubkey
+        let owner_pubkey = receivers
+            .iter()
+            .find(|r| !r.pubkey.is_empty())
+            .map(|r| r.pubkey.clone())
+            .unwrap_or_default();
+        for inp in inputs.iter_mut() {
+            inp.pubkey = owner_pubkey.clone();
+        }
+
         info!(
-            outputs = req.outputs.len(),
-            "RegisterIntent called (Go dark parity)"
+            inputs = inputs.len(),
+            receivers = receivers.len(),
+            owner = %owner_pubkey,
+            "RegisterIntent: parsed BIP-322 proof"
         );
 
-        // Extract descriptor
-        let descriptor = req
-            .descriptor
-            .ok_or_else(|| Status::invalid_argument("descriptor is required"))?;
-
-        // Extract intent proof (optional in dev/test mode — BIP-322 verification is TODO(#40))
-        let (pubkey, proof_bytes) = match descriptor.intent {
-            Some(ref intent_proof) if !intent_proof.proof.is_empty() => {
-                // TODO(#40): Verify BIP-322 intent proof signature
-                (intent_proof.message.clone(), intent_proof.proof.clone())
-            }
-            _ => {
-                // Dev/test mode: no proof provided — derive pubkey from first output
-                let pubkey = req
-                    .outputs
-                    .first()
-                    .and_then(|o| o.destination.as_ref())
-                    .map(|d| {
-                        use crate::proto::ark_v1::output::Destination;
-                        match d {
-                            Destination::VtxoScript(pk) => pk.clone(),
-                            Destination::OnchainAddress(addr) => addr.clone(),
-                        }
-                    })
-                    .unwrap_or_default();
-                (pubkey.clone(), pubkey)
-            }
-        };
-
-        // Calculate total output amount
-        let total_amount: u64 = req.outputs.iter().map(|o| o.amount).sum();
-
-        // Build VTXO inputs from boarding inputs (if any)
-        let inputs: Vec<dark_core::domain::Vtxo> = descriptor
-            .boarding_inputs
-            .iter()
-            .filter_map(|bi| {
-                bi.outpoint.as_ref().map(|op| {
-                    dark_core::domain::Vtxo::new(
-                        dark_core::domain::VtxoOutpoint::new(op.txid.clone(), op.vout),
-                        bi.amount,
-                        pubkey.clone(),
-                    )
-                })
-            })
-            .collect();
-
-        // Create intent with proof
-        let intent = dark_core::domain::Intent::new(
-            "grpc-register-intent".to_string(),
-            pubkey.clone(),
-            proof_bytes,
+        // Create intent
+        let mut intent = dark_core::domain::Intent::new(
+            proof_txid,
+            intent_proof.proof.clone(),
+            intent_proof.message.clone(),
             inputs,
         )
         .map_err(|e| Status::invalid_argument(format!("Invalid intent: {e}")))?;
+
+        // Add receivers
+        if !receivers.is_empty() {
+            intent
+                .add_receivers(receivers)
+                .map_err(|e| Status::invalid_argument(format!("Invalid receivers: {e}")))?;
+        }
 
         let intent_id = self
             .core
@@ -684,7 +721,7 @@ impl ArkServiceTrait for ArkGrpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        info!(intent_id = %intent_id, amount = total_amount, "Intent registered");
+        info!(intent_id = %intent_id, "Intent registered");
 
         Ok(Response::new(RegisterIntentResponse { intent_id }))
     }

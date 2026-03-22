@@ -878,11 +878,12 @@ mod tests {
     async fn test_list_rounds_pagination() {
         let (_db, repo) = setup().await;
 
-        // Create several rounds with different timestamps
+        // Create several rounds with different timestamps.
+        // Set timestamp AFTER start_registration() since it overwrites starting_timestamp.
         for i in 0..5 {
             let mut round = make_round(&format!("round-{i}"));
-            round.starting_timestamp = 1700000000 + (i as i64 * 100);
             round.start_registration().unwrap();
+            round.starting_timestamp = 1700000000 + (i as i64 * 100);
             repo.add_or_update_round(&round).await.unwrap();
         }
 
