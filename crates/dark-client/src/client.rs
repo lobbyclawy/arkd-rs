@@ -11,8 +11,8 @@ use dark_api::proto::ark_v1::{
     ark_service_client::ArkServiceClient, indexer_service_client::IndexerServiceClient, output,
     round_event, transaction_event, BurnAssetRequest, ConfirmRegistrationRequest,
     DeleteIntentRequest, FinalizeTxRequest, GetEventStreamRequest, GetInfoRequest, GetRoundRequest,
-    GetTransactionsStreamRequest, GetVtxosRequest, IntentDescriptor, IssueAssetRequest,
-    ListRoundsRequest, Output, RedeemNotesRequest, RegisterIntentRequest, ReissueAssetRequest,
+    GetTransactionsStreamRequest, GetVtxosRequest, IssueAssetRequest, ListRoundsRequest,
+    RedeemNotesRequest, RegisterForRoundRequest, RegisterIntentRequest, ReissueAssetRequest,
     RequestExitRequest, SubmitTxRequest,
 };
 use tonic::transport::Channel;
@@ -464,34 +464,21 @@ impl ArkClient {
 
     /// Register a VTXO intent for the next round.
     ///
-    /// Builds a [`RegisterIntentRequest`] with a single output targeting `pubkey` (as a VTXO
-    /// script) for `amount` satoshis and an empty proof descriptor (sufficient for local
-    /// devnets; production callers should supply a real BIP-322 proof in the descriptor).
+    /// Uses the `RegisterForRound` RPC (simple pubkey+amount API, suitable for dev/test).
+    /// Production callers should use the BIP-322 `RegisterIntent` API directly.
     ///
     /// Returns the server-assigned `intent_id` string on success.
     pub async fn register_intent(&mut self, pubkey: &str, amount: u64) -> ClientResult<String> {
         let client = self.require_client()?;
 
-        let out = Output {
-            amount,
-            destination: Some(output::Destination::VtxoScript(pubkey.to_string())),
-        };
-
-        // An empty descriptor is accepted by the server for dev/test scenarios.
-        // Production callers must populate `descriptor.intent` with a valid BIP-322 proof.
-        let descriptor = IntentDescriptor {
-            intent: None,
-            boarding_inputs: vec![],
-            cosigners_public_keys: vec![],
-        };
-
         let response = client
-            .register_intent(RegisterIntentRequest {
-                outputs: vec![out],
-                descriptor: Some(descriptor),
+            .register_for_round(RegisterForRoundRequest {
+                pubkey: pubkey.to_string(),
+                amount,
+                inputs: vec![],
             })
             .await
-            .map_err(|e| ClientError::Rpc(format!("RegisterIntent failed: {}", e)))?;
+            .map_err(|e| ClientError::Rpc(format!("RegisterForRound failed: {}", e)))?;
 
         Ok(response.into_inner().intent_id)
     }

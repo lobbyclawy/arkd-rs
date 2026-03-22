@@ -619,16 +619,16 @@ impl ArkServiceTrait for ArkGrpcService {
         info!("RegisterIntent called (Go arkd parity)");
 
         // Decode the base64 PSBT proof
-        let proof_bytes = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            &intent_proof.proof,
-        )
-        .map_err(|e| Status::invalid_argument(format!("Invalid base64 proof: {e}")))?;
+        use base64::Engine;
+        let proof_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&intent_proof.proof)
+            .map_err(|e| Status::invalid_argument(format!("Invalid base64 proof: {e}")))?;
 
         let psbt = bitcoin::psbt::Psbt::deserialize(&proof_bytes)
             .map_err(|e| Status::invalid_argument(format!("Invalid PSBT: {e}")))?;
 
         let unsigned_tx = &psbt.unsigned_tx;
+        let proof_txid = unsigned_tx.compute_txid().to_string();
 
         // Parse the JSON message to get intent metadata
         let message_json: serde_json::Value =
@@ -650,60 +650,70 @@ impl ArkServiceTrait for ArkGrpcService {
                 .and_then(|inp| inp.witness_utxo.as_ref())
                 .map(|utxo| utxo.value.to_sat())
                 .unwrap_or(0);
-            let pubkey = String::new(); // pubkey extracted below
             inputs.push(dark_core::domain::Vtxo::new(
                 dark_core::domain::VtxoOutpoint::new(txid, vout),
                 amount,
-                pubkey,
+                String::new(),
             ));
         }
 
-        // Extract output amounts and scripts from PSBT
-        // First output is the toSpend change (skip), remaining are intent outputs
-        let total_amount: u64 = unsigned_tx
-            .output
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| !onchain_output_indexes.contains(i))
-            .map(|(_, o)| o.value.to_sat())
-            .sum();
-
-        // Derive pubkey from first real output's P2TR script
-        let pubkey_hex = unsigned_tx
-            .output
-            .iter()
-            .find(|o| o.script_pubkey.is_p2tr())
-            .map(|o| {
-                // P2TR script: OP_1 OP_PUSH32 <32-byte-key>
-                let script_bytes = o.script_pubkey.as_bytes();
-                if script_bytes.len() >= 34 {
+        // Build receivers from PSBT outputs (P2TR → offchain VTXO, otherwise onchain)
+        let mut receivers: Vec<dark_core::domain::Receiver> = Vec::new();
+        for (i, tx_out) in unsigned_tx.output.iter().enumerate() {
+            let amount = tx_out.value.to_sat();
+            if amount == 0 {
+                continue; // skip OP_RETURN or zero-value outputs
+            }
+            if onchain_output_indexes.contains(&i) {
+                let addr =
+                    bitcoin::Address::from_script(&tx_out.script_pubkey, bitcoin::Network::Regtest)
+                        .map(|a| a.to_string())
+                        .unwrap_or_default();
+                receivers.push(dark_core::domain::Receiver::onchain(amount, addr));
+            } else if tx_out.script_pubkey.is_p2tr() {
+                // Extract x-only pubkey from P2TR script: OP_1 OP_PUSH32 <32-byte-key>
+                let script_bytes = tx_out.script_pubkey.as_bytes();
+                let pubkey_hex = if script_bytes.len() >= 34 {
                     hex::encode(&script_bytes[2..34])
                 } else {
                     String::new()
-                }
-            })
-            .unwrap_or_default();
+                };
+                receivers.push(dark_core::domain::Receiver::offchain(amount, pubkey_hex));
+            }
+        }
 
-        // Update input pubkeys
+        // Set input pubkeys from first receiver's pubkey
+        let owner_pubkey = receivers
+            .iter()
+            .find(|r| !r.pubkey.is_empty())
+            .map(|r| r.pubkey.clone())
+            .unwrap_or_default();
         for inp in inputs.iter_mut() {
-            inp.pubkey = pubkey_hex.clone();
+            inp.pubkey = owner_pubkey.clone();
         }
 
         info!(
             inputs = inputs.len(),
-            total_amount,
-            pubkey = %pubkey_hex,
+            receivers = receivers.len(),
+            owner = %owner_pubkey,
             "RegisterIntent: parsed BIP-322 proof"
         );
 
-        // Create intent with proof
-        let intent = dark_core::domain::Intent::new(
-            "grpc-register-intent".to_string(),
-            pubkey_hex.clone(),
+        // Create intent
+        let mut intent = dark_core::domain::Intent::new(
+            proof_txid,
             intent_proof.proof.clone(),
+            intent_proof.message.clone(),
             inputs,
         )
         .map_err(|e| Status::invalid_argument(format!("Invalid intent: {e}")))?;
+
+        // Add receivers
+        if !receivers.is_empty() {
+            intent
+                .add_receivers(receivers)
+                .map_err(|e| Status::invalid_argument(format!("Invalid receivers: {e}")))?;
+        }
 
         let intent_id = self
             .core
@@ -711,7 +721,7 @@ impl ArkServiceTrait for ArkGrpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        info!(intent_id = %intent_id, total_amount, "Intent registered");
+        info!(intent_id = %intent_id, "Intent registered");
 
         Ok(Response::new(RegisterIntentResponse { intent_id }))
     }

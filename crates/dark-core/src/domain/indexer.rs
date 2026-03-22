@@ -322,18 +322,16 @@ mod tests {
         let v2 = Vtxo::new(VtxoOutpoint::new("tx2".into(), 0), 200_000, "pk2".into());
         let vtxo_repo = Arc::new(PopulatedVtxoRepo::new(vec![v1, v2]));
 
-        let rounds = (0..3).map(|i| {
-            let mut r = Round::new();
-            r.id = format!("round-{i}");
-            r
-        }).collect();
+        let rounds = (0..3)
+            .map(|i| {
+                let mut r = Round::new();
+                r.id = format!("round-{i}");
+                r
+            })
+            .collect();
         let round_repo = Arc::new(PopulatedRoundRepo::new(rounds));
 
-        let idx = RepositoryIndexer::new(
-            vtxo_repo,
-            round_repo,
-            Arc::new(NoopForfeitRepository),
-        );
+        let idx = RepositoryIndexer::new(vtxo_repo, round_repo, Arc::new(NoopForfeitRepository));
 
         let stats = idx.get_stats().await.unwrap();
         assert_eq!(stats.total_vtxos, 2);
