@@ -528,12 +528,51 @@ impl LocalTxBuilder {
     /// consensus-serialized raw transaction hex.
     pub fn finalize_and_extract(&self, psbt_hex: &str) -> Result<String, String> {
         let psbt_bytes = hex::decode(psbt_hex).map_err(|e| format!("Invalid PSBT hex: {e}"))?;
-        let psbt = Psbt::deserialize(&psbt_bytes)
+        let mut psbt = Psbt::deserialize(&psbt_bytes)
             .map_err(|e| format!("Failed to deserialize PSBT: {e}"))?;
 
-        // Extract the unsigned transaction from the PSBT.
-        // In a full implementation, we would finalize each input's
-        // final_script_witness first. For now, extract directly.
+        // Finalize each input: assemble witness from taproot script-spend sigs
+        for i in 0..psbt.inputs.len() {
+            if psbt.inputs[i].final_script_witness.is_some() {
+                continue; // Already finalized
+            }
+
+            // Try taproot script-path spend (most common in Ark)
+            if !psbt.inputs[i].tap_script_sigs.is_empty() {
+                let mut witness = Witness::default();
+
+                // Find the leaf script and control block from tap_scripts
+                let leaf_info = psbt.inputs[i].tap_scripts.iter().next();
+
+                // Collect signatures in order
+                for ((_key, _leaf_hash), sig) in &psbt.inputs[i].tap_script_sigs {
+                    witness.push(sig.serialize());
+                }
+
+                // Add the leaf script and control block
+                if let Some((control_block, (script, _version))) = leaf_info {
+                    witness.push(script.as_bytes());
+                    witness.push(control_block.serialize());
+                }
+
+                psbt.inputs[i].final_script_witness = Some(witness);
+                // Clear partial sig fields after finalization
+                psbt.inputs[i].tap_script_sigs.clear();
+                psbt.inputs[i].tap_scripts.clear();
+                psbt.inputs[i].tap_key_sig = None;
+                psbt.inputs[i].tap_internal_key = None;
+                psbt.inputs[i].tap_merkle_root = None;
+            } else if let Some(sig) = psbt.inputs[i].tap_key_sig {
+                // Key-path spend
+                let mut witness = Witness::default();
+                witness.push(sig.serialize());
+                psbt.inputs[i].final_script_witness = Some(witness);
+                psbt.inputs[i].tap_key_sig = None;
+                psbt.inputs[i].tap_internal_key = None;
+                psbt.inputs[i].tap_merkle_root = None;
+            }
+        }
+
         let tx = psbt.extract_tx_unchecked_fee_rate();
         Ok(bitcoin::consensus::encode::serialize_hex(&tx))
     }
