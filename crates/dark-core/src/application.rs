@@ -1922,20 +1922,33 @@ impl ArkService {
             use base64::Engine;
             base64::engine::general_purpose::STANDARD.encode(merged.serialize())
         };
-        let asp_signed = self
-            .signer
-            .sign_transaction(&merged_b64, false)
-            .await
-            .unwrap_or(merged_b64);
-
-        // Convert to hex for finalize_and_extract
-        let asp_signed_bytes = {
-            use base64::Engine;
-            base64::engine::general_purpose::STANDARD
-                .decode(&asp_signed)
-                .unwrap_or_else(|_| merged.serialize())
+        let asp_signed = match self.signer.sign_transaction(&merged_b64, false).await {
+            Ok(s) => {
+                // Debug: check how many sigs after ASP signing
+                if let Ok(bytes) = hex::decode(&s)
+                    .or_else(|_| base64::engine::general_purpose::STANDARD.decode(&s))
+                {
+                    if let Ok(p) = bitcoin::psbt::Psbt::deserialize(&bytes) {
+                        for (i, inp) in p.inputs.iter().enumerate() {
+                            info!(
+                                input_idx = i,
+                                tap_script_sigs_after_asp = inp.tap_script_sigs.len(),
+                                "After ASP co-signing"
+                            );
+                        }
+                    }
+                }
+                info!("ASP co-signing succeeded");
+                s
+            }
+            Err(e) => {
+                info!(error = %e, "ASP co-signing failed — using client-only PSBT");
+                hex::encode(merged.serialize())
+            }
         };
-        let merged_hex = hex::encode(&asp_signed_bytes);
+
+        // asp_signed is already hex from the signer — use directly
+        let merged_hex = asp_signed;
 
         // Finalize and broadcast
         let raw_tx = self.tx_builder.finalize_and_extract(&merged_hex).await?;
