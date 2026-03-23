@@ -151,6 +151,7 @@ pub struct ArkSection {
 #[derive(Debug, Deserialize, Default)]
 pub struct WalletSection {
     /// BIP86 Taproot external (receiving) output descriptor.
+    #[allow(dead_code)]
     pub descriptor: Option<String>,
     /// BIP86 Taproot internal (change) output descriptor.
     #[allow(dead_code)]
@@ -165,6 +166,7 @@ pub struct WalletSection {
 impl WalletSection {
     /// Returns `true` when both descriptor and esplora_url are configured,
     /// indicating the real BDK wallet should be used.
+    #[allow(dead_code)]
     pub fn is_configured(&self) -> bool {
         self.descriptor.is_some() && self.esplora_url.is_some()
     }
