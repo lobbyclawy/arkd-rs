@@ -908,16 +908,12 @@ impl ArkServiceTrait for ArkGrpcService {
         );
 
         // If the client sent a signed commitment tx, finalize and broadcast it
-        let signed_commitment_str = if req.signed_commitment_tx.is_empty() {
-            String::new()
-        } else {
-            String::from_utf8_lossy(&req.signed_commitment_tx).to_string()
-        };
-        if !signed_commitment_str.is_empty() {
+        if !req.signed_commitment_tx.is_empty() {
+            let signed_commitment_str = &req.signed_commitment_tx;
             info!("Client sent signed_commitment_tx — attempting broadcast");
             match self
                 .core
-                .broadcast_signed_commitment_tx(&signed_commitment_str)
+                .broadcast_signed_commitment_tx(signed_commitment_str)
                 .await
             {
                 Ok(txid) => info!(txid = %txid, "Commitment tx broadcast from client signature"),
