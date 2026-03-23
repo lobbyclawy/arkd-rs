@@ -199,6 +199,8 @@ pub struct ArkService {
     /// Active exits indexed by ID
     /// TODO(#9): Back with SQLite persistence to survive restarts
     exits: RwLock<std::collections::HashMap<uuid::Uuid, Exit>>,
+    /// Partial commitment tx PSBTs from clients (for merging before broadcast)
+    partial_commitment_psbts: tokio::sync::Mutex<Vec<String>>,
 }
 
 impl ArkService {
@@ -242,6 +244,7 @@ impl ArkService {
             config_service,
             current_round: RwLock::new(None),
             exits: RwLock::new(std::collections::HashMap::new()),
+            partial_commitment_psbts: tokio::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -1831,24 +1834,84 @@ impl ArkService {
     /// Submit signed forfeit transactions for the current batch.
     ///
     /// Called by participants after tree signing is complete.
-    /// Broadcast a client-signed commitment tx (received via SubmitSignedForfeitTxs).
-    /// The client signs the boarding inputs; the ASP co-signs; then we broadcast.
+    /// Collect a client-signed commitment tx PSBT. When all expected inputs are
+    /// signed, merge the PSBTs, finalize, and broadcast.
     pub async fn broadcast_signed_commitment_tx(
         &self,
         signed_commitment_tx: &str,
     ) -> ArkResult<String> {
-        // The client sent a base64 PSBT with their boarding input signatures.
-        // ASP co-signs it, then finalize and broadcast.
-        let asp_signed = self
-            .signer
-            .sign_transaction(signed_commitment_tx, false)
-            .await?;
+        use base64::Engine;
 
-        let raw_tx = self.tx_builder.finalize_and_extract(&asp_signed).await?;
+        // Decode the incoming PSBT
+        let incoming_bytes = base64::engine::general_purpose::STANDARD
+            .decode(signed_commitment_tx)
+            .map_err(|e| ArkError::Internal(format!("Invalid base64 PSBT: {e}")))?;
+        let incoming_psbt = bitcoin::psbt::Psbt::deserialize(&incoming_bytes)
+            .map_err(|e| ArkError::Internal(format!("Invalid PSBT: {e}")))?;
 
+        let num_inputs = incoming_psbt.unsigned_tx.input.len();
+
+        // Store this partial PSBT
+        let mut partials = self.partial_commitment_psbts.lock().await;
+        partials.push(signed_commitment_tx.to_string());
+
+        info!(
+            partial_count = partials.len(),
+            total_inputs = num_inputs,
+            "Received partial commitment tx PSBT"
+        );
+
+        // Only broadcast when we have enough partials (one per boarding input)
+        if partials.len() < num_inputs {
+            return Ok(String::new()); // Wait for more
+        }
+
+        // Merge all partial PSBTs
+        let mut merged = incoming_psbt;
+        for partial_b64 in partials.iter() {
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(partial_b64) {
+                if let Ok(partial) = bitcoin::psbt::Psbt::deserialize(&bytes) {
+                    // Copy partial signatures from each input
+                    for (i, input) in partial.inputs.iter().enumerate() {
+                        if i < merged.inputs.len() {
+                            // Copy taproot key spend sig
+                            if merged.inputs[i].tap_key_sig.is_none() {
+                                merged.inputs[i].tap_key_sig = input.tap_key_sig;
+                            }
+                            // Copy taproot script spend sigs
+                            for (key, sig) in &input.tap_script_sigs {
+                                merged.inputs[i].tap_script_sigs.entry(*key).or_insert(*sig);
+                            }
+                            // Copy taproot leaf scripts
+                            if merged.inputs[i].tap_scripts.is_empty() {
+                                merged.inputs[i].tap_scripts = input.tap_scripts.clone();
+                            }
+                            // Copy taproot internal key
+                            if merged.inputs[i].tap_internal_key.is_none() {
+                                merged.inputs[i].tap_internal_key = input.tap_internal_key;
+                            }
+                            // Copy taproot merkle root
+                            if merged.inputs[i].tap_merkle_root.is_none() {
+                                merged.inputs[i].tap_merkle_root = input.tap_merkle_root;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clear partials for next round
+        partials.clear();
+        drop(partials);
+
+        // Serialize merged PSBT
+        let merged_b64 = base64::engine::general_purpose::STANDARD.encode(merged.serialize());
+
+        // Finalize and broadcast
+        let raw_tx = self.tx_builder.finalize_and_extract(&merged_b64).await?;
         let txid = self.wallet.broadcast_transaction(vec![raw_tx]).await?;
 
-        info!(txid = %txid, "Client-signed commitment tx broadcast successfully");
+        info!(txid = %txid, "Merged commitment tx broadcast successfully");
         Ok(txid)
     }
 
