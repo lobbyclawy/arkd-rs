@@ -1904,11 +1904,11 @@ impl ArkService {
         partials.clear();
         drop(partials);
 
-        // Serialize merged PSBT
-        let merged_b64 = base64::engine::general_purpose::STANDARD.encode(merged.serialize());
+        // Serialize merged PSBT as hex (finalize_and_extract expects hex)
+        let merged_hex = hex::encode(merged.serialize());
 
         // Finalize and broadcast
-        let raw_tx = self.tx_builder.finalize_and_extract(&merged_b64).await?;
+        let raw_tx = self.tx_builder.finalize_and_extract(&merged_hex).await?;
         let txid = self.wallet.broadcast_transaction(vec![raw_tx]).await?;
 
         info!(txid = %txid, "Merged commitment tx broadcast successfully");
