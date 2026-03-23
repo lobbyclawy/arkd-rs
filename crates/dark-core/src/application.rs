@@ -1900,6 +1900,19 @@ impl ArkService {
             }
         }
 
+        // Debug: log what each input has after merge
+        for (i, input) in merged.inputs.iter().enumerate() {
+            info!(
+                input_idx = i,
+                tap_script_sigs = input.tap_script_sigs.len(),
+                tap_scripts = input.tap_scripts.len(),
+                has_key_sig = input.tap_key_sig.is_some(),
+                has_internal_key = input.tap_internal_key.is_some(),
+                has_witness_utxo = input.witness_utxo.is_some(),
+                "Merged PSBT input state"
+            );
+        }
+
         // Clear partials for next round
         partials.clear();
         drop(partials);
