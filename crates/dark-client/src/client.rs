@@ -12,8 +12,9 @@ use dark_api::proto::ark_v1::{
     round_event, transaction_event, BurnAssetRequest, ConfirmRegistrationRequest,
     DeleteIntentRequest, FinalizePendingTxsRequest, FinalizeTxRequest, GetEventStreamRequest,
     GetInfoRequest, GetRoundRequest, GetTransactionsStreamRequest, GetVtxosRequest,
-    IssueAssetRequest, ListRoundsRequest, RedeemNotesRequest, RegisterForRoundRequest,
-    ReissueAssetRequest, RequestExitRequest, SubmitTxRequest,
+    Intent as ProtoIntent, IssueAssetRequest, ListRoundsRequest, RedeemNotesRequest,
+    RegisterForRoundRequest, RegisterIntentRequest, ReissueAssetRequest, RequestExitRequest,
+    SubmitTxRequest,
 };
 use tonic::transport::Channel;
 
@@ -479,6 +480,37 @@ impl ArkClient {
             })
             .await
             .map_err(|e| ClientError::Rpc(format!("RegisterForRound failed: {}", e)))?;
+
+        Ok(response.into_inner().intent_id)
+    }
+
+    /// Register an intent using the BIP-322 `RegisterIntent` RPC.
+    ///
+    /// This is the production API for submitting an intent. `proof_b64` is a
+    /// base64-encoded PSBT signed by the VTXO owner, and `message_json` is the
+    /// JSON-encoded intent message containing `cosigners_public_keys` and other
+    /// metadata. For delegate flows, `delegate_pubkey_hex` is the hex-encoded
+    /// compressed public key of the party submitting on behalf of the VTXO owner.
+    ///
+    /// Returns the server-assigned `intent_id` on success.
+    pub async fn register_intent_bip322(
+        &mut self,
+        proof_b64: &str,
+        message_json: &str,
+        delegate_pubkey_hex: Option<&str>,
+    ) -> ClientResult<String> {
+        let client = self.require_client()?;
+
+        let response = client
+            .register_intent(RegisterIntentRequest {
+                intent: Some(ProtoIntent {
+                    proof: proof_b64.to_string(),
+                    message: message_json.to_string(),
+                    delegate_pubkey: delegate_pubkey_hex.unwrap_or("").to_string(),
+                }),
+            })
+            .await
+            .map_err(|e| ClientError::Rpc(format!("RegisterIntent failed: {}", e)))?;
 
         Ok(response.into_inner().intent_id)
     }

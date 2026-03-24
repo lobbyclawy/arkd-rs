@@ -455,6 +455,7 @@ mod tests {
             txid: String::new(),
             leaf_tx_asset_packet: String::new(),
             cosigners_public_keys: Vec::new(),
+            delegate_pubkey: None,
         };
         // Undefined stage
         assert!(round.register_intent(intent.clone()).is_err());
@@ -480,6 +481,7 @@ mod tests {
             txid: String::new(),
             leaf_tx_asset_packet: String::new(),
             cosigners_public_keys: Vec::new(),
+            delegate_pubkey: None,
         };
         assert!(round.register_intent(intent).is_err());
     }
@@ -500,6 +502,7 @@ mod tests {
                 txid: String::new(),
                 leaf_tx_asset_packet: String::new(),
                 cosigners_public_keys: Vec::new(),
+                delegate_pubkey: None,
             };
             round.register_intent(intent).unwrap();
         }
@@ -520,6 +523,7 @@ mod tests {
             txid: String::new(),
             leaf_tx_asset_packet: String::new(),
             cosigners_public_keys: Vec::new(),
+            delegate_pubkey: None,
         };
         round.register_intent(intent).unwrap();
 
@@ -532,6 +536,7 @@ mod tests {
             txid: String::new(),
             leaf_tx_asset_packet: String::new(),
             cosigners_public_keys: Vec::new(),
+            delegate_pubkey: None,
         };
         round.register_intent(intent2).unwrap();
 

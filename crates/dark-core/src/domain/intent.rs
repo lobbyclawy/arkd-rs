@@ -25,6 +25,13 @@ pub struct Intent {
     /// MuSig2 cosigner public keys (hex-encoded compressed pubkeys)
     #[serde(default)]
     pub cosigners_public_keys: Vec<String>,
+    /// Optional delegate pubkey: hex-encoded compressed pubkey of the party
+    /// submitting this intent on behalf of the VTXO owner.
+    /// When present, the server accepts `cosigners_public_keys` that differ
+    /// from the VTXO owner key (the VTXO owner authorized this via the BIP-322
+    /// proof signature).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegate_pubkey: Option<String>,
 }
 
 impl Intent {
@@ -44,6 +51,7 @@ impl Intent {
             txid: proof_txid,
             leaf_tx_asset_packet: String::new(),
             cosigners_public_keys: Vec::new(),
+            delegate_pubkey: None,
         };
         intent.validate(true)?;
         Ok(intent)
@@ -341,6 +349,7 @@ mod proptest_intent {
                     txid,
                     leaf_tx_asset_packet: leaf_pkt.unwrap_or_default(),
                     cosigners_public_keys: Vec::new(),
+                    delegate_pubkey: None,
                 },
             )
     }
@@ -404,6 +413,7 @@ mod proptest_intent {
                 txid: "txid".to_string(),
                 leaf_tx_asset_packet: String::new(),
                 cosigners_public_keys: Vec::new(),
+        delegate_pubkey: None,
             };
 
             let json = serde_json::to_string(&intent).expect("serialization should succeed");
@@ -427,6 +437,7 @@ mod proptest_intent {
                 txid: "txid".to_string(),
                 leaf_tx_asset_packet: String::new(),
                 cosigners_public_keys: Vec::new(),
+        delegate_pubkey: None,
             };
 
             let json = serde_json::to_string(&intent).expect("serialization should succeed");
