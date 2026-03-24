@@ -20,7 +20,14 @@ impl TimeScheduler for SimpleTimeScheduler {
     async fn schedule(&self, interval: Duration) -> ArkResult<mpsc::Receiver<()>> {
         let (tx, rx) = mpsc::channel(1);
         tokio::spawn(async move {
-            // Send an immediate first tick so a round starts on server boot.
+            // Wait a short startup grace period before firing the first tick.
+            // This ensures the gRPC event bridge has subscribed to the core event
+            // bus before the first BatchStarted event is emitted, so no clients
+            // miss it. 500ms is sufficient since the bridge subscribes synchronously
+            // in its spawned task which runs immediately after server start.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            // Send the first tick to start the initial round.
             if tx.send(()).await.is_err() {
                 return;
             }

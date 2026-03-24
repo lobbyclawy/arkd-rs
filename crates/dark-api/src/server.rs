@@ -238,11 +238,13 @@ impl Server {
         // Load TLS config once (before spawning tasks)
         let tls_config = self.load_tls_config().await?;
 
+        // Bridge core ArkService domain events → gRPC EventBroker.
+        // Must subscribe BEFORE spawning gRPC/admin servers and BEFORE the
+        // round loop fires its first tick, so no BatchStarted events are missed.
+        self.spawn_event_bridge();
+
         let grpc_handle = self.spawn_grpc_server(tls_config.clone())?;
         let admin_handle = self.spawn_admin_server(tls_config)?;
-
-        // Bridge core ArkService domain events → gRPC EventBroker
-        self.spawn_event_bridge();
 
         info!(
             grpc_addr = %self.config.grpc_addr,
