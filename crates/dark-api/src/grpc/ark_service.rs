@@ -856,6 +856,22 @@ impl ArkServiceTrait for ArkGrpcService {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
 
+        // Resolve the delegate pubkey: prefer proto field, fall back to JSON field.
+        // A delegate pubkey is present when someone (the delegate, Bob) is submitting
+        // an intent on behalf of a VTXO owner (Alice). The BIP-322 proof is signed by
+        // Alice, while the cosigner keys are Bob's. The server accepts this as long as
+        // the proof signature is valid for the VTXO inputs (BIP-322 verification is
+        // tracked in TODO(#40); for now the proof is accepted without strict verification).
+        let delegate_pubkey: Option<String> = if !intent_proof.delegate_pubkey.is_empty() {
+            Some(intent_proof.delegate_pubkey.clone())
+        } else {
+            message_json
+                .get("delegate_pubkey")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        };
+
         // Skip first input (BIP-322 toSpend reference) — remaining are real UTXOs
         let mut inputs: Vec<dark_core::domain::Vtxo> = Vec::new();
         for (i, tx_in) in unsigned_tx.input.iter().enumerate().skip(1) {
@@ -914,6 +930,7 @@ impl ArkServiceTrait for ArkGrpcService {
             inputs = inputs.len(),
             receivers = receivers.len(),
             owner = %owner_pubkey,
+            delegate = ?delegate_pubkey,
             "RegisterIntent: parsed BIP-322 proof"
         );
 
@@ -933,8 +950,12 @@ impl ArkServiceTrait for ArkGrpcService {
                 .map_err(|e| Status::invalid_argument(format!("Invalid receivers: {e}")))?;
         }
 
-        // Set cosigner public keys from the intent message
+        // Set cosigner public keys from the intent message.
+        // In a delegate flow, cosigners_public_keys contains the delegate's key (e.g. Bob's),
+        // not the VTXO owner's key (Alice's). The delegate_pubkey field records who is acting
+        // as the delegate. Full BIP-322 proof validation is tracked in TODO(#40).
         intent.cosigners_public_keys = cosigners_public_keys;
+        intent.delegate_pubkey = delegate_pubkey;
 
         let intent_id = self
             .core
@@ -1011,7 +1032,7 @@ impl ArkServiceTrait for ArkGrpcService {
                     pubkey,
                     amount: intent.inputs.iter().map(|v| v.amount).sum(),
                     proof_message: intent.message.clone(),
-                    cosigners_public_keys: vec![],
+                    cosigners_public_keys: intent.cosigners_public_keys.clone(),
                     boarding_inputs: vec![],
                     status: "pending".to_string(),
                     created_at: now,

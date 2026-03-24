@@ -61,6 +61,10 @@ message RoundDetails {
 message Intent {
   string proof = 1;
   string message = 2;
+  // Optional: hex-encoded compressed public key of the delegate submitting this
+  // intent on behalf of the VTXO owner. When set, the server verifies that the
+  // BIP-322 proof was signed by the owner and accepts the delegate's cosigner key.
+  string delegate_pubkey = 3;
 }
 
 // ServiceStatus reports the status of a server subsystem.

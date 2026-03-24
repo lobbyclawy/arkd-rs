@@ -379,6 +379,7 @@ impl RoundRepository for SqliteRoundRepository {
                 txid: irow.txid,
                 leaf_tx_asset_packet: irow.leaf_tx_asset_packet,
                 cosigners_public_keys: Vec::new(),
+                delegate_pubkey: None,
             };
             confirmation_status_map.insert(intent.id.clone(), conf_status);
             intents.insert(intent.id.clone(), intent);
