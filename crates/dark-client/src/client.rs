@@ -607,13 +607,13 @@ impl ArkClient {
         // hex as a trace identifier so callers can exercise the RPC path.
         let response = client
             .submit_tx(SubmitTxRequest {
-                inputs: vec![],
-                outputs: vec![],
+                signed_ark_tx: tx_hex.to_string(),
+                checkpoint_txs: vec![],
             })
             .await
             .map_err(|e| ClientError::Rpc(format!("SubmitTx failed (tx={}): {}", tx_hex, e)))?;
 
-        Ok(response.into_inner().tx_id)
+        Ok(response.into_inner().ark_txid)
     }
 
     /// Finalize a pending off-chain transaction by its ID.
@@ -625,8 +625,8 @@ impl ArkClient {
 
         client
             .finalize_tx(FinalizeTxRequest {
-                tx_id: txid.to_string(),
-                checkpoint_txs: vec![],
+                ark_txid: txid.to_string(),
+                final_checkpoint_txs: vec![],
             })
             .await
             .map_err(|e| ClientError::Rpc(format!("FinalizeTx failed (txid={}): {}", txid, e)))?;

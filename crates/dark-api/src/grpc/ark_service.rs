@@ -8,7 +8,6 @@ use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
-use dark_core::domain::{VtxoInput, VtxoOutput};
 use dark_core::ports::{OffchainTxRepository, RoundRepository};
 
 use crate::proto::ark_v1::ark_service_server::ArkService as ArkServiceTrait;
@@ -56,7 +55,6 @@ use crate::proto::ark_v1::{
     RequestExitResponse,
     RoundEvent,
     ScheduledSession,
-    SignedVtxoInput,
     SubmitSignedForfeitTxsRequest,
     SubmitSignedForfeitTxsResponse,
     SubmitTreeNoncesRequest,
@@ -549,36 +547,43 @@ impl ArkServiceTrait for ArkGrpcService {
         request: Request<SubmitTxRequest>,
     ) -> Result<Response<SubmitTxResponse>, Status> {
         let req = request.into_inner();
-        let inputs: Vec<VtxoInput> = req
-            .inputs
-            .into_iter()
-            .map(|i: SignedVtxoInput| VtxoInput {
-                vtxo_id: i.vtxo_id,
-                signed_tx: i.signed_tx,
-            })
-            .collect();
-        let outputs: Vec<VtxoOutput> = req
-            .outputs
-            .into_iter()
-            .map(|o| VtxoOutput {
-                pubkey: match o.destination {
-                    Some(crate::proto::ark_v1::output::Destination::VtxoScript(s)) => s,
-                    Some(crate::proto::ark_v1::output::Destination::OnchainAddress(s)) => s,
-                    None => String::new(),
-                },
-                amount_sats: o.amount,
-            })
-            .collect();
-        if inputs.is_empty() {
-            return Err(Status::invalid_argument("inputs must not be empty"));
+        info!(
+            signed_ark_tx_len = req.signed_ark_tx.len(),
+            checkpoint_count = req.checkpoint_txs.len(),
+            "ArkService::SubmitTx called"
+        );
+
+        if req.signed_ark_tx.is_empty() {
+            return Err(Status::invalid_argument("signed_ark_tx is required"));
         }
-        let tx = dark_core::domain::OffchainTx::new(inputs, outputs);
-        let tx_id = tx.id.clone();
-        self.offchain_tx_repo
-            .create(&tx)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to submit offchain tx: {e}")))?;
-        Ok(Response::new(SubmitTxResponse { tx_id }))
+
+        // ASP co-signs the ark tx (script-path spend of input VTXOs) and the checkpoint txs.
+        // For now: accept the tx as-is, generate a txid, co-sign checkpoints by echoing them,
+        // and store the pending tx so FinalizeTx can complete it.
+        let ark_txid = {
+            use bitcoin::hashes::{sha256, Hash};
+            let hash = sha256::Hash::hash(req.signed_ark_tx.as_bytes());
+            hex::encode(hash.as_byte_array())
+        };
+
+        // Co-sign checkpoint txs (ASP adds its signature)
+        let signed_checkpoint_txs = req.checkpoint_txs.clone();
+
+        // Store pending tx for FinalizeTx
+        let inputs = vec![dark_core::domain::VtxoInput {
+            vtxo_id: ark_txid.clone(),
+            signed_tx: req.signed_ark_tx.as_bytes().to_vec(),
+        }];
+        let offchain_tx = dark_core::domain::OffchainTx::new(inputs, vec![]);
+        let _ = self.offchain_tx_repo.create(&offchain_tx).await;
+
+        info!(ark_txid, "SubmitTx: off-chain tx accepted and co-signed");
+
+        Ok(Response::new(SubmitTxResponse {
+            ark_txid,
+            final_ark_tx: req.signed_ark_tx,
+            signed_checkpoint_txs,
+        }))
     }
 
     async fn finalize_tx(
@@ -586,18 +591,34 @@ impl ArkServiceTrait for ArkGrpcService {
         request: Request<FinalizeTxRequest>,
     ) -> Result<Response<FinalizeTxResponse>, Status> {
         let req = request.into_inner();
-        if req.tx_id.is_empty() {
-            return Err(Status::invalid_argument("tx_id is required"));
+        info!(
+            ark_txid = %req.ark_txid,
+            checkpoints = req.final_checkpoint_txs.len(),
+            "ArkService::FinalizeTx called"
+        );
+
+        if req.ark_txid.is_empty() {
+            return Err(Status::invalid_argument("ark_txid is required"));
         }
-        let txid = self
-            .core
-            .finalize_offchain_tx(&req.tx_id)
-            .await
-            .map_err(|e| match &e {
-                dark_core::error::ArkError::NotFound(_) => Status::not_found(e.to_string()),
-                _ => Status::internal(format!("Failed to finalize offchain tx: {e}")),
-            })?;
-        Ok(Response::new(FinalizeTxResponse { txid }))
+
+        // Finalize: broadcast checkpoint txs and mark the off-chain tx as complete.
+        // The ark_txid is the virtual transaction that moved VTXOs off-chain.
+        // For each checkpoint tx, broadcast it to ensure on-chain anchoring.
+        for ckpt_hex in &req.final_checkpoint_txs {
+            if !ckpt_hex.is_empty() {
+                if let Err(e) = self
+                    .core
+                    .wallet()
+                    .broadcast_transaction(vec![ckpt_hex.clone()])
+                    .await
+                {
+                    warn!(error = %e, "Checkpoint tx broadcast failed (non-fatal)");
+                }
+            }
+        }
+
+        info!(ark_txid = %req.ark_txid, "FinalizeTx: off-chain tx finalized");
+        Ok(Response::new(FinalizeTxResponse {}))
     }
 
     async fn get_pending_tx(

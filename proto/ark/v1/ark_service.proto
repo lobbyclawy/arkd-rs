@@ -297,22 +297,22 @@ message SignedVtxoInput {
 }
 
 message SubmitTxRequest {
-  repeated SignedVtxoInput inputs = 1;
-  repeated Output outputs = 2;
+  string signed_ark_tx = 1;
+  repeated string checkpoint_txs = 2;
 }
 
 message SubmitTxResponse {
-  string tx_id = 1;
+  string ark_txid = 1;
+  string final_ark_tx = 2;
+  repeated string signed_checkpoint_txs = 3;
 }
 
 message FinalizeTxRequest {
-  string tx_id = 1;
-  repeated bytes checkpoint_txs = 2;
+  string ark_txid = 1;
+  repeated string final_checkpoint_txs = 2;
 }
 
-message FinalizeTxResponse {
-  string txid = 1;
-}
+message FinalizeTxResponse {}
 
 message GetPendingTxRequest {
   string tx_id = 1;
