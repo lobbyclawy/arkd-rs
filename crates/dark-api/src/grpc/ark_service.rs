@@ -319,9 +319,6 @@ impl ArkServiceTrait for ArkGrpcService {
             "RequestExit called"
         );
 
-        if req.destination.is_empty() {
-            return Err(Status::invalid_argument("destination is required"));
-        }
         if req.vtxo_ids.is_empty() {
             return Err(Status::invalid_argument("vtxo_ids must not be empty"));
         }
@@ -336,28 +333,62 @@ impl ArkServiceTrait for ArkGrpcService {
         self.verify_vtxo_ownership(&vtxo_outpoints, &requester_pubkey)
             .await?;
 
-        let destination: bitcoin::Address<bitcoin::address::NetworkUnchecked> = req
+        // Parse destination (optional for unilateral exit — client constructs their own tx)
+        let destination: bitcoin::Address<bitcoin::address::NetworkUnchecked> = if req
             .destination
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("Invalid destination address: {e}")))?;
-
-        let exit_request = dark_core::domain::CollaborativeExitRequest {
-            vtxo_ids: vtxo_outpoints,
-            destination,
+            .is_empty()
+        {
+            // Use a placeholder address when none provided
+            "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+                .parse()
+                .map_err(|e| Status::internal(format!("Placeholder address parse failed: {e}")))?
+        } else {
+            req.destination
+                .parse()
+                .map_err(|e| Status::invalid_argument(format!("Invalid destination address: {e}")))?
         };
 
-        let exit = self
-            .core
-            .request_collaborative_exit(exit_request, requester_pubkey)
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "Exit request failed");
-                Status::internal(e.to_string())
-            })?;
+        // For each VTXO, register a unilateral exit and collect branch PSBTs.
+        let mut all_branch_psbts: Vec<String> = Vec::new();
+        let mut last_exit_id = String::new();
+        let mut last_exit_status = String::new();
+
+        for vtxo_outpoint in &vtxo_outpoints {
+            let exit_request = dark_core::domain::UnilateralExitRequest {
+                vtxo_id: vtxo_outpoint.clone(),
+                destination: destination.clone(),
+                fee_rate_sat_vb: 1,
+            };
+
+            let exit = self
+                .core
+                .request_unilateral_exit(exit_request, requester_pubkey)
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, vtxo = %vtxo_outpoint, "Unilateral exit request failed");
+                    Status::internal(e.to_string())
+                })?;
+
+            last_exit_id = exit.id.to_string();
+            last_exit_status = format!("{:?}", exit.status);
+
+            // Fetch the VTXO tree branch for this VTXO (root→leaf PSBTs)
+            let branch = self
+                .core
+                .get_vtxo_tree_branch(vtxo_outpoint)
+                .await
+                .map_err(|e| {
+                    warn!(error = %e, vtxo = %vtxo_outpoint, "Failed to get VTXO tree branch");
+                    Status::internal(e.to_string())
+                })?;
+
+            all_branch_psbts.extend(branch);
+        }
 
         Ok(Response::new(RequestExitResponse {
-            exit_id: exit.id.to_string(),
-            status: format!("{:?}", exit.status),
+            exit_id: last_exit_id,
+            status: last_exit_status,
+            branch_psbts: all_branch_psbts,
         }))
     }
 
