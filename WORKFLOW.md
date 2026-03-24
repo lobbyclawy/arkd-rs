@@ -30,9 +30,14 @@
     - All CI checks are green ✅
     - Every inline review comment has been replied to and resolved ✅
     - **NEVER bypass branch protection or force-push to merge** — if CI is red, fix the code first
-11. **Close issue** — mark the GitHub issue as closed
-12. **Update roadmap** — tick the issue in Issue #13, update progress percentages
-13. **Update README** — tick any phase checkboxes if the issue completes a phase
+11. **Delete branch** — delete the feature branch after merging:
+    ```bash
+    curl -s -X DELETE -H "Authorization: token $GH_TOKEN" \
+      "https://api.github.com/repos/$REPO/git/refs/heads/BRANCH_NAME"
+    ```
+12. **Close issue** — mark the GitHub issue as closed
+13. **Update roadmap** — tick the issue in Issue #13, update progress percentages
+14. **Update README** — tick any phase checkboxes if the issue completes a phase
 
 ## How to Reply to and Resolve Review Comments
 
