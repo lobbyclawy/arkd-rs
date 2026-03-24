@@ -349,6 +349,7 @@ mod proptest_intent {
                     txid,
                     leaf_tx_asset_packet: leaf_pkt.unwrap_or_default(),
                     cosigners_public_keys: Vec::new(),
+                    delegate_pubkey: None,
                 },
             )
     }
@@ -412,6 +413,7 @@ mod proptest_intent {
                 txid: "txid".to_string(),
                 leaf_tx_asset_packet: String::new(),
                 cosigners_public_keys: Vec::new(),
+        delegate_pubkey: None,
             };
 
             let json = serde_json::to_string(&intent).expect("serialization should succeed");
@@ -435,6 +437,7 @@ mod proptest_intent {
                 txid: "txid".to_string(),
                 leaf_tx_asset_packet: String::new(),
                 cosigners_public_keys: Vec::new(),
+        delegate_pubkey: None,
             };
 
             let json = serde_json::to_string(&intent).expect("serialization should succeed");

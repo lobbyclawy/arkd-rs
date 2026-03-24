@@ -812,6 +812,7 @@ mod tests {
             txid: "proof-txid".to_string(),
             leaf_tx_asset_packet: String::new(),
             cosigners_public_keys: Vec::new(),
+            delegate_pubkey: None,
         };
         round.intents.insert(intent.id.clone(), intent);
 
@@ -858,6 +859,7 @@ mod tests {
             txid: "t".to_string(),
             leaf_tx_asset_packet: String::new(),
             cosigners_public_keys: Vec::new(),
+            delegate_pubkey: None,
         };
         round.intents.insert(intent.id.clone(), intent);
 
