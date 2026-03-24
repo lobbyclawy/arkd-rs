@@ -669,6 +669,100 @@ impl ArkService {
             })
             .await?;
 
+        // When there are no cosigners, skip the tree signing phase and complete
+        // the round immediately.  Otherwise the round stays in Finalization
+        // forever — blocking subsequent rounds — because no nonces/signatures
+        // will ever arrive.
+        if cosigners_pubkeys.is_empty() {
+            info!(
+                round_id = %round.id,
+                intent_count = intents.len(),
+                commitment_txid = %commitment_txid,
+                "No cosigners — auto-completing round (skipping tree signing phase)"
+            );
+
+            // Create VTXOs from intents (same logic as complete_round)
+            let expiry_timestamp = chrono::Utc::now().timestamp() + self.config.vtxo_expiry_secs;
+            let mut vtxos = Vec::new();
+            let mut vtxo_idx = 0u32;
+            let leaf_nodes: Vec<&TxTreeNode> = round
+                .vtxo_tree
+                .iter()
+                .filter(|n| n.children.is_empty())
+                .collect();
+
+            for intent in &intents {
+                for receiver in &intent.receivers {
+                    if receiver.is_onchain() {
+                        continue;
+                    }
+                    let (vtxo_txid, vtxo_vout) =
+                        if let Some(leaf) = leaf_nodes.get(vtxo_idx as usize) {
+                            (leaf.txid.clone(), 0u32)
+                        } else {
+                            (commitment_txid.clone(), vtxo_idx)
+                        };
+                    let mut vtxo = Vtxo::new(
+                        VtxoOutpoint::new(vtxo_txid, vtxo_vout),
+                        receiver.amount,
+                        receiver.pubkey.clone(),
+                    );
+                    vtxo.root_commitment_txid = commitment_txid.clone();
+                    vtxo.commitment_txids = vec![commitment_txid.clone()];
+                    vtxo.expires_at = expiry_timestamp;
+                    vtxos.push(vtxo);
+                    vtxo_idx += 1;
+                }
+            }
+
+            if !vtxos.is_empty() {
+                for v in &vtxos {
+                    info!(
+                        txid = %v.outpoint.txid,
+                        vout = v.outpoint.vout,
+                        pubkey = %v.pubkey,
+                        amount = v.amount,
+                        "VTXO to persist (auto-complete)"
+                    );
+                }
+                match self.vtxo_repo.add_vtxos(&vtxos).await {
+                    Ok(()) => info!(vtxo_count = vtxos.len(), "VTXOs persisted (auto-complete)"),
+                    Err(e) => {
+                        error!(error = %e, "FAILED to persist VTXOs (auto-complete)!");
+                        return Err(e);
+                    }
+                }
+                for vtxo in &vtxos {
+                    let _ = self
+                        .events
+                        .publish_event(ArkEvent::VtxoCreated {
+                            vtxo_id: format!("{}:{}", vtxo.outpoint.txid, vtxo.outpoint.vout),
+                            pubkey: vtxo.pubkey.clone(),
+                            amount: vtxo.amount,
+                            round_id: round.id.clone(),
+                        })
+                        .await;
+                }
+            }
+
+            round.end_successfully();
+
+            if let Err(e) = self.round_repo.add_or_update_round(round).await {
+                warn!(error = %e, "Failed to persist round (non-fatal, auto-complete)");
+            }
+
+            self.events
+                .publish_event(ArkEvent::RoundFinalized {
+                    round_id: round.id.clone(),
+                    commitment_tx: round.commitment_tx.clone(),
+                    timestamp: round.ending_timestamp,
+                    vtxo_count: vtxos.len() as u32,
+                })
+                .await?;
+
+            return Ok(round.clone());
+        }
+
         info!(
             round_id = %round.id,
             intent_count = intents.len(),
