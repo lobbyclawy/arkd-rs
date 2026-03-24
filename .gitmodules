@@ -1,0 +1,3 @@
+[submodule "vendor/arkd"]
+	path = vendor/arkd
+	url = https://github.com/arkade-os/arkd
