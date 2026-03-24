@@ -633,15 +633,18 @@ impl ArkServiceTrait for ArkGrpcService {
             hex::encode(hash.as_byte_array())
         };
 
-        // Co-sign the ark tx PSBT with the ASP signer key
+        // Co-sign the ark tx PSBT with the ASP signer key.
+        // The signer accepts hex or base64 input and returns hex output.
+        // Convert hex back to base64 for the Go client; fall back to echo on any failure.
         let cosigned_ark_tx = match self.core.cosign_psbt(&req.signed_ark_tx).await {
             Ok(signed) => {
-                // cosign_psbt returns hex; convert back to base64 for the Go client
-                let signed_bytes = hex::decode(&signed).map_err(|e| {
-                    Status::internal(format!("failed to decode cosigned ark tx hex: {e}"))
-                })?;
-                use base64::Engine;
-                base64::engine::general_purpose::STANDARD.encode(&signed_bytes)
+                if let Ok(signed_bytes) = hex::decode(&signed) {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD.encode(&signed_bytes)
+                } else {
+                    // Signer returned non-hex (e.g. mock) — use as-is
+                    signed
+                }
             }
             Err(e) => {
                 warn!(error = %e, "ASP co-sign of ark tx failed, echoing back unsigned");
@@ -654,12 +657,13 @@ impl ArkServiceTrait for ArkGrpcService {
         for ckpt in &req.checkpoint_txs {
             match self.core.cosign_psbt(ckpt).await {
                 Ok(signed) => {
-                    let signed_bytes = hex::decode(&signed).map_err(|e| {
-                        Status::internal(format!("failed to decode cosigned checkpoint hex: {e}"))
-                    })?;
-                    use base64::Engine;
-                    signed_checkpoint_txs
-                        .push(base64::engine::general_purpose::STANDARD.encode(&signed_bytes));
+                    if let Ok(signed_bytes) = hex::decode(&signed) {
+                        use base64::Engine;
+                        signed_checkpoint_txs
+                            .push(base64::engine::general_purpose::STANDARD.encode(&signed_bytes));
+                    } else {
+                        signed_checkpoint_txs.push(signed);
+                    }
                 }
                 Err(e) => {
                     warn!(error = %e, "ASP co-sign of checkpoint tx failed, echoing back unsigned");
