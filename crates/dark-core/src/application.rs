@@ -1042,7 +1042,10 @@ impl ArkService {
                 );
                 // React to fraud: broadcast any stored forfeit txs for this VTXO
                 // and reject the intent.
-                if let Err(e) = self.check_and_react_fraud(&vtxo_id, &round_id_for_fraud).await {
+                if let Err(e) = self
+                    .check_and_react_fraud(&vtxo_id, &round_id_for_fraud)
+                    .await
+                {
                     warn!(error = %e, "check_and_react_fraud failed (non-fatal)");
                 }
                 return Err(ArkError::Internal(format!(
@@ -1292,8 +1295,7 @@ impl ArkService {
         let pending_exits: Vec<_> = exits
             .values()
             .filter(|e| {
-                e.exit_type == crate::domain::ExitType::Unilateral
-                    && !e.status.is_terminal()
+                e.exit_type == crate::domain::ExitType::Unilateral && !e.status.is_terminal()
             })
             .cloned()
             .collect();
@@ -1310,7 +1312,10 @@ impl ArkService {
                             vtxo = %vtxo_id,
                             "VTXO tree leaf confirmed on-chain — marking as unrolled"
                         );
-                        if let Err(e) = self.mark_vtxos_unrolled(std::slice::from_ref(vtxo_id)).await {
+                        if let Err(e) = self
+                            .mark_vtxos_unrolled(std::slice::from_ref(vtxo_id))
+                            .await
+                        {
                             warn!(
                                 error = %e,
                                 vtxo = %vtxo_id,
@@ -3188,11 +3193,7 @@ mod tests {
 
         svc.start_round().await.unwrap();
 
-        let vtxo = Vtxo::new(
-            VtxoOutpoint::new(txid.clone(), 0),
-            50_000,
-            "ab".repeat(32),
-        );
+        let vtxo = Vtxo::new(VtxoOutpoint::new(txid.clone(), 0), 50_000, "ab".repeat(32));
         let mut intent =
             Intent::new("proof_tx".into(), "proof".into(), "msg".into(), vec![vtxo]).unwrap();
         intent
@@ -3231,7 +3232,10 @@ mod tests {
             .unwrap();
 
         let result = svc.register_intent(intent).await;
-        assert!(result.is_ok(), "register_intent should accept an unspent VTXO");
+        assert!(
+            result.is_ok(),
+            "register_intent should accept an unspent VTXO"
+        );
     }
 
     // ── Confirmation phase tests ────────────────────────────────────
