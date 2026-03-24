@@ -3025,6 +3025,8 @@ mod tests {
         intent
             .add_receivers(vec![Receiver::offchain(25_000, "rcv_pk".into())])
             .unwrap();
+        // Add a cosigner so the round doesn't auto-complete (zero-cosigner path)
+        intent.cosigners_public_keys = vec!["cd".repeat(33)];
         svc.register_intent(intent).await.unwrap();
 
         // Finalize (phase 1): enters tree signing, round stays in Finalization
