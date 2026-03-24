@@ -496,16 +496,29 @@ impl ArkService {
             })
             .await?;
 
-        // Collect boarding inputs from intent proof tx inputs
-        // Each intent's `inputs` list contains the on-chain UTXOs being spent (boarding UTXOs).
+        // Collect boarding inputs from intent proof tx inputs.
+        // Only include inputs that are on-chain boarding UTXOs (NOT already
+        // in the VTXO store as off-chain VTXOs). Off-chain VTXO inputs
+        // (e.g. delegate refresh) are spent virtually, not as commitment tx inputs.
         let mut boarding_inputs: Vec<crate::ports::BoardingInput> = Vec::new();
         for intent in &intents {
             for inp in &intent.inputs {
                 if inp.amount > 0 && !inp.outpoint.txid.is_empty() {
-                    boarding_inputs.push(crate::ports::BoardingInput {
-                        outpoint: inp.outpoint.clone(),
-                        amount: inp.amount,
-                    });
+                    let outpoint_slice = [inp.outpoint.clone()];
+                    let is_offchain = self
+                        .vtxo_repo
+                        .get_vtxos(&outpoint_slice)
+                        .await
+                        .ok()
+                        .map(|v| !v.is_empty())
+                        .unwrap_or(false);
+
+                    if !is_offchain {
+                        boarding_inputs.push(crate::ports::BoardingInput {
+                            outpoint: inp.outpoint.clone(),
+                            amount: inp.amount,
+                        });
+                    }
                 }
             }
         }
