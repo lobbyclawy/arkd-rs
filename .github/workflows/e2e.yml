@@ -96,9 +96,27 @@ jobs:
       - name: Build dark
         run: cargo build --bin dark
 
+      - name: Write dark config
+        run: |
+          cat > /tmp/dark-e2e.toml <<'EOF'
+          [server]
+          esplora_url = "http://localhost:5000"
+
+          [wallet]
+          network = "regtest"
+          esplora_url = "http://localhost:5000"
+
+          [ark]
+          round_duration_secs = 10
+          EOF
+
       - name: Start dark server
         run: |
-          ./target/debug/dark --grpc-port 7070 --admin-port 7071 --log-level warn \
+          ./target/debug/dark \
+            --config /tmp/dark-e2e.toml \
+            --grpc-port 7070 \
+            --admin-port 7071 \
+            --log-level info \
             > /tmp/dark.log 2>&1 &
           echo $! > /tmp/dark.pid
 
@@ -112,8 +130,31 @@ jobs:
           done
 
           if ! nc -z localhost 7070 2>/dev/null; then
-            echo "⚠️ dark may not be ready:"
-            cat /tmp/dark.log | tail -20
+            echo "❌ dark failed to start:"
+            cat /tmp/dark.log | tail -30
+            exit 1
+          fi
+
+          # Fund the dark server wallet so it can build commitment txs
+          DARK_ADDR=$(curl -s http://127.0.0.1:7071/v1/admin/wallet/address \
+            -H "Authorization: Basic $(echo -n 'admin:admin' | base64)" \
+            2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('address',''))" 2>/dev/null || echo "")
+          if [ -n "$DARK_ADDR" ]; then
+            echo "Funding dark wallet at $DARK_ADDR"
+            curl -s -X POST http://admin1:123@localhost:18443 \
+              -H "Content-Type: application/json" \
+              -d "{\"jsonrpc\":\"1.0\",\"id\":\"fund\",\"method\":\"sendtoaddress\",\"params\":[\"$DARK_ADDR\",1.0]}"
+            # Mine to confirm
+            MINE_ADDR=$(curl -s -X POST http://admin1:123@localhost:18443 \
+              -H "Content-Type: application/json" \
+              -d '{"jsonrpc":"1.0","id":"addr","method":"getnewaddress","params":[]}' | \
+              python3 -c "import json,sys; print(json.load(sys.stdin)['result'])")
+            curl -s -X POST http://admin1:123@localhost:18443 \
+              -H "Content-Type: application/json" \
+              -d "{\"jsonrpc\":\"1.0\",\"id\":\"mine\",\"method\":\"generatetoaddress\",\"params\":[6,\"$MINE_ADDR\"]}"
+            echo "✅ dark wallet funded"
+          else
+            echo "⚠️ could not get dark wallet address (admin API may not be ready yet)"
           fi
 
       - name: Run Rust e2e tests

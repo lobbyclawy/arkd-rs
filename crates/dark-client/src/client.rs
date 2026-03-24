@@ -468,8 +468,26 @@ impl ArkClient {
     /// Uses the `RegisterForRound` RPC (simple pubkey+amount API, suitable for dev/test).
     /// Production callers should use the BIP-322 `RegisterIntent` API directly.
     ///
+    /// If the server responds with "Not in registration stage", subscribes to the
+    /// event stream and waits for a `BatchStarted` event before retrying (up to 60s).
+    ///
     /// Returns the server-assigned `intent_id` string on success.
     pub async fn register_intent(&mut self, pubkey: &str, amount: u64) -> ClientResult<String> {
+        match self.try_register_for_round(pubkey, amount).await {
+            Ok(intent_id) => Ok(intent_id),
+            Err(ClientError::Rpc(msg)) if msg.contains("Not in registration stage") => {
+                // The server is not in registration stage yet — wait for the next
+                // RoundStarted / BatchStarted event and retry.
+                self.wait_for_round_start(std::time::Duration::from_secs(60))
+                    .await?;
+                self.try_register_for_round(pubkey, amount).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Low-level `RegisterForRound` RPC call (no retry logic).
+    async fn try_register_for_round(&mut self, pubkey: &str, amount: u64) -> ClientResult<String> {
         let client = self.require_client()?;
 
         let response = client
@@ -482,6 +500,36 @@ impl ArkClient {
             .map_err(|e| ClientError::Rpc(format!("RegisterForRound failed: {}", e)))?;
 
         Ok(response.into_inner().intent_id)
+    }
+
+    /// Subscribe to `GetEventStream` and wait for a `BatchStarted` event.
+    ///
+    /// Returns `Ok(round_id)` once a `BatchStarted` event is received, or
+    /// `Err(Timeout)` if `timeout` elapses first.
+    async fn wait_for_round_start(&mut self, timeout: std::time::Duration) -> ClientResult<String> {
+        let (mut rx, cancel) = self.get_event_stream(None).await?;
+
+        let result = tokio::time::timeout(timeout, async {
+            while let Some(event) = rx.recv().await {
+                if let BatchEvent::BatchStarted { round_id, .. } = event {
+                    return Ok(round_id);
+                }
+                // Ignore heartbeats and other events; keep waiting.
+            }
+            Err(ClientError::Rpc(
+                "Event stream closed before RoundStarted".into(),
+            ))
+        })
+        .await;
+
+        cancel();
+
+        match result {
+            Ok(inner) => inner,
+            Err(_elapsed) => Err(ClientError::Rpc(
+                "Timeout waiting for round to start (registration stage)".into(),
+            )),
+        }
     }
 
     /// Register an intent using the BIP-322 `RegisterIntent` RPC.
@@ -560,25 +608,30 @@ impl ArkClient {
 
     /// Full settlement flow: register intent, wait for round, confirm, sign, submit forfeits.
     ///
-    /// This is a **stub implementation**.  The complete flow requires:
-    /// 1. `RegisterIntent` — register a VTXO output for the next round  ✅ done here
-    /// 2. Wait for `BatchStarted` event on the transaction stream
-    /// 3. `ConfirmRegistration` — acknowledge the VTXO tree
-    /// 4. MuSig2 tree signing (`SubmitTreeNonces` / `SubmitTreeSignatures`)
-    /// 5. `SubmitSignedForfeitTxs` — provide forfeit transaction signatures
+    /// The method waits for the server to enter Registration stage (via `GetEventStream`
+    /// `BatchStarted` event) before calling `RegisterForRound`. This avoids the
+    /// "Not in registration stage" error that occurs when the round scheduler hasn't
+    /// started a new round yet.
     ///
-    /// Steps 2-5 require a full MuSig2 signer and are deferred to a follow-up issue.
+    /// Current implementation:
+    /// 1. Subscribe to `GetEventStream` and wait for `BatchStarted` (registration open)
+    /// 2. `RegisterForRound` — register a VTXO output for the round
+    ///
+    /// Steps 3-5 (ConfirmRegistration, MuSig2 tree signing, SubmitSignedForfeitTxs)
+    /// require a full MuSig2 signer and are deferred to a follow-up issue.
     ///
     /// # Returns
     /// A [`BatchTxRes`] with a placeholder `commitment_txid` derived from the `intent_id`.
-    ///
-    /// TODO: implement steps 2-5 once MuSig2 key-path signing is wired up.
     pub async fn settle(&mut self, pubkey: &str, amount: u64) -> ClientResult<BatchTxRes> {
+        // First, try to register immediately — the server may already be in registration.
+        // If it fails with "Not in registration stage", register_intent() will
+        // automatically wait for the next BatchStarted event and retry.
         let intent_id = self.register_intent(pubkey, amount).await?;
 
-        // TODO: subscribe to GetTransactionsStream and wait for a BatchStarted event,
-        // then call confirm_registration, SubmitTreeNonces, SubmitTreeSignatures, and
-        // SubmitSignedForfeitTxs to complete the full MuSig2 settlement round.
+        // TODO: steps 3-5 once MuSig2 key-path signing is wired up:
+        //   3. ConfirmRegistration — acknowledge the VTXO tree
+        //   4. MuSig2 tree signing (SubmitTreeNonces / SubmitTreeSignatures)
+        //   5. SubmitSignedForfeitTxs — provide forfeit transaction signatures
 
         Ok(BatchTxRes {
             // Placeholder txid until the real commitment tx is received from the server.
