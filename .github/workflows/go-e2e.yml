@@ -1,0 +1,128 @@
+name: E2E Tests (Go arkd suite)
+
+on:
+  schedule:
+    - cron: "0 3 * * *"  # 3 AM UTC nightly
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  go-e2e:
+    name: Go E2E tests (arkade-os/arkd suite against dark)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Start regtest environment (nigiri)
+        uses: vulpemventures/nigiri-github-action@v1
+        with:
+          use_liquid: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.1'
+          cache-dependency-path: vendor/arkd/go.sum
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-go-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-go-e2e-
+
+      - name: Build dark
+        run: cargo build --bin dark
+
+      - name: Write dark config for Go e2e tests
+        run: |
+          cat > /tmp/dark-go-e2e.toml <<'EOF'
+          [bitcoin]
+          network = "regtest"
+          rpc_host = "127.0.0.1"
+          rpc_port = 18443
+          rpc_user = "admin1"
+          rpc_password = "123"
+          min_confirmations = 1
+
+          [wallet]
+          network = "regtest"
+          esplora_url = "http://localhost:3000"
+          database_path = "/tmp/dark-go-e2e-wallet.db"
+          gap_limit = 20
+
+          [database]
+          backend = "sqlite"
+          url = "sqlite:///tmp/dark-go-e2e.db"
+
+          [ark]
+          round_duration_secs = 10
+          vtxo_expiry_blocks = 144
+          connector_timelock_blocks = 12
+          min_vtxo_amount_sats = 1000
+          max_vtxo_amount_sats = 100000000
+          utxo_min_amount = 1000
+          utxo_max_amount = 100000000
+          EOF
+
+      - name: Start dark server
+        run: |
+          ./target/debug/dark \
+            --config /tmp/dark-go-e2e.toml \
+            --grpc-port 7070 \
+            --admin-port 7071 \
+            --log-level warn \
+            > /tmp/dark-go-e2e.log 2>&1 &
+          echo $! > /tmp/dark-go-e2e.pid
+
+          for i in $(seq 1 60); do
+            if nc -z 127.0.0.1 7070 2>/dev/null; then
+              echo "✅ dark gRPC ready on :7070"
+              break
+            fi
+            echo "Waiting for dark... ($i/60)"
+            sleep 1
+          done
+
+          for i in $(seq 1 10); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:7071/v1/admin/wallet/status 2>/dev/null || echo "000")
+            if [ "$STATUS" != "000" ]; then
+              echo "✅ dark admin HTTP ready on :7071 (status: $STATUS)"
+              break
+            fi
+            echo "Waiting for dark admin HTTP... ($i/10)"
+            sleep 1
+          done
+
+          if ! nc -z 127.0.0.1 7070 2>/dev/null; then
+            echo "❌ dark failed to start:"
+            cat /tmp/dark-go-e2e.log
+            exit 1
+          fi
+
+      - name: Run arkade-os/arkd Go e2e tests
+        working-directory: vendor/arkd
+        run: go test -v -count 1 -timeout 1200s github.com/arkade-os/arkd/internal/test/e2e
+
+      - name: Show dark logs on failure
+        if: failure()
+        run: cat /tmp/dark-go-e2e.log || true
+
+      - name: Stop dark and nigiri
+        if: always()
+        run: |
+          kill $(cat /tmp/dark-go-e2e.pid) 2>/dev/null || true
+          nigiri stop --delete 2>/dev/null || true
