@@ -1230,7 +1230,10 @@ async fn test_offchain_tx_chain() {
     let _fund = faucet_fund(&alice_board.2.address, 0.001).await;
     mine_blocks(6).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
-    alice.settle(&info.pubkey, 50_000).await.expect("Alice: settle");
+    alice
+        .settle(&info.pubkey, 50_000)
+        .await
+        .expect("Alice: settle");
     mine_blocks(1).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -1240,8 +1243,14 @@ async fn test_offchain_tx_chain() {
     eprintln!("Bob offchain addr: {}", bob_pubkey);
 
     // Get Alice's VTXOs to use as input
-    let alice_vtxos = alice.list_vtxos(&info.pubkey).await.expect("Alice: list_vtxos");
-    let spendable: Vec<_> = alice_vtxos.iter().filter(|v| !v.is_spent && !v.is_swept).collect();
+    let alice_vtxos = alice
+        .list_vtxos(&info.pubkey)
+        .await
+        .expect("Alice: list_vtxos");
+    let spendable: Vec<_> = alice_vtxos
+        .iter()
+        .filter(|v| !v.is_spent && !v.is_swept)
+        .collect();
 
     if spendable.is_empty() {
         eprintln!("⚠️  Alice has no spendable VTXOs — skipping chain test");
@@ -1283,9 +1292,9 @@ async fn test_offchain_tx_chain() {
         .list_vtxos(&info.pubkey)
         .await
         .expect("Alice: list_vtxos after");
-    let alice_spent = alice_vtxos_after.iter().find(|v| {
-        format!("{}:{}", v.txid, v.vout) == input_vtxo_id && v.is_spent
-    });
+    let alice_spent = alice_vtxos_after
+        .iter()
+        .find(|v| format!("{}:{}", v.txid, v.vout) == input_vtxo_id && v.is_spent);
     if alice_spent.is_some() {
         eprintln!("✅ Alice input VTXO marked as spent");
     } else {
@@ -1327,7 +1336,10 @@ async fn test_offchain_tx_sub_dust() {
             );
         }
         Ok(txid) => {
-            eprintln!("⚠️  Sub-dust output accepted (txid={}) — dust limit may be 0 in test config", txid);
+            eprintln!(
+                "⚠️  Sub-dust output accepted (txid={}) — dust limit may be 0 in test config",
+                txid
+            );
         }
     }
 
@@ -1360,10 +1372,7 @@ async fn test_offchain_tx_concurrent_submit() {
     mine_blocks(1).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let vtxos = alice1
-        .list_vtxos(&info.pubkey)
-        .await
-        .expect("list_vtxos");
+    let vtxos = alice1.list_vtxos(&info.pubkey).await.expect("list_vtxos");
     let spendable: Vec<_> = vtxos.iter().filter(|v| !v.is_spent).collect();
     if spendable.is_empty() {
         eprintln!("⚠️  No spendable VTXOs — skipping concurrent_submit test");
@@ -1421,10 +1430,7 @@ async fn test_offchain_tx_finalize_pending() {
     mine_blocks(1).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let vtxos = alice
-        .list_vtxos(&info.pubkey)
-        .await
-        .expect("list_vtxos");
+    let vtxos = alice.list_vtxos(&info.pubkey).await.expect("list_vtxos");
     let spendable: Vec<_> = vtxos.iter().filter(|v| !v.is_spent).collect();
     if spendable.is_empty() {
         eprintln!("⚠️  No spendable VTXOs — skipping finalize_pending test");

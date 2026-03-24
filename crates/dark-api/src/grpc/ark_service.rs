@@ -578,9 +578,7 @@ impl ArkServiceTrait for ArkGrpcService {
         let (inputs, outputs): (
             Vec<dark_core::domain::VtxoInput>,
             Vec<dark_core::domain::VtxoOutput>,
-        ) = if let Ok(parsed) =
-            serde_json::from_str::<serde_json::Value>(&req.signed_ark_tx)
-        {
+        ) = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&req.signed_ark_tx) {
             let parsed_inputs: Vec<dark_core::domain::VtxoInput> = parsed
                 .get("inputs")
                 .and_then(|v| v.as_array())
@@ -673,11 +671,8 @@ impl ArkServiceTrait for ArkGrpcService {
         }
 
         // Store pending tx keyed by ark_txid so FinalizeTx can retrieve it
-        let offchain_tx = dark_core::domain::OffchainTx::new_with_id(
-            ark_txid.clone(),
-            inputs,
-            outputs,
-        );
+        let offchain_tx =
+            dark_core::domain::OffchainTx::new_with_id(ark_txid.clone(), inputs, outputs);
         // Ignore duplicate-key errors (idempotent submit)
         let _ = self.offchain_tx_repo.create(&offchain_tx).await;
 

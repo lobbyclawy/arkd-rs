@@ -1490,10 +1490,7 @@ impl ArkService {
     /// If the offchain tx is not found (e.g. it was already finalized or was never
     /// stored), we return Ok so that FinalizeTx is idempotent.
     #[instrument(skip(self))]
-    pub async fn finalize_offchain_tx_with_vtxo_update(
-        &self,
-        tx_id: &str,
-    ) -> ArkResult<String> {
+    pub async fn finalize_offchain_tx_with_vtxo_update(&self, tx_id: &str) -> ArkResult<String> {
         // Fetch the pending tx — if not found, assume already finalised
         let tx_opt = self.offchain_tx_repo.get(tx_id).await?;
         let tx = match tx_opt {
