@@ -1166,6 +1166,143 @@ impl ArkService {
         Ok(exit)
     }
 
+    /// Get the VTXO tree branch (root→leaf PSBTs) for a given VTXO outpoint.
+    ///
+    /// Looks up the round by `root_commitment_txid`, then traces the path
+    /// from tree root down to the node whose txid matches the VTXO's outpoint txid.
+    ///
+    /// Returns base64-encoded PSBTs in broadcast order (root first).
+    /// Returns an empty vec if the VTXO has no tree (e.g. direct commitment output).
+    #[instrument(skip(self))]
+    pub async fn get_vtxo_tree_branch(&self, vtxo_id: &VtxoOutpoint) -> ArkResult<Vec<String>> {
+        // Fetch the VTXO to get root_commitment_txid
+        let vtxos = self
+            .vtxo_repo
+            .get_vtxos(std::slice::from_ref(vtxo_id))
+            .await?;
+        let vtxo = vtxos
+            .first()
+            .ok_or_else(|| ArkError::VtxoNotFound(vtxo_id.to_string()))?;
+
+        let commitment_txid = &vtxo.root_commitment_txid;
+        if commitment_txid.is_empty() {
+            // Note VTXO — no tree branch
+            return Ok(vec![]);
+        }
+
+        // Fetch the round
+        let round = self
+            .indexer
+            .get_round_by_commitment_txid(commitment_txid)
+            .await?
+            .ok_or_else(|| {
+                ArkError::Internal(format!(
+                    "No round found for commitment txid {}",
+                    commitment_txid
+                ))
+            })?;
+
+        let tree = &round.vtxo_tree;
+        if tree.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // If the VTXO txid equals the commitment txid, it's a direct output — no tree branch
+        if vtxo_id.txid == *commitment_txid {
+            return Ok(vec![]);
+        }
+
+        // Build parent-lookup map: child_txid -> parent_node
+        use std::collections::HashMap as BranchMap;
+        let mut parent_of: BranchMap<&str, &crate::domain::TxTreeNode> = BranchMap::new();
+        for node in tree {
+            for child_txid in node.children.values() {
+                parent_of.insert(child_txid.as_str(), node);
+            }
+        }
+
+        // Trace path from target leaf back to root, then reverse
+        let target_txid = vtxo_id.txid.as_str();
+        let mut path_txids: Vec<&str> = vec![target_txid];
+        let mut current = target_txid;
+        while let Some(parent) = parent_of.get(current) {
+            path_txids.push(parent.txid.as_str());
+            current = parent.txid.as_str();
+        }
+        path_txids.reverse(); // root first
+
+        // Map txids to PSBTs
+        let txid_to_node: BranchMap<&str, &crate::domain::TxTreeNode> =
+            tree.iter().map(|n| (n.txid.as_str(), n)).collect();
+
+        let branch_psbts: Vec<String> = path_txids
+            .iter()
+            .filter_map(|txid| txid_to_node.get(txid).map(|n| n.tx.clone()))
+            .filter(|tx| !tx.is_empty())
+            .collect();
+
+        Ok(branch_psbts)
+    }
+
+    /// Mark VTXOs as unrolled (their tree branch was published on-chain).
+    pub async fn mark_vtxos_unrolled(&self, outpoints: &[VtxoOutpoint]) -> ArkResult<()> {
+        if outpoints.is_empty() {
+            return Ok(());
+        }
+        let vtxos = self.vtxo_repo.get_vtxos(outpoints).await?;
+        self.vtxo_repo.mark_vtxos_unrolled(&vtxos).await
+    }
+
+    /// Check pending unilateral exits and mark VTXOs as unrolled when their
+    /// tree branch leaf transactions are confirmed on-chain.
+    ///
+    /// Should be called periodically (e.g. after each block) to update state.
+    pub async fn check_pending_unilateral_exits(&self) -> ArkResult<()> {
+        let exits = self.exits.read().await;
+        let pending_exits: Vec<_> = exits
+            .values()
+            .filter(|e| {
+                e.exit_type == crate::domain::ExitType::Unilateral
+                    && !e.status.is_terminal()
+            })
+            .cloned()
+            .collect();
+        drop(exits);
+
+        for exit in pending_exits {
+            for vtxo_id in &exit.vtxo_ids {
+                // Check if the VTXO's leaf txid is confirmed on-chain
+                let txid = vtxo_id.txid.as_str();
+                match self.scanner.is_tx_confirmed(txid).await {
+                    Ok(true) => {
+                        info!(
+                            exit_id = %exit.id,
+                            vtxo = %vtxo_id,
+                            "VTXO tree leaf confirmed on-chain — marking as unrolled"
+                        );
+                        if let Err(e) = self.mark_vtxos_unrolled(std::slice::from_ref(vtxo_id)).await {
+                            warn!(
+                                error = %e,
+                                vtxo = %vtxo_id,
+                                "Failed to mark VTXO as unrolled"
+                            );
+                        }
+                    }
+                    Ok(false) => {} // Not yet confirmed
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            vtxo = %vtxo_id,
+                            "Failed to check tx confirmation"
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Cancel a pending exit
     #[instrument(skip(self))]
     pub async fn cancel_exit(&self, exit_id: uuid::Uuid) -> ArkResult<()> {
