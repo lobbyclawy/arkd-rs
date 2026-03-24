@@ -912,6 +912,7 @@ mod tests {
             preconfirmed: false,
             expires_at: 9999,
             created_at: 1000,
+            assets: vec![],
         };
 
         let proto = vtxo_to_proto(&v);
@@ -949,6 +950,7 @@ mod tests {
             preconfirmed: false,
             expires_at: 0,
             created_at: 0,
+            assets: vec![],
         };
 
         let proto = vtxo_to_proto(&v);
