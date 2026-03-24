@@ -1016,6 +1016,42 @@ impl ArkService {
             }
         }
 
+        // ── Double-spend detection (#334) ─────────────────────────────────
+        // Check each VTXO input against the on-chain scanner. If any input has
+        // already been spent on-chain (published VTXO tree while also being
+        // presented in a new round), this is a double-spend attempt.
+        //
+        // We perform this check before acquiring the write lock to avoid holding
+        // it during potentially slow on-chain queries.
+        let round_id_for_fraud = {
+            self.current_round
+                .read()
+                .await
+                .as_ref()
+                .map(|r| r.id.clone())
+                .unwrap_or_default()
+        };
+        for input in &intent.inputs {
+            let vtxo_id = format!("{}:{}", input.outpoint.txid, input.outpoint.vout);
+            let is_unspent = self.scanner.is_utxo_unspent(&input.outpoint).await?;
+            if !is_unspent {
+                warn!(
+                    vtxo_id = %vtxo_id,
+                    round_id = %round_id_for_fraud,
+                    "Double-spend detected: VTXO already spent on-chain during intent registration"
+                );
+                // React to fraud: broadcast any stored forfeit txs for this VTXO
+                // and reject the intent.
+                if let Err(e) = self.check_and_react_fraud(&vtxo_id, &round_id_for_fraud).await {
+                    warn!(error = %e, "check_and_react_fraud failed (non-fatal)");
+                }
+                return Err(ArkError::Internal(format!(
+                    "VTXO {}:{} is already spent on-chain (double-spend attempt)",
+                    input.outpoint.txid, input.outpoint.vout
+                )));
+            }
+        }
+
         let mut guard = self.current_round.write().await;
         let round = guard
             .as_mut()
@@ -1030,14 +1066,8 @@ impl ArkService {
         }
         // TODO(#246): validate boarding UTXOs exist on-chain via BlockchainScanner
         // For each boarding input in the intent, verify the UTXO is unspent:
-        // for input in &intent.inputs {
-        //     if !self.scanner.is_utxo_unspent(&input.outpoint).await? {
-        //         return Err(ArkError::Internal(format!(
-        //             "Boarding UTXO {}:{} is already spent on-chain",
-        //             input.outpoint.txid, input.outpoint.vout
-        //         )));
-        //     }
-        // }
+        // This is now handled above for VTXO inputs. Boarding UTXOs (on-chain UTXOs)
+        // could additionally be validated here once boarding input type is distinct.
 
         let id = intent.id.clone();
         round.register_intent(intent).map_err(ArkError::Internal)?;
@@ -2957,6 +2987,114 @@ mod tests {
         use crate::ports::{FraudDetector, NoopFraudDetector};
         // Ensure FraudDetector can be used as a trait object
         let _: Arc<dyn FraudDetector> = Arc::new(NoopFraudDetector);
+    }
+
+    // ── Double-spend detection in register_intent (#334) ───────────
+
+    /// Scanner that reports a specific outpoint as already spent on-chain.
+    struct SpentScanner {
+        spent_txid: String,
+        spent_vout: u32,
+        sender: tokio::sync::broadcast::Sender<crate::ports::ScriptSpentEvent>,
+    }
+
+    impl SpentScanner {
+        fn new(txid: &str, vout: u32) -> Self {
+            let (sender, _) = tokio::sync::broadcast::channel(16);
+            Self {
+                spent_txid: txid.to_string(),
+                spent_vout: vout,
+                sender,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::ports::BlockchainScanner for SpentScanner {
+        async fn watch_script(&self, _: Vec<u8>) -> ArkResult<()> {
+            Ok(())
+        }
+        async fn unwatch_script(&self, _: &[u8]) -> ArkResult<()> {
+            Ok(())
+        }
+        fn notification_channel(
+            &self,
+        ) -> tokio::sync::broadcast::Receiver<crate::ports::ScriptSpentEvent> {
+            self.sender.subscribe()
+        }
+        async fn tip_height(&self) -> ArkResult<u32> {
+            Ok(0)
+        }
+        async fn is_utxo_unspent(&self, outpoint: &VtxoOutpoint) -> ArkResult<bool> {
+            if outpoint.txid == self.spent_txid && outpoint.vout == self.spent_vout {
+                return Ok(false); // spent → double-spend detected
+            }
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_register_intent_rejects_spent_vtxo() {
+        let events = Arc::new(RecordingEvents::new());
+        let txid = "deadbeef".repeat(8);
+
+        let svc = ArkService::new(
+            Arc::new(StubWallet),
+            Arc::new(StubSigner),
+            Arc::new(StubVtxoRepo),
+            Arc::new(StubTxBuilder),
+            Arc::new(StubCache),
+            events,
+            ArkConfig::default(),
+        )
+        .with_scanner(Arc::new(SpentScanner::new(&txid, 0)));
+
+        svc.start_round().await.unwrap();
+
+        let vtxo = Vtxo::new(
+            VtxoOutpoint::new(txid.clone(), 0),
+            50_000,
+            "ab".repeat(32),
+        );
+        let mut intent =
+            Intent::new("proof_tx".into(), "proof".into(), "msg".into(), vec![vtxo]).unwrap();
+        intent
+            .add_receivers(vec![Receiver::offchain(25_000, "rcv_pk".into())])
+            .unwrap();
+
+        let result = svc.register_intent(intent).await;
+        assert!(
+            result.is_err(),
+            "register_intent should reject a spent VTXO (double-spend)"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("already spent on-chain"),
+            "error should mention on-chain spend, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_register_intent_accepts_unspent_vtxo() {
+        let events = Arc::new(RecordingEvents::new());
+        // NoopBlockchainScanner returns is_utxo_unspent = true for all outpoints
+        let svc = make_service(events);
+
+        svc.start_round().await.unwrap();
+
+        let vtxo = Vtxo::new(
+            VtxoOutpoint::new("deadbeef".repeat(8), 0),
+            50_000,
+            "ab".repeat(32),
+        );
+        let mut intent =
+            Intent::new("proof_tx".into(), "proof".into(), "msg".into(), vec![vtxo]).unwrap();
+        intent
+            .add_receivers(vec![Receiver::offchain(25_000, "rcv_pk".into())])
+            .unwrap();
+
+        let result = svc.register_intent(intent).await;
+        assert!(result.is_ok(), "register_intent should accept an unspent VTXO");
     }
 
     // ── Confirmation phase tests ────────────────────────────────────
