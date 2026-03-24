@@ -275,10 +275,7 @@ impl SweepService for EsploraSweepService {
             .unwrap_or_default()
             .as_secs() as i64;
 
-        let expired = vtxo_repo
-            .find_expired_vtxos(now)
-            .await
-            .unwrap_or_default();
+        let expired = vtxo_repo.find_expired_vtxos(now).await.unwrap_or_default();
 
         if expired.is_empty() {
             debug!("EsploraSweepService: no expired VTXOs to sweep");
