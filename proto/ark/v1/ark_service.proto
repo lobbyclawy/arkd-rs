@@ -45,8 +45,9 @@ service ArkService {
   // DEPRECATED: Use RegisterIntent instead.
   rpc RegisterForRound(RegisterForRoundRequest) returns (RegisterForRoundResponse);
 
-  // RequestExit requests a collaborative exit from the protocol.
-  // DEPRECATED: Collaborative exits now use SubmitTx/FinalizeTx flow.
+  // RequestExit initiates a unilateral exit for the given VTXOs.
+  // Returns the VTXO tree branch PSBTs (root→leaf) that the client must
+  // sign and broadcast on-chain.
   rpc RequestExit(RequestExitRequest) returns (RequestExitResponse);
 
   // GetVtxos returns VTXOs for a given public key.
@@ -164,6 +165,10 @@ message RequestExitRequest {
 message RequestExitResponse {
   string exit_id = 1;
   string status = 2;
+  // PSBTs (base64) for the VTXO tree branch from root to leaf.
+  // The client must sign/finalise and broadcast these in order (root first)
+  // to perform a unilateral exit.
+  repeated string branch_psbts = 3;
 }
 
 message GetVtxosRequest {

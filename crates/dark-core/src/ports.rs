@@ -435,6 +435,22 @@ pub trait VtxoRepository: Send + Sync {
             .collect();
         self.add_vtxos(&updated).await
     }
+
+    /// Mark a set of VTXOs as unrolled (their tree branch was published on-chain).
+    ///
+    /// Default implementation updates via `add_vtxos` (upsert). Concrete repos
+    /// may override with a more efficient bulk-update query.
+    async fn mark_vtxos_unrolled(&self, vtxos: &[Vtxo]) -> ArkResult<()> {
+        let updated: Vec<Vtxo> = vtxos
+            .iter()
+            .map(|v| {
+                let mut u = v.clone();
+                u.unrolled = true;
+                u
+            })
+            .collect();
+        self.add_vtxos(&updated).await
+    }
 }
 
 /// Round repository
@@ -696,6 +712,14 @@ pub trait BlockchainScanner: Send + Sync {
     /// Default implementation returns `Ok(true)` (optimistic, no on-chain check).
     async fn is_utxo_unspent(&self, _outpoint: &crate::domain::VtxoOutpoint) -> ArkResult<bool> {
         Ok(true)
+    }
+
+    /// Check whether a transaction is confirmed on-chain.
+    ///
+    /// Returns `Ok(true)` if the txid is found confirmed, `Ok(false)` if not found
+    /// or unconfirmed. Default implementation returns `Ok(false)`.
+    async fn is_tx_confirmed(&self, _txid: &str) -> ArkResult<bool> {
+        Ok(false)
     }
 }
 

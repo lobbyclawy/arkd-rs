@@ -359,6 +359,40 @@ impl BlockchainScanner for EsploraScanner {
         let spent = self.is_output_spent(&outpoint.txid, outpoint.vout).await?;
         Ok(!spent)
     }
+
+    async fn is_tx_confirmed(&self, txid: &str) -> ArkResult<bool> {
+        // Use get_tx_hex — returns Some(_) if the transaction is known to Esplora.
+        // Esplora returns confirmed txs; unconfirmed may also appear but we check status.
+        let url = format!("{}/tx/{}/status", self.base_url, txid);
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ArkError::Internal(format!("Esplora request failed: {e}")))?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !resp.status().is_success() {
+            return Err(ArkError::Internal(format!(
+                "Esplora GET {url} returned {}",
+                resp.status()
+            )));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct TxStatus {
+            confirmed: bool,
+        }
+
+        let status: TxStatus = resp
+            .json()
+            .await
+            .map_err(|e| ArkError::Internal(format!("Failed to parse tx status: {e}")))?;
+
+        Ok(status.confirmed)
+    }
 }
 
 #[cfg(test)]
