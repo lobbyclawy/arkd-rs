@@ -335,7 +335,8 @@ async fn main() -> Result<()> {
         .with_notifier(notifier)
         .with_alerts(alerts)
         .with_indexer(indexer as Arc<dyn dark_core::ports::IndexerService>)
-        .with_round_repo(round_repo.clone() as Arc<dyn dark_core::ports::RoundRepository>),
+        .with_round_repo(round_repo.clone() as Arc<dyn dark_core::ports::RoundRepository>)
+        .with_signing_session_store(Arc::new(dark_live_store::InMemorySigningSessionStore::new())),
     );
 
     // --- Unlocker ---

@@ -81,6 +81,7 @@ dark-scheduler = { path = "crates/dark-scheduler" }
 dark-scanner = { path = "crates/dark-scanner" }
 dark-wallet = { path = "crates/dark-wallet" }
 dark-bitcoin = { path = "crates/dark-bitcoin" }
+dark-live-store = { path = "crates/dark-live-store" }
 async-trait = "0.1"
 
 # Profiling (behind `profiling` feature flag)
