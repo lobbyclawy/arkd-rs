@@ -650,6 +650,24 @@ impl ArkService {
         // Use the fee-augmented PSBT from here on
         let result_commitment_tx = commitment_psbt_with_fee;
 
+        // After adding the fee input the commitment txid changes.  The vtxo tree
+        // was built against the *original* txid, so we must patch every tree node
+        // whose input references the old txid to point to the new one.
+        // We do this before injecting cosigner fields so the patched PSBTs are
+        // the ones that get signed and sent to clients.
+        let patched_vtxo_tree = {
+            use base64::Engine;
+            let old_txid = Self::extract_txid_from_psbt(&result.commitment_tx);
+            let new_txid = Self::extract_txid_from_psbt(&result_commitment_tx);
+            match (old_txid, new_txid) {
+                (Some(old), Some(new)) if old != new => {
+                    info!(old_txid = %old, new_txid = %new, "Patching vtxo tree root to new commitment txid after fee input");
+                    Self::patch_vtxo_tree_commitment_txid(&result.vtxo_tree, &old, &new)
+                }
+                _ => result.vtxo_tree.clone(),
+            }
+        };
+
         // Collect cosigner pubkeys early (needed for PSBT injection)
         let cosigners_pubkeys: Vec<String> = intents
             .iter()
@@ -661,7 +679,7 @@ impl ArkService {
 
         // Inject cosigner pubkeys as PSBT Unknown fields into vtxo tree nodes
         // Format: Key = [0xDE] + "cosigner" + [4-byte BE index], Value = 33-byte compressed pubkey
-        let vtxo_tree = Self::inject_cosigner_fields(&result.vtxo_tree, &cosigners_pubkeys);
+        let vtxo_tree = Self::inject_cosigner_fields(&patched_vtxo_tree, &cosigners_pubkeys);
         let commitment_tx =
             Self::inject_cosigner_fields_single(&result_commitment_tx, &cosigners_pubkeys);
 
@@ -2814,6 +2832,52 @@ impl ArkService {
     /// Extract txid from a hex-encoded PSBT.
     /// Inject cosigner pubkeys as PSBT Unknown fields into a base64-encoded PSBT.
     /// Format: Key = [0xDE] + "cosigner" + [4-byte BE index], Value = 33-byte compressed pubkey
+    /// Patch every vtxo tree node whose TxIn[0].previous_output.txid equals
+    /// `old_txid` to reference `new_txid` instead.  This is required after
+    /// adding the server fee input to the commitment tx, which changes its txid.
+    fn patch_vtxo_tree_commitment_txid(
+        tree: &[crate::domain::TxTreeNode],
+        old_txid: &str,
+        new_txid: &str,
+    ) -> Vec<crate::domain::TxTreeNode> {
+        use base64::Engine;
+        let Ok(new_hash) = new_txid.parse::<bitcoin::Txid>() else {
+            return tree.to_vec();
+        };
+
+        tree.iter()
+            .map(|node| {
+                if node.tx.is_empty() {
+                    return node.clone();
+                }
+                let patched_tx = (|| -> Option<String> {
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(&node.tx)
+                        .ok()?;
+                    let mut psbt = bitcoin::psbt::Psbt::deserialize(&bytes).ok()?;
+                    let mut changed = false;
+                    for txin in psbt.unsigned_tx.input.iter_mut() {
+                        if txin.previous_output.txid.to_string() == old_txid {
+                            txin.previous_output.txid = new_hash;
+                            changed = true;
+                        }
+                    }
+                    if !changed {
+                        return None;
+                    }
+                    Some(base64::engine::general_purpose::STANDARD.encode(psbt.serialize()))
+                })()
+                .unwrap_or_else(|| node.tx.clone());
+
+                crate::domain::TxTreeNode {
+                    txid: node.txid.clone(),
+                    tx: patched_tx,
+                    children: node.children.clone(),
+                }
+            })
+            .collect()
+    }
+
     fn inject_cosigner_fields_single(psbt_b64: &str, cosigners: &[String]) -> String {
         use base64::Engine;
         if cosigners.is_empty() || psbt_b64.is_empty() {
