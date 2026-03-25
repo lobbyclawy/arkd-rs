@@ -200,8 +200,9 @@ pub struct ArkService {
     /// Active exits indexed by ID
     /// TODO(#9): Back with SQLite persistence to survive restarts
     exits: RwLock<std::collections::HashMap<uuid::Uuid, Exit>>,
-    /// Partial commitment tx PSBTs from clients (for merging before broadcast)
-    partial_commitment_psbts: tokio::sync::Mutex<Vec<String>>,
+    /// Partial commitment tx PSBTs from clients (for merging before broadcast).
+    /// Tuple: (round_id, base64 PSBT).
+    partial_commitment_psbts: tokio::sync::Mutex<Vec<(String, String)>>,
 }
 
 impl ArkService {
@@ -771,14 +772,29 @@ impl ArkService {
                 warn!(error = %e, "Failed to persist round (non-fatal, auto-complete)");
             }
 
+            let has_boarding = !boarding_inputs.is_empty();
             self.events
                 .publish_event(ArkEvent::RoundFinalized {
                     round_id: round.id.clone(),
                     commitment_tx: round.commitment_tx.clone(),
                     timestamp: round.ending_timestamp,
                     vtxo_count: vtxos.len() as u32,
+                    has_boarding_inputs: has_boarding,
                 })
                 .await?;
+
+            // For rounds without boarding inputs there is no commitment tx to
+            // broadcast, so emit RoundBroadcast immediately so clients see
+            // BatchFinalized.
+            if !has_boarding {
+                self.events
+                    .publish_event(ArkEvent::RoundBroadcast {
+                        round_id: round.id.clone(),
+                        commitment_txid: commitment_txid.clone(),
+                        timestamp: chrono::Utc::now().timestamp(),
+                    })
+                    .await?;
+            }
 
             return Ok(round.clone());
         }
@@ -891,14 +907,31 @@ impl ArkService {
             }
         }
 
-        // NOTE: commitment tx broadcast is handled by the client via SubmitSignedForfeitTxs.signed_commitment_tx
-        // The client signs the boarding inputs with their own key, then the ASP co-signs and broadcasts.
+        // Commitment tx broadcast is handled by the client via
+        // SubmitSignedForfeitTxs.signed_commitment_tx.  The client signs the
+        // boarding inputs, then the ASP co-signs and broadcasts.
+        // BatchFinalized is deferred until broadcast (RoundBroadcast event).
+
+        // Detect whether the commitment tx has on-chain (boarding) inputs.
+        // If it does, the client must submit a signed commitment tx before
+        // BatchFinalized is emitted.  If it doesn't, we emit BatchFinalized
+        // immediately because there is no transaction to broadcast.
+        let has_boarding = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(&round.commitment_tx)
+                .ok()
+                .and_then(|b| bitcoin::psbt::Psbt::deserialize(&b).ok())
+                .map(|psbt| !psbt.unsigned_tx.input.is_empty())
+                .unwrap_or(false)
+        };
 
         round.end_successfully();
 
         info!(
             round_id = %round.id,
             intent_count = intents.len(),
+            has_boarding_inputs = has_boarding,
             "Round completed with commitment tx"
         );
 
@@ -914,8 +947,21 @@ impl ArkService {
                 commitment_tx: round.commitment_tx.clone(),
                 timestamp: round.ending_timestamp,
                 vtxo_count: vtxos.len() as u32,
+                has_boarding_inputs: has_boarding,
             })
             .await?;
+
+        // For rounds without boarding inputs, emit RoundBroadcast immediately
+        // so clients see BatchFinalized without waiting for a broadcast.
+        if !has_boarding {
+            self.events
+                .publish_event(ArkEvent::RoundBroadcast {
+                    round_id: round.id.clone(),
+                    commitment_txid: commitment_txid.clone(),
+                    timestamp: chrono::Utc::now().timestamp(),
+                })
+                .await?;
+        }
 
         Ok(round.clone())
     }
@@ -2429,6 +2475,7 @@ impl ArkService {
     pub async fn broadcast_signed_commitment_tx(
         &self,
         signed_commitment_tx: &str,
+        round_id: &str,
     ) -> ArkResult<String> {
         use base64::Engine;
 
@@ -2443,7 +2490,7 @@ impl ArkService {
 
         // Store this partial PSBT
         let mut partials = self.partial_commitment_psbts.lock().await;
-        partials.push(signed_commitment_tx.to_string());
+        partials.push((round_id.to_string(), signed_commitment_tx.to_string()));
 
         info!(
             partial_count = partials.len(),
@@ -2456,7 +2503,7 @@ impl ArkService {
         // may have already been replaced by a new round when the scheduler
         // ticks between clients submitting their signed PSBTs.
         let mut merged = incoming_psbt;
-        for partial_b64 in partials.iter() {
+        for (_rid, partial_b64) in partials.iter() {
             if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(partial_b64) {
                 if let Ok(partial) = bitcoin::psbt::Psbt::deserialize(&bytes) {
                     for (i, input) in partial.inputs.iter().enumerate() {
@@ -2524,6 +2571,12 @@ impl ArkService {
                 "Merged PSBT input state"
             );
         }
+
+        // Grab the round_id from the stored partials before clearing.
+        let effective_round_id = partials
+            .first()
+            .map(|(rid, _)| rid.clone())
+            .unwrap_or_else(|| round_id.to_string());
 
         // Clear partials for next round
         partials.clear();
@@ -2628,6 +2681,16 @@ impl ArkService {
         let txid = self.wallet.broadcast_transaction(vec![raw_tx]).await?;
 
         info!(txid = %txid, "Merged commitment tx broadcast successfully");
+
+        // Emit RoundBroadcast so the event bridge publishes BatchFinalized.
+        self.events
+            .publish_event(ArkEvent::RoundBroadcast {
+                round_id: effective_round_id,
+                commitment_txid: txid.clone(),
+                timestamp: chrono::Utc::now().timestamp(),
+            })
+            .await?;
+
         Ok(txid)
     }
 

@@ -50,6 +50,12 @@ pub enum ArkEvent {
         timestamp: i64,
         /// Number of VTXOs created in this round
         vtxo_count: u32,
+        /// Whether the commitment tx includes boarding (on-chain) inputs that
+        /// require client signatures before broadcast.  When `true`, the
+        /// `BatchFinalized` proto event is deferred until the commitment tx is
+        /// actually broadcast (via `RoundBroadcast`).
+        #[serde(default)]
+        has_boarding_inputs: bool,
     },
 
     /// Registration phase ended; confirmation phase has started.
@@ -311,6 +317,7 @@ mod tests {
                     commitment_tx: "tx".into(),
                     timestamp: 200,
                     vtxo_count: 5,
+                    has_boarding_inputs: false,
                 },
                 "round.finalized",
             ),
@@ -448,6 +455,7 @@ mod tests {
             commitment_tx: "deadbeef".into(),
             timestamp: 1234567890,
             vtxo_count: 3,
+            has_boarding_inputs: false,
         };
 
         let json = serde_json::to_string(&event).expect("serialize");

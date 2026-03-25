@@ -1327,13 +1327,25 @@ impl ArkServiceTrait for ArkGrpcService {
             "SubmitSignedForfeitTxs called"
         );
 
-        // If the client sent a signed commitment tx, finalize and broadcast it
+        // If the client sent a signed commitment tx, finalize and broadcast it.
+        // The round_id is resolved inside broadcast_signed_commitment_tx from
+        // the stored partial PSBTs (the first partial carries the round_id).
+        // We pass the best-effort current round id as a fallback.
         if !req.signed_commitment_tx.is_empty() {
             let signed_commitment_str = &req.signed_commitment_tx;
-            info!("Client sent signed_commitment_tx — attempting broadcast");
+            let fallback_round_id = self
+                .core
+                .current_round_snapshot()
+                .await
+                .map(|r| r.id.clone())
+                .unwrap_or_default();
+            info!(
+                round_id = %fallback_round_id,
+                "Client sent signed_commitment_tx — attempting broadcast"
+            );
             match self
                 .core
-                .broadcast_signed_commitment_tx(signed_commitment_str)
+                .broadcast_signed_commitment_tx(signed_commitment_str, &fallback_round_id)
                 .await
             {
                 Ok(txid) => info!(txid = %txid, "Commitment tx broadcast from client signature"),

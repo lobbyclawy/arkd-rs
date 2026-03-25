@@ -387,9 +387,11 @@ impl Server {
                             dark_core::domain::ArkEvent::RoundFinalized {
                                 round_id,
                                 commitment_tx,
+                                has_boarding_inputs,
                                 ..
                             } => {
-                                // Emit both BatchFinalization and BatchFinalized
+                                // Always emit BatchFinalization so clients can
+                                // sign boarding inputs and submit forfeits.
                                 broker.publish(RoundEvent {
                                     event: Some(round_event::Event::BatchFinalization(
                                         BatchFinalizationEvent {
@@ -399,26 +401,51 @@ impl Server {
                                     )),
                                 });
 
-                                // Extract txid from commitment tx PSBT (base64-encoded)
-                                let txid = {
-                                    use base64::Engine;
-                                    base64::engine::general_purpose::STANDARD
-                                        .decode(commitment_tx)
-                                        .ok()
-                                        .and_then(|b| bitcoin::psbt::Psbt::deserialize(&b).ok())
-                                        .map(|psbt| psbt.unsigned_tx.compute_txid().to_string())
-                                        .unwrap_or_default()
-                                };
+                                // When there are no boarding inputs the
+                                // commitment tx doesn't need to be broadcast
+                                // on-chain, so we can emit BatchFinalized
+                                // immediately.  When there ARE boarding inputs,
+                                // BatchFinalized is deferred until the
+                                // commitment tx is actually broadcast
+                                // (RoundBroadcast event).
+                                if !has_boarding_inputs {
+                                    let txid = {
+                                        use base64::Engine;
+                                        base64::engine::general_purpose::STANDARD
+                                            .decode(commitment_tx)
+                                            .ok()
+                                            .and_then(|b| bitcoin::psbt::Psbt::deserialize(&b).ok())
+                                            .map(|psbt| psbt.unsigned_tx.compute_txid().to_string())
+                                            .unwrap_or_default()
+                                    };
 
-                                Some(RoundEvent {
-                                    event: Some(round_event::Event::BatchFinalized(
-                                        BatchFinalizedEvent {
-                                            id: round_id.clone(),
-                                            commitment_txid: txid,
-                                        },
-                                    )),
-                                })
+                                    Some(RoundEvent {
+                                        event: Some(round_event::Event::BatchFinalized(
+                                            BatchFinalizedEvent {
+                                                id: round_id.clone(),
+                                                commitment_txid: txid,
+                                            },
+                                        )),
+                                    })
+                                } else {
+                                    // BatchFinalized will be emitted when
+                                    // RoundBroadcast fires after the
+                                    // commitment tx is broadcast.
+                                    None
+                                }
                             }
+                            dark_core::domain::ArkEvent::RoundBroadcast {
+                                round_id,
+                                commitment_txid,
+                                ..
+                            } => Some(RoundEvent {
+                                event: Some(round_event::Event::BatchFinalized(
+                                    BatchFinalizedEvent {
+                                        id: round_id.clone(),
+                                        commitment_txid: commitment_txid.clone(),
+                                    },
+                                )),
+                            }),
                             dark_core::domain::ArkEvent::RoundFailed {
                                 round_id, reason, ..
                             } => Some(RoundEvent {
