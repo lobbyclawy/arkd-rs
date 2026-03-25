@@ -2903,12 +2903,18 @@ impl ArkService {
         // Re-encode and sign with ASP signer
         let psbt_b64_with_utxo = base64::engine::general_purpose::STANDARD.encode(psbt.serialize());
 
-        let signed = self
+        let signed_hex = self
             .signer
             .sign_transaction(&psbt_b64_with_utxo, false)
             .await?;
 
-        Ok(signed)
+        // sign_transaction returns hex-encoded PSBT, but tree nodes must be
+        // base64 because the Go SDK parses them with psbt.NewFromRawBytes(_, true).
+        let signed_bytes = hex::decode(&signed_hex)
+            .map_err(|e| ArkError::Internal(format!("Signed PSBT is not valid hex: {e}")))?;
+        let signed_b64 = base64::engine::general_purpose::STANDARD.encode(&signed_bytes);
+
+        Ok(signed_b64)
     }
 }
 
