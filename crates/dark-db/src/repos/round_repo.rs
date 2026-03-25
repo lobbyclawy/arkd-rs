@@ -430,6 +430,7 @@ impl RoundRepository for SqliteRoundRepository {
             fail_reason: row.fail_reason,
             confirmation_status: confirmation_status_map,
             has_boarding_inputs: false, // Not persisted; only needed during live round processing
+            boarding_tx_ids: Vec::new(), // Not persisted; only needed during live round processing
         };
 
         Ok(Some(round))

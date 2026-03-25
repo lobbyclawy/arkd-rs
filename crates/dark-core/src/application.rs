@@ -678,6 +678,8 @@ impl ArkService {
         round.connectors = result.connectors;
         round.connector_address = result.connector_address;
         round.has_boarding_inputs = !boarding_inputs.is_empty();
+        // Track boarding transaction IDs so we can mark them as claimed after round completion
+        round.boarding_tx_ids = boarding_txs.iter().map(|bt| bt.id.to_string()).collect();
 
         // If we added a server fee input, push the server-signed PSBT as
         // the initial "partial" so broadcast_signed_commitment_tx() can
@@ -986,13 +988,29 @@ impl ArkService {
         // boarding UTXOs, causing BatchFinalized to never be emitted for
         // VTXO-only refresh rounds.
         let has_boarding = round.has_boarding_inputs;
+        let boarding_tx_ids = round.boarding_tx_ids.clone();
 
         round.end_successfully();
+
+        // Mark boarding transactions as claimed now that the round has completed.
+        // This ensures that `GetVtxos` returns them with spent=true status.
+        for boarding_id in &boarding_tx_ids {
+            if let Err(e) = self.boarding_repo.mark_claimed(boarding_id).await {
+                warn!(
+                    boarding_id = %boarding_id,
+                    error = %e,
+                    "Failed to mark boarding transaction as claimed (non-fatal)"
+                );
+            } else {
+                info!(boarding_id = %boarding_id, "Marked boarding transaction as claimed");
+            }
+        }
 
         info!(
             round_id = %round.id,
             intent_count = intents.len(),
             has_boarding_inputs = has_boarding,
+            boarding_txs_claimed = boarding_tx_ids.len(),
             "Round completed with commitment tx"
         );
 
@@ -2889,10 +2907,13 @@ impl ArkService {
         let mut output_map: std::collections::HashMap<String, Vec<bitcoin::TxOut>> =
             std::collections::HashMap::new();
 
-        // Add commitment tx outputs
+        // Add commitment tx outputs.  Keep them aside so we can alias them
+        // below for tree root nodes that still reference the pre-fee-input txid.
+        let mut commitment_outputs: Option<Vec<bitcoin::TxOut>> = None;
         if let Ok(ct_bytes) = base64::engine::general_purpose::STANDARD.decode(commitment_tx_b64) {
             if let Ok(ct_psbt) = bitcoin::psbt::Psbt::deserialize(&ct_bytes) {
                 let txid = ct_psbt.unsigned_tx.compute_txid().to_string();
+                commitment_outputs = Some(ct_psbt.unsigned_tx.output.clone());
                 output_map.insert(txid, ct_psbt.unsigned_tx.output.clone());
             }
         }
@@ -2905,6 +2926,38 @@ impl ArkService {
             if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&node.tx) {
                 if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
                     output_map.insert(node.txid.clone(), psbt.unsigned_tx.output.clone());
+                }
+            }
+        }
+
+        // When a fee input is added to the commitment tx its txid changes,
+        // but the vtxo tree was built against the *original* txid.  Detect
+        // any parent txids referenced by tree node inputs that are missing
+        // from the map and alias them to the commitment tx outputs.  The
+        // original outputs at the same vout positions are unchanged because
+        // the fee input only appends an extra input (and possibly a change
+        // output at the end).
+        if let Some(ref ct_outs) = commitment_outputs {
+            for node in tree {
+                if node.tx.is_empty() {
+                    continue;
+                }
+                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&node.tx) {
+                    if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
+                        for input_tx in &psbt.unsigned_tx.input {
+                            let parent_txid = input_tx.previous_output.txid.to_string();
+                            if let std::collections::hash_map::Entry::Vacant(e) =
+                                output_map.entry(parent_txid.clone())
+                            {
+                                tracing::info!(
+                                    parent_txid = %parent_txid,
+                                    "Aliasing unknown parent txid to commitment tx outputs \
+                                     (fee input likely changed commitment txid)"
+                                );
+                                e.insert(ct_outs.clone());
+                            }
+                        }
+                    }
                 }
             }
         }
