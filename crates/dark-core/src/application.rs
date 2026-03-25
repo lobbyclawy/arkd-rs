@@ -2849,7 +2849,7 @@ impl ArkService {
                 if node.tx.is_empty() {
                     return node.clone();
                 }
-                let patched_tx = (|| -> Option<String> {
+                let patched = (|| -> Option<(String, String)> {
                     let bytes = base64::engine::general_purpose::STANDARD
                         .decode(&node.tx)
                         .ok()?;
@@ -2864,14 +2864,22 @@ impl ArkService {
                     if !changed {
                         return None;
                     }
-                    Some(base64::engine::general_purpose::STANDARD.encode(psbt.serialize()))
-                })()
-                .unwrap_or_else(|| node.tx.clone());
+                    // Recompute the node's own txid because patching TxIn[0].previous_output
+                    // changes the spending transaction's txid. The Go SDK builds the tree
+                    // keyed by packet.UnsignedTx.TxID(), so TxTreeNode.txid must match.
+                    let new_node_txid = psbt.unsigned_tx.compute_txid().to_string();
+                    let encoded =
+                        base64::engine::general_purpose::STANDARD.encode(psbt.serialize());
+                    Some((encoded, new_node_txid))
+                })();
 
-                crate::domain::TxTreeNode {
-                    txid: node.txid.clone(),
-                    tx: patched_tx,
-                    children: node.children.clone(),
+                match patched {
+                    Some((patched_tx, new_node_txid)) => crate::domain::TxTreeNode {
+                        txid: new_node_txid,
+                        tx: patched_tx,
+                        children: node.children.clone(),
+                    },
+                    None => node.clone(),
                 }
             })
             .collect()
