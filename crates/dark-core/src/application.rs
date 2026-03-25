@@ -678,6 +678,8 @@ impl ArkService {
         round.connectors = result.connectors;
         round.connector_address = result.connector_address;
         round.has_boarding_inputs = !boarding_inputs.is_empty();
+        // Track boarding transaction IDs so we can mark them as claimed after round completion
+        round.boarding_tx_ids = boarding_txs.iter().map(|bt| bt.id.to_string()).collect();
 
         // If we added a server fee input, push the server-signed PSBT as
         // the initial "partial" so broadcast_signed_commitment_tx() can
@@ -986,13 +988,29 @@ impl ArkService {
         // boarding UTXOs, causing BatchFinalized to never be emitted for
         // VTXO-only refresh rounds.
         let has_boarding = round.has_boarding_inputs;
+        let boarding_tx_ids = round.boarding_tx_ids.clone();
 
         round.end_successfully();
+
+        // Mark boarding transactions as claimed now that the round has completed.
+        // This ensures that `GetVtxos` returns them with spent=true status.
+        for boarding_id in &boarding_tx_ids {
+            if let Err(e) = self.boarding_repo.mark_claimed(boarding_id).await {
+                warn!(
+                    boarding_id = %boarding_id,
+                    error = %e,
+                    "Failed to mark boarding transaction as claimed (non-fatal)"
+                );
+            } else {
+                info!(boarding_id = %boarding_id, "Marked boarding transaction as claimed");
+            }
+        }
 
         info!(
             round_id = %round.id,
             intent_count = intents.len(),
             has_boarding_inputs = has_boarding,
+            boarding_txs_claimed = boarding_tx_ids.len(),
             "Round completed with commitment tx"
         );
 

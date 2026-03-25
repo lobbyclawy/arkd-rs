@@ -155,6 +155,11 @@ pub struct Round {
     /// whether to defer `BatchFinalized` until broadcast.
     #[serde(default)]
     pub has_boarding_inputs: bool,
+    /// IDs of boarding transactions included in this round.
+    /// Set during `finalize_round()` so that `complete_round()` can mark
+    /// them as claimed after the round successfully completes.
+    #[serde(default)]
+    pub boarding_tx_ids: Vec<String>,
 }
 
 impl Round {
@@ -179,6 +184,7 @@ impl Round {
             fail_reason: String::new(),
             confirmation_status: HashMap::new(),
             has_boarding_inputs: false,
+            boarding_tx_ids: Vec::new(),
         }
     }
 
