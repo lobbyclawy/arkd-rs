@@ -43,6 +43,7 @@ async fn postgres_round_trip() {
         code: RoundStage::Finalization,
         ended: true,
         failed: false,
+        entered_at: None,
     };
     round.commitment_txid = "e2e_commit_txid".to_string();
     round.commitment_tx = "e2e_commit_tx_hex".to_string();
