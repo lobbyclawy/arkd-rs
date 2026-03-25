@@ -656,7 +656,6 @@ impl ArkService {
         // We do this before injecting cosigner fields so the patched PSBTs are
         // the ones that get signed and sent to clients.
         let patched_vtxo_tree = {
-            use base64::Engine;
             let old_txid = Self::extract_txid_from_psbt(&result.commitment_tx);
             let new_txid = Self::extract_txid_from_psbt(&result_commitment_tx);
             match (old_txid, new_txid) {
