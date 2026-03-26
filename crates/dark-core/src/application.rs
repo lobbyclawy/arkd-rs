@@ -2613,10 +2613,7 @@ impl ArkService {
                             }
                             // Copy ECDSA partial sigs (for segwit v0 inputs)
                             for (key, sig) in &input.partial_sigs {
-                                merged.inputs[i]
-                                    .partial_sigs
-                                    .entry(*key)
-                                    .or_insert(sig.clone());
+                                merged.inputs[i].partial_sigs.entry(*key).or_insert(*sig);
                             }
                             // Copy final_script_witness if already finalized
                             if merged.inputs[i].final_script_witness.is_none() {
