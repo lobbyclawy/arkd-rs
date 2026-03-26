@@ -126,8 +126,14 @@ impl Database {
                 // Execute each semicolon-delimited statement individually so
                 // multi-statement migration files work reliably with sqlx.
                 for stmt in sql.split(';') {
-                    let trimmed = stmt.trim();
-                    if trimmed.is_empty() || trimmed.starts_with("--") {
+                    // Strip SQL comment lines before checking emptiness
+                    let cleaned: String = stmt
+                        .lines()
+                        .filter(|line| !line.trim_start().starts_with("--"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let trimmed = cleaned.trim();
+                    if trimmed.is_empty() {
                         continue;
                     }
                     pool.execute(sqlx::query(trimmed)).await.map_err(|e| {
