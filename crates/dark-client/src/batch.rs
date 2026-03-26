@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::Hash;
+use bitcoin::key::TapTweak;
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
 use bitcoin::sighash::{Prevouts, SighashCache};
 use bitcoin::{Amount, OutPoint, ScriptBuf, TapSighashType, TxOut, Txid, XOnlyPublicKey};
