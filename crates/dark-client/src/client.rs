@@ -1515,7 +1515,6 @@ mod tests {
     // ── RedeemBranch stub tests ───────────────────────────────────
 
     #[tokio::test]
-    #[tokio::test]
     async fn test_redeem_branch_requires_indexer() {
         let vtxo = crate::types::Vtxo {
             id: "abc:0".to_string(),
