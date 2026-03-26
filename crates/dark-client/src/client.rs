@@ -648,12 +648,47 @@ impl ArkClient {
             &mut grpc_client,
             &intent_id,
             secret_key,
+            &[],
+            None,
             stream,
         )
         .await?;
         Ok(BatchTxRes { commitment_txid })
     }
 
+    /// Full settlement flow with MuSig2 signing and forfeit tx signing.
+    ///
+    /// Like `settle_with_key`, but also builds and signs forfeit transactions
+    /// for old VTXOs being refreshed. `vtxos_to_forfeit` lists the old VTXOs
+    /// that need forfeits, and `asp_forfeit_pubkey` is the server's forfeit
+    /// x-only public key (from `ServerInfo`).
+    pub async fn settle_with_vtxos(
+        &mut self,
+        pubkey: &str,
+        amount: u64,
+        secret_key: &bitcoin::secp256k1::SecretKey,
+        vtxos_to_forfeit: &[crate::batch::VtxoInput],
+        asp_forfeit_pubkey: bitcoin::XOnlyPublicKey,
+    ) -> ClientResult<BatchTxRes> {
+        let mut grpc_client = self.require_client()?.clone();
+        let stream = grpc_client
+            .get_event_stream(dark_api::proto::ark_v1::GetEventStreamRequest {})
+            .await
+            .map_err(|e| ClientError::Rpc(format!("GetEventStream failed: {}", e)))?
+            .into_inner();
+
+        let intent_id = self.register_intent(pubkey, amount).await?;
+        let commitment_txid = crate::batch::run_batch_protocol_with_stream(
+            &mut grpc_client,
+            &intent_id,
+            secret_key,
+            vtxos_to_forfeit,
+            Some(asp_forfeit_pubkey),
+            stream,
+        )
+        .await?;
+        Ok(BatchTxRes { commitment_txid })
+    }
     /// Submit MuSig2 tree nonces for a batch round.
     pub async fn submit_tree_nonces(
         &mut self,
