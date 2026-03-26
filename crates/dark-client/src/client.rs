@@ -1411,16 +1411,12 @@ impl ArkClient {
     /// borrowing `&mut self`.
     pub async fn notify_incoming_funds(&self, address: &str) -> ClientResult<Vec<Vtxo>> {
         // ── 1. Extract x-only public key from the address ──────────────
-        let xonly_bytes = Self::extract_xonly_pubkey(address)?;
+        let xonly_pubkey = Self::extract_xonly_pubkey(address)?;
 
-        // ── 2. Build P2TR scriptPubKey: OP_1 <32 bytes> ───────────────
-        // This matches the Go `script.P2TRScript` which produces
-        // `OP_1 OP_PUSHBYTES_32 <x-only-key>`.
-        let mut script_bytes = Vec::with_capacity(34);
-        script_bytes.push(0x51); // OP_1 (segwit v1)
-        script_bytes.push(0x20); // OP_PUSHBYTES_32
-        script_bytes.extend_from_slice(&xonly_bytes);
-        let script_hex = hex::encode(&script_bytes);
+        // ── 2. Build P2TR scriptPubKey using bitcoin crate ─────────────
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let script = bitcoin::ScriptBuf::new_p2tr(&secp, xonly_pubkey, None);
+        let script_hex = hex::encode(script.as_bytes());
 
         // ── 3. Subscribe for the script ────────────────────────────────
         let mut indexer = self
@@ -1482,23 +1478,17 @@ impl ArkClient {
     /// - Simple: `ark:<hex_compressed_or_xonly_pubkey>`
     /// - Bech32m: bech32m-encoded with HRP `ark` or `tark` (65-byte payload:
     ///   1 version + 32 signer + 32 vtxo-tap-key).
-    fn extract_xonly_pubkey(address: &str) -> ClientResult<[u8; 32]> {
+    fn extract_xonly_pubkey(address: &str) -> ClientResult<bitcoin::secp256k1::XOnlyPublicKey> {
         if let Some(hex_str) = address.strip_prefix("ark:") {
             // Simple format: ark:<hex>
             let bytes = hex::decode(hex_str).map_err(|e| {
                 ClientError::InvalidResponse(format!("Invalid hex in ark address: {}", e))
             })?;
-            let x_bytes = match bytes.len() {
-                32 => {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&bytes);
-                    arr
-                }
+            let x_bytes: &[u8] = match bytes.len() {
+                32 => &bytes,
                 33 => {
                     // Compressed pubkey — strip the parity prefix byte.
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&bytes[1..]);
-                    arr
+                    &bytes[1..]
                 }
                 _ => {
                     return Err(ClientError::InvalidResponse(format!(
@@ -1507,11 +1497,8 @@ impl ArkClient {
                     )));
                 }
             };
-            // Validate it's a valid x-only key.
-            bitcoin::secp256k1::XOnlyPublicKey::from_slice(&x_bytes).map_err(|e| {
-                ClientError::InvalidResponse(format!("Invalid x-only pubkey: {}", e))
-            })?;
-            Ok(x_bytes)
+            bitcoin::secp256k1::XOnlyPublicKey::from_slice(x_bytes)
+                .map_err(|e| ClientError::InvalidResponse(format!("Invalid x-only pubkey: {}", e)))
         } else if address.starts_with("tark1") || address.starts_with("ark1") {
             // Bech32m-encoded ark address (v0): [version(1) | signer(32) | vtxoTapKey(32)]
             let (_hrp, data) = bech32::decode(address).map_err(|e| {
@@ -1530,12 +1517,8 @@ impl ArkClient {
                 )));
             }
             // vtxo tap key is the last 32 bytes.
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&data[33..65]);
-            bitcoin::secp256k1::XOnlyPublicKey::from_slice(&arr).map_err(|e| {
-                ClientError::InvalidResponse(format!("Invalid vtxo tap key: {}", e))
-            })?;
-            Ok(arr)
+            bitcoin::secp256k1::XOnlyPublicKey::from_slice(&data[33..65])
+                .map_err(|e| ClientError::InvalidResponse(format!("Invalid vtxo tap key: {}", e)))
         } else {
             Err(ClientError::InvalidResponse(format!(
                 "Unrecognised address format: {}",
