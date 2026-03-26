@@ -164,6 +164,7 @@ impl SignerState {
 }
 
 /// Execute the full batch protocol for settle().
+#[allow(dead_code)]
 pub(crate) async fn run_batch_protocol(
     client: &mut ArkServiceClient<Channel>,
     intent_id: &str,
