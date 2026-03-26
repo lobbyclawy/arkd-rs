@@ -1,6 +1,10 @@
 name: E2E Tests (Rust)
 
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   schedule:
     - cron: "0 3 * * *"  # 3 AM UTC nightly
   workflow_dispatch:
