@@ -164,7 +164,6 @@ impl SignerState {
             let mut msg = [0u8; 32];
             let hash = Sha256::digest(txid.as_bytes());
             msg.copy_from_slice(&hash);
-            #[allow(dead_code)]
             let partial_sig = dark_bitcoin::create_partial_sig(
                 &key_agg_ctx,
                 &self.secret_key,
