@@ -2643,30 +2643,34 @@ impl ArkService {
             base64::engine::general_purpose::STANDARD.encode(merged.serialize())
         };
 
-        // 1) Wallet (BDK) re-signs -- picks up the fee input automatically.
-        let after_wallet = match self.wallet.sign_transaction(&merged_b64_pre, false).await {
-            Ok(s) => {
-                info!("Wallet (BDK) re-signing of merged PSBT succeeded");
-                s
-            }
-            Err(e) => {
-                info!(error = %e, "Wallet (BDK) re-signing failed -- continuing");
-                merged_b64_pre
-            }
-        };
-
-        // 2) ASP co-signs boarding inputs (script-path spend).
-        let wallet_signed = match self.signer.sign_transaction(&after_wallet, false).await {
+        // 1) ASP co-signs boarding inputs (script-path spend).
+        //    Must run BEFORE wallet/BDK signing so tap_scripts and
+        //    tap_internal_key metadata is still intact for the ASP
+        //    signer to inspect.
+        let after_asp = match self.signer.sign_transaction(&merged_b64_pre, false).await {
             Ok(s) => {
                 info!("ASP co-signing of merged PSBT succeeded");
                 s
             }
             Err(e) => {
-                info!(error = %e, "ASP co-signing failed -- continuing with wallet-signed PSBT");
-                after_wallet
+                info!(error = %e, "ASP co-signing failed -- continuing");
+                merged_b64_pre
             }
         };
 
+        // 2) Wallet (BDK) re-signs -- picks up the fee input automatically.
+        //    BDK sign() with try_finalize:true may move tap_key_sig to
+        //    final_script_witness, which is fine for the unsigned check.
+        let wallet_signed = match self.wallet.sign_transaction(&after_asp, false).await {
+            Ok(s) => {
+                info!("Wallet (BDK) re-signing of merged PSBT succeeded");
+                s
+            }
+            Err(e) => {
+                info!(error = %e, "Wallet (BDK) re-signing failed -- continuing with ASP-signed PSBT");
+                after_asp
+            }
+        };
         // Re-parse the signed PSBT for the unsigned check
         let merged = {
             use base64::Engine;
