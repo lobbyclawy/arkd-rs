@@ -30,6 +30,9 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
+      - name: Install cargo-nextest
+        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/cache@v4
@@ -112,22 +115,29 @@ jobs:
             2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('address',''))" 2>/dev/null || echo "")
           if [ -n "$DARK_ADDR" ]; then
             echo "Funding dark wallet at $DARK_ADDR"
+            # Use nigiri faucet which auto-mines a block and waits for esplora indexing
+            FAUCET_RESP=$(curl -s -X POST http://localhost:3000/faucet \
+              -H "Content-Type: application/json" \
+              -d "{\"address\": \"$DARK_ADDR\", \"amount\": 10000000}")
+            echo "Faucet response: $FAUCET_RESP"
+            # Also send via bitcoin-cli for extra funds (multiple UTXOs help)
             curl -s -X POST http://admin1:123@localhost:18443 \
               -H "Content-Type: application/json" \
-              -d "{\"jsonrpc\":\"1.0\",\"id\":\"fund\",\"method\":\"sendtoaddress\",\"params\":[\"$DARK_ADDR\",10.0]}"
-            # Mine to confirm
+              -d "{\"jsonrpc\":\"1.0\",\"id\":\"fund\",\"method\":\"sendtoaddress\",\"params\":[\"$DARK_ADDR\",5.0]}" > /dev/null
+            # Mine to confirm all txs
             MINE_ADDR=$(curl -s -X POST http://admin1:123@localhost:18443 \
               -H "Content-Type: application/json" \
               -d '{"jsonrpc":"1.0","id":"addr","method":"getnewaddress","params":[]}' | \
               python3 -c "import json,sys; print(json.load(sys.stdin)['result'])")
             curl -s -X POST http://admin1:123@localhost:18443 \
               -H "Content-Type: application/json" \
-              -d "{\"jsonrpc\":\"1.0\",\"id\":\"mine\",\"method\":\"generatetoaddress\",\"params\":[6,\"$MINE_ADDR\"]}"
+              -d "{\"jsonrpc\":\"1.0\",\"id\":\"mine\",\"method\":\"generatetoaddress\",\"params\":[6,\"$MINE_ADDR\"]}" > /dev/null
 
-            # Wait for wallet to sync UTXOs
-            sleep 5
+            # Wait for esplora to index blocks (electrs can lag 10-30s after mining)
+            echo "Waiting for esplora to index funded blocks..."
+            sleep 15
             echo "Verifying wallet balance..."
-            for i in $(seq 1 10); do
+            for i in $(seq 1 30); do
               BAL=$(curl -s http://127.0.0.1:7071/v1/admin/wallet/balance \
                 -H "Authorization: Basic $(echo -n 'admin:admin' | base64)" 2>/dev/null \
                 | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('confirmed',d.get('total',0)))" 2>/dev/null || echo "0")
@@ -135,11 +145,16 @@ jobs:
                 echo "✅ dark wallet funded and synced (balance: $BAL sats)"
                 break
               fi
-              echo "Waiting for wallet sync... ($i/10)"
-              sleep 2
+              echo "Waiting for wallet sync... ($i/30) balance=$BAL"
+              sleep 3
             done
+            if [ "${BAL:-0}" -le 0 ] 2>/dev/null; then
+              echo "❌ wallet failed to sync after 90s — esplora may not have indexed"
+              exit 1
+            fi
           else
-            echo "⚠️ could not get dark wallet address (admin API may not be ready yet)"
+            echo "❌ could not get dark wallet address"
+            exit 1
           fi
 
       - name: Run Rust e2e tests
@@ -149,14 +164,14 @@ jobs:
           ESPLORA_URL: "http://localhost:3000"
           DARK_GRPC_URL: "http://127.0.0.1:7070"
           DARK_ADMIN_URL: "http://localhost:7071"
-        run: cargo test --test e2e_regtest -- --ignored --test-threads=1 --nocapture
+        run: cargo nextest run --test e2e_regtest --run-ignored all --test-threads=1 --no-capture --fail-fast
 
       - name: Run integration tests
         env:
           INTEGRATION_TEST: "1"
           BITCOIN_RPC_URL: "http://admin1:123@localhost:18443"
           ESPLORA_URL: "http://localhost:3000"
-        run: cargo test --test integration -- --ignored --test-threads=1 --nocapture
+        run: cargo nextest run --test integration --run-ignored all --test-threads=1 --no-capture --fail-fast
 
       - name: Show dark logs on failure
         if: failure()
