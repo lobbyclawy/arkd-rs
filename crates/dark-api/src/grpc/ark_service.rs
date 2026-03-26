@@ -291,6 +291,12 @@ impl ArkServiceTrait for ArkGrpcService {
         )
         .map_err(|e| Status::invalid_argument(format!("Invalid intent: {e}")))?;
 
+        // Set the registrant's pubkey as a cosigner so that finalize_round
+        // includes them in the tree signing phase. Without this, the round
+        // auto-completes with zero cosigners and never emits BatchFinalized
+        // for boarding rounds (the commitment tx is never broadcast).
+        intent.cosigners_public_keys = vec![req.pubkey.clone()];
+
         // Auto-generate an off-chain receiver for the requested amount/pubkey.
         // This mirrors the Go server's RegisterIntent which derives receivers
         // from the proof PSBT outputs. RegisterForRound is a simplified legacy

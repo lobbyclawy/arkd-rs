@@ -418,10 +418,15 @@ pub(crate) async fn run_batch_protocol_with_stream_impl(
                     vec![]
                 };
 
+                // Sign the commitment tx if it contains boarding inputs
+                // that belong to us. The server needs our signature on those
+                // inputs before it can broadcast the commitment tx.
+                let signed_commitment = sign_commitment_tx(secret_key, &_commitment_tx);
+
                 client
                     .submit_signed_forfeit_txs(SubmitSignedForfeitTxsRequest {
                         signed_forfeit_txs,
-                        signed_commitment_tx: String::new(),
+                        signed_commitment_tx: signed_commitment,
                     })
                     .await
                     .map_err(|e| {
@@ -447,6 +452,94 @@ pub(crate) async fn run_batch_protocol_with_stream_impl(
             }
         }
     }
+}
+
+/// Sign the commitment tx PSBT with our key for any boarding inputs we own.
+///
+/// The server sends us the commitment PSBT during BatchFinalization. If we
+/// contributed boarding UTXOs, the PSBT contains inputs spending from our
+/// P2TR address. We sign those inputs with a taproot key-path spend.
+///
+/// Returns the signed PSBT as base64, or an empty string if signing fails
+/// (e.g. the PSBT is empty or cannot be parsed).
+fn sign_commitment_tx(
+    secret_key: &bitcoin::secp256k1::SecretKey,
+    commitment_psbt_b64: &str,
+) -> String {
+    use base64::Engine;
+
+    if commitment_psbt_b64.is_empty() {
+        return String::new();
+    }
+
+    let psbt_bytes = match base64::engine::general_purpose::STANDARD.decode(commitment_psbt_b64) {
+        Ok(b) => b,
+        Err(_) => return String::new(),
+    };
+
+    let mut psbt = match bitcoin::psbt::Psbt::deserialize(&psbt_bytes) {
+        Ok(p) => p,
+        Err(_) => return String::new(),
+    };
+
+    let secp = Secp256k1::new();
+    let keypair = Keypair::from_secret_key(&secp, secret_key);
+    let (our_xonly, _parity) = keypair.x_only_public_key();
+    let our_p2tr = ScriptBuf::new_p2tr_tweaked(
+        bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(our_xonly),
+    );
+
+    // Collect prevouts for sighash computation. Use witness_utxo from PSBT
+    // inputs where available; skip signing if any prevout is missing.
+    let prevouts: Vec<TxOut> = psbt
+        .inputs
+        .iter()
+        .map(|inp| {
+            inp.witness_utxo.clone().unwrap_or(TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::new(),
+            })
+        })
+        .collect();
+
+    let mut signed_any = false;
+    for (i, psbt_input) in psbt.inputs.iter_mut().enumerate() {
+        // Only sign inputs that spend our P2TR output and don't already have a sig
+        let is_ours = psbt_input
+            .witness_utxo
+            .as_ref()
+            .map(|utxo| utxo.script_pubkey == our_p2tr)
+            .unwrap_or(false);
+
+        if !is_ours || psbt_input.tap_key_sig.is_some() {
+            continue;
+        }
+
+        let mut cache = SighashCache::new(&psbt.unsigned_tx);
+        let sighash = match cache.taproot_key_spend_signature_hash(
+            i,
+            &Prevouts::All(&prevouts),
+            TapSighashType::Default,
+        ) {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+
+        let msg = Message::from_digest(sighash.to_byte_array());
+        let sig = secp.sign_schnorr(&msg, &keypair);
+        psbt_input.tap_key_sig = Some(bitcoin::taproot::Signature {
+            signature: sig,
+            sighash_type: TapSighashType::Default,
+        });
+        signed_any = true;
+    }
+
+    if !signed_any {
+        return String::new();
+    }
+
+    let signed_bytes = psbt.serialize();
+    base64::engine::general_purpose::STANDARD.encode(&signed_bytes)
 }
 
 /// Build and sign forfeit transactions for each VTXO being refreshed.

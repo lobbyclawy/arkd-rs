@@ -1,6 +1,10 @@
 name: E2E Tests (Rust)
 
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   schedule:
     - cron: "0 3 * * *"  # 3 AM UTC nightly
   workflow_dispatch:
@@ -44,6 +48,11 @@ jobs:
       - name: Write dark config
         run: |
           printf '%s\n' \
+            '[server]' \
+            'esplora_url = "http://localhost:3000"' \
+            'no_macaroons = true' \
+            'no_tls = true' \
+            '' \
             '[bitcoin]' \
             'network = "regtest"' \
             'rpc_host = "127.0.0.1"' \
