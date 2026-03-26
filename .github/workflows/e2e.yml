@@ -25,8 +25,10 @@ jobs:
           docker run -d --name bitcoind \
             --network nigiri \
             -p 18443:18443 \
+            -v bitcoind-data:/data/.bitcoin \
             ruimarinho/bitcoin-core:latest \
             -regtest=1 \
+            -datadir=/data/.bitcoin \
             -rpcallowip=0.0.0.0/0 \
             -rpcbind=0.0.0.0 \
             -rpcuser=admin1 \
@@ -36,47 +38,79 @@ jobs:
             -server=1
 
           # Wait for bitcoind
+          BITCOIND_READY=false
           for i in $(seq 1 30); do
             if docker exec bitcoind bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 getblockchaininfo > /dev/null 2>&1; then
               echo "✅ bitcoind ready"
+              BITCOIND_READY=true
               break
             fi
             echo "Waiting for bitcoind... ($i/30)"
             sleep 2
           done
+          if [ "$BITCOIND_READY" = "false" ]; then
+            echo "❌ bitcoind failed to start"
+            docker logs bitcoind 2>&1 | tail -30
+            exit 1
+          fi
 
           # Create wallet and mine 101 blocks
           docker exec bitcoind bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 createwallet "default"
           ADDR=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 getnewaddress)
           docker exec bitcoind bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 generatetoaddress 101 "$ADDR"
+          echo "✅ Mined 101 blocks"
 
-          # Electrs (Esplora API) — try two known-good images
+          # Electrs (Esplora HTTP API)
+          # Uses ghcr.io/vulpemventures/electrs with the same config as nigiri.
+          # The image entrypoint is /build/electrs, HTTP listens on port 30000.
           docker run -d --name electrs \
             --network nigiri \
-            -p 5000:3000 \
-            -e RUST_LOG=info \
-            getmeemaw/electrs:latest \
+            -p 5000:30000 \
+            -v bitcoind-data:/config \
+            ghcr.io/vulpemventures/electrs:latest \
+            /build/electrs \
+            -vvvv \
             --network regtest \
             --daemon-rpc-addr bitcoind:18443 \
-            --daemon-dir /tmp \
-            --db-dir /tmp/electrs \
-            --http-addr 0.0.0.0:3000 \
+            --daemon-dir /config \
             --cookie "admin1:123" \
-            --jsonrpc-import \
-            2>/dev/null || \
-          docker run -d --name electrs \
-            --network nigiri \
-            -p 5000:3002 \
-            ghcr.io/vulpemventures/electrs:latest \
-            2>/dev/null || true
+            --http-addr 0.0.0.0:30000 \
+            --electrum-rpc-addr 0.0.0.0:50000 \
+            --cors "*" \
+            --jsonrpc-import
 
-          # Wait for Esplora
-          for i in $(seq 1 12); do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/blocks/tip/height 2>/dev/null || echo "000")
-            echo "Esplora status: $STATUS ($i/12)"
-            if [ "$STATUS" = "200" ]; then echo "✅ Esplora ready"; break; fi
+          # Verify electrs container is running
+          sleep 2
+          if ! docker ps --filter name=electrs --format '{{.Status}}' | grep -q "Up"; then
+            echo "❌ electrs container failed to start"
+            docker logs electrs 2>&1 | tail -30
+            exit 1
+          fi
+
+          # Wait for Esplora to be reachable and indexed
+          ESPLORA_READY=false
+          for i in $(seq 1 30); do
+            TIP=$(curl -sf http://localhost:5000/blocks/tip/height 2>/dev/null || echo "")
+            if [ -n "$TIP" ]; then
+              echo "Esplora tip height: $TIP ($i/30)"
+              if [ "$TIP" -ge 101 ] 2>/dev/null; then
+                echo "✅ Esplora ready and indexed (height=$TIP)"
+                ESPLORA_READY=true
+                break
+              fi
+            else
+              echo "Esplora not yet reachable ($i/30)"
+            fi
             sleep 5
           done
+          if [ "$ESPLORA_READY" = "false" ]; then
+            echo "❌ Esplora failed to become ready"
+            echo "--- electrs logs ---"
+            docker logs electrs 2>&1 | tail -50
+            echo "--- docker ps ---"
+            docker ps -a
+            exit 1
+          fi
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
