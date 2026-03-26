@@ -171,11 +171,20 @@ jobs:
           sleep 15
           
           # Verify dark wallet balance
+          # REST endpoint returns: { "main_account": { "available": <sats>, "locked": <sats> }, ... }
           echo "Verifying dark wallet balance..."
           for i in $(seq 1 30); do
-            BAL=$(curl -s http://127.0.0.1:7071/v1/admin/wallet/balance \
-              -H "Authorization: Basic $(echo -n 'admin:admin' | base64)" 2>/dev/null \
-              | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('confirmed',d.get('total',0)))" 2>/dev/null || echo "0")
+            RESP=$(curl -s http://127.0.0.1:7071/v1/admin/wallet/balance \
+              -H "Authorization: Basic $(echo -n 'admin:admin' | base64)" 2>/dev/null)
+            BAL=$(echo "$RESP" | python3 -c "
+import json,sys
+try:
+    d = json.load(sys.stdin)
+    ma = d.get('main_account', {}) or {}
+    print(ma.get('available', 0) + ma.get('locked', 0))
+except:
+    print(0)
+" 2>/dev/null || echo "0")
             if [ "$BAL" -gt 0 ] 2>/dev/null; then
               echo "✅ dark wallet funded and synced (balance: $BAL sats)"
               break
