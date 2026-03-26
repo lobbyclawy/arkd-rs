@@ -637,12 +637,14 @@ fn generate_keypair() -> (bitcoin::secp256k1::SecretKey, String) {
 /// Retries up to 5 times with a 2-second delay to handle Esplora indexing lag.
 async fn get_boarding_utxos(address: &str) -> Vec<dark_client::BoardingUtxo> {
     let url = format!("{}/address/{}/utxo", esplora_url(), address);
-    for attempt in 1..=5 {
+    // Retry for up to 60 seconds (30 attempts × 2s) to handle electrs indexing lag.
+    // In CI, electrs can take 10–30s to index a newly mined block.
+    for attempt in 1..=30 {
         let resp = match reqwest::get(&url).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!(
-                    "  esplora utxo attempt {}/5 failed (request): {}",
+                    "  esplora utxo attempt {}/30 failed (request): {}",
                     attempt, e
                 );
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -652,7 +654,7 @@ async fn get_boarding_utxos(address: &str) -> Vec<dark_client::BoardingUtxo> {
         let utxos: Vec<serde_json::Value> = match resp.json().await {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("  esplora utxo attempt {}/5 failed (json): {}", attempt, e);
+                eprintln!("  esplora utxo attempt {}/30 failed (json): {}", attempt, e);
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }
@@ -676,7 +678,7 @@ async fn get_boarding_utxos(address: &str) -> Vec<dark_client::BoardingUtxo> {
             return result;
         }
         eprintln!(
-            "  esplora utxo attempt {}/5: no confirmed UTXOs yet",
+            "  esplora utxo attempt {}/30: no confirmed UTXOs yet (electrs still indexing)",
             attempt
         );
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -706,7 +708,9 @@ async fn fund_and_settle(
     let amount_btc = (amount_sats as f64) / 100_000_000.0;
     let _txid = faucet_fund(boarding_addr, amount_btc).await;
     mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Give electrs time to start indexing before we poll.
+    // In CI electrs can lag 5–15s after a block is mined.
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
     let utxos = get_boarding_utxos(boarding_addr).await;
     assert!(!utxos.is_empty(), "no confirmed UTXOs at boarding address");
