@@ -903,15 +903,38 @@ impl ArkService {
             // For rounds without boarding inputs there is no commitment tx to
             // broadcast, so emit RoundBroadcast immediately so clients see
             // BatchFinalized.
-            if !has_boarding {
-                self.events
-                    .publish_event(ArkEvent::RoundBroadcast {
-                        round_id: round.id.clone(),
-                        commitment_txid: commitment_txid.clone(),
-                        timestamp: chrono::Utc::now().timestamp(),
-                    })
-                    .await?;
+            //
+            // For rounds WITH boarding inputs but zero cosigners (e.g.
+            // RegisterForRound without cosigner keys), broadcast the
+            // server-signed commitment tx directly. Without this, clients
+            // hang forever waiting for BatchFinalized because no one
+            // triggers broadcast_signed_commitment_tx.
+            if has_boarding {
+                info!(
+                    round_id = %round.id,
+                    "Auto-complete with boarding inputs — broadcasting commitment tx"
+                );
+                match self
+                    .wallet
+                    .broadcast_transaction(vec![round.commitment_tx.clone()])
+                    .await
+                {
+                    Ok(txid) => {
+                        info!(txid = %txid, "Commitment tx broadcast (auto-complete boarding)");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to broadcast commitment tx (auto-complete boarding) — emitting RoundBroadcast anyway");
+                    }
+                }
             }
+
+            self.events
+                .publish_event(ArkEvent::RoundBroadcast {
+                    round_id: round.id.clone(),
+                    commitment_txid: commitment_txid.clone(),
+                    timestamp: chrono::Utc::now().timestamp(),
+                })
+                .await?;
 
             return Ok(round.clone());
         }
