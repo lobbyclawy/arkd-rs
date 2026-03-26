@@ -13,104 +13,15 @@ jobs:
   e2e:
     name: E2E tests (nigiri regtest)
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Start regtest environment (bitcoind + electrs)
-        run: |
-          docker network create nigiri
-
-          # Bitcoin Core (regtest)
-          docker run -d --name bitcoind \
-            --network nigiri \
-            -p 18443:18443 \
-            -v bitcoind-data:/data/.bitcoin \
-            ruimarinho/bitcoin-core:latest \
-            -regtest=1 \
-            -datadir=/data/.bitcoin \
-            -rpcallowip=0.0.0.0/0 \
-            -rpcbind=0.0.0.0 \
-            -rpcuser=admin1 \
-            -rpcpassword=123 \
-            -txindex=1 \
-            -fallbackfee=0.00001 \
-            -server=1
-
-          # Wait for bitcoind
-          BITCOIND_READY=false
-          for i in $(seq 1 30); do
-            if docker exec bitcoind bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 getblockchaininfo > /dev/null 2>&1; then
-              echo "✅ bitcoind ready"
-              BITCOIND_READY=true
-              break
-            fi
-            echo "Waiting for bitcoind... ($i/30)"
-            sleep 2
-          done
-          if [ "$BITCOIND_READY" = "false" ]; then
-            echo "❌ bitcoind failed to start"
-            docker logs bitcoind 2>&1 | tail -30
-            exit 1
-          fi
-
-          # Create wallet and mine 101 blocks
-          docker exec bitcoind bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 createwallet "default"
-          ADDR=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 getnewaddress)
-          docker exec bitcoind bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 generatetoaddress 101 "$ADDR"
-          echo "✅ Mined 101 blocks"
-
-          # Electrs (Esplora HTTP API)
-          # Uses ghcr.io/vulpemventures/electrs with the same config as nigiri.
-          # The image entrypoint is /build/electrs, HTTP listens on port 30000.
-          docker run -d --name electrs \
-            --network nigiri \
-            -p 5000:30000 \
-            -v bitcoind-data:/config \
-            --entrypoint /build/electrs \
-            ghcr.io/vulpemventures/electrs:latest \
-            -vvvv \
-            --network regtest \
-            --daemon-rpc-addr bitcoind:18443 \
-            --daemon-dir /config \
-            --cookie "admin1:123" \
-            --http-addr 0.0.0.0:30000 \
-            --electrum-rpc-addr 0.0.0.0:50000 \
-            --cors "*" \
-            --jsonrpc-import
-
-          # Verify electrs container is running
-          sleep 2
-          if ! docker ps --filter name=electrs --format '{{.Status}}' | grep -q "Up"; then
-            echo "❌ electrs container failed to start"
-            docker logs electrs 2>&1 | tail -30
-            exit 1
-          fi
-
-          # Wait for Esplora to be reachable and indexed
-          ESPLORA_READY=false
-          for i in $(seq 1 30); do
-            TIP=$(curl -sf http://localhost:5000/blocks/tip/height 2>/dev/null || echo "")
-            if [ -n "$TIP" ]; then
-              echo "Esplora tip height: $TIP ($i/30)"
-              if [ "$TIP" -ge 101 ] 2>/dev/null; then
-                echo "✅ Esplora ready and indexed (height=$TIP)"
-                ESPLORA_READY=true
-                break
-              fi
-            else
-              echo "Esplora not yet reachable ($i/30)"
-            fi
-            sleep 5
-          done
-          if [ "$ESPLORA_READY" = "false" ]; then
-            echo "❌ Esplora failed to become ready"
-            echo "--- electrs logs ---"
-            docker logs electrs 2>&1 | tail -50
-            echo "--- docker ps ---"
-            docker ps -a
-            exit 1
-          fi
+      - name: Start regtest environment (nigiri)
+        uses: vulpemventures/nigiri-github-action@v1
+        with:
+          use_liquid: false
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -134,11 +45,11 @@ jobs:
         run: |
           cat > /tmp/dark-e2e.toml <<'EOF'
           [server]
-          esplora_url = "http://localhost:5000"
+          esplora_url = "http://localhost:3000"
 
           [wallet]
           network = "regtest"
-          esplora_url = "http://localhost:5000"
+          esplora_url = "http://localhost:3000"
 
           [ark]
           round_duration_secs = 10
@@ -195,7 +106,7 @@ jobs:
         env:
           INTEGRATION_TEST: "1"
           BITCOIN_RPC_URL: "http://admin1:123@localhost:18443"
-          ESPLORA_URL: "http://localhost:5000"
+          ESPLORA_URL: "http://localhost:3000"
           DARK_GRPC_URL: "http://127.0.0.1:7070"
           DARK_ADMIN_URL: "http://localhost:7071"
         run: cargo test --test e2e_regtest -- --ignored --test-threads=1 --nocapture
@@ -204,17 +115,13 @@ jobs:
         env:
           INTEGRATION_TEST: "1"
           BITCOIN_RPC_URL: "http://admin1:123@localhost:18443"
-          ESPLORA_URL: "http://localhost:5000"
+          ESPLORA_URL: "http://localhost:3000"
         run: cargo test --test integration -- --ignored --test-threads=1 --nocapture
 
       - name: Show dark logs on failure
         if: failure()
         run: cat /tmp/dark.log || true
 
-      - name: Stop everything
+      - name: Stop dark server
         if: always()
-        run: |
-          kill $(cat /tmp/dark.pid) 2>/dev/null || true
-          docker stop bitcoind electrs 2>/dev/null || true
-          docker rm bitcoind electrs 2>/dev/null || true
-          docker network rm nigiri 2>/dev/null || true
+        run: kill $(cat /tmp/dark.pid) 2>/dev/null || true
