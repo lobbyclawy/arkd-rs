@@ -2755,46 +2755,107 @@ impl ArkService {
             }
             Err(e) => {
                 info!(error = %e, "ASP co-signing failed -- continuing");
-                merged_b64_pre
+                merged_b64_pre.clone()
             }
         };
+
+        // Merge ASP signatures back into merged PSBT using outpoint matching.
+        // This preserves our consistent input ordering even if ASP returns different order.
+        {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&after_asp)
+                .or_else(|_| hex::decode(&after_asp))
+                .ok();
+            if let Some(bytes) = bytes {
+                if let Ok(asp_psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
+                    let asp_outpoints: std::collections::HashMap<_, _> = asp_psbt
+                        .unsigned_tx
+                        .input
+                        .iter()
+                        .enumerate()
+                        .map(|(i, inp)| (inp.previous_output, i))
+                        .collect();
+
+                    for (merged_idx, merged_txin) in merged.unsigned_tx.input.iter().enumerate() {
+                        if let Some(&asp_idx) = asp_outpoints.get(&merged_txin.previous_output) {
+                            if let Some(asp_input) = asp_psbt.inputs.get(asp_idx) {
+                                if merged_idx < merged.inputs.len() {
+                                    // Copy taproot script spend sigs from ASP
+                                    for (key, sig) in &asp_input.tap_script_sigs {
+                                        merged.inputs[merged_idx]
+                                            .tap_script_sigs
+                                            .entry(*key)
+                                            .or_insert(*sig);
+                                    }
+                                    // Copy taproot key spend sig if present
+                                    if merged.inputs[merged_idx].tap_key_sig.is_none() {
+                                        merged.inputs[merged_idx].tap_key_sig =
+                                            asp_input.tap_key_sig;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // 2) Wallet (BDK) re-signs -- picks up the fee input automatically.
         //    BDK sign() with try_finalize:true may move tap_key_sig to
         //    final_script_witness, which is fine for the unsigned check.
-        //
-        //    IMPORTANT: The ASP signer returns hex-encoded PSBT, but BDK expects
-        //    base64. Convert if needed.
-        let after_asp_b64 = {
-            use base64::Engine;
-            if let Ok(bytes) = hex::decode(&after_asp) {
-                // Input was hex — convert to base64
-                base64::engine::general_purpose::STANDARD.encode(bytes)
-            } else {
-                // Input was already base64 (e.g. ASP signing failed and we kept the original)
-                after_asp.clone()
-            }
-        };
-        let wallet_signed = match self.wallet.sign_transaction(&after_asp_b64, false).await {
+        let wallet_signed = match self.wallet.sign_transaction(&merged_b64_pre, false).await {
             Ok(s) => {
                 info!("Wallet (BDK) re-signing of merged PSBT succeeded");
                 s
             }
             Err(e) => {
-                info!(error = %e, "Wallet (BDK) re-signing failed -- continuing with ASP-signed PSBT");
-                after_asp_b64
+                info!(error = %e, "Wallet (BDK) re-signing failed -- continuing");
+                merged_b64_pre.clone()
             }
         };
-        // Re-parse the signed PSBT for the unsigned check.
-        // Wallet returns base64, but handle hex fallback just in case.
-        let mut merged = {
+
+        // Merge wallet signatures back into merged PSBT using outpoint matching.
+        // This preserves our consistent input ordering even if wallet returns different order.
+        {
             use base64::Engine;
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&wallet_signed)
                 .or_else(|_| hex::decode(&wallet_signed))
-                .unwrap_or_else(|_| merged.serialize());
-            bitcoin::psbt::Psbt::deserialize(&bytes).unwrap_or(merged)
-        };
+                .ok();
+            if let Some(bytes) = bytes {
+                if let Ok(wallet_psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
+                    let wallet_outpoints: std::collections::HashMap<_, _> = wallet_psbt
+                        .unsigned_tx
+                        .input
+                        .iter()
+                        .enumerate()
+                        .map(|(i, inp)| (inp.previous_output, i))
+                        .collect();
+
+                    for (merged_idx, merged_txin) in merged.unsigned_tx.input.iter().enumerate() {
+                        if let Some(&wallet_idx) =
+                            wallet_outpoints.get(&merged_txin.previous_output)
+                        {
+                            if let Some(wallet_input) = wallet_psbt.inputs.get(wallet_idx) {
+                                if merged_idx < merged.inputs.len() {
+                                    // Copy taproot key spend sig from wallet
+                                    if merged.inputs[merged_idx].tap_key_sig.is_none() {
+                                        merged.inputs[merged_idx].tap_key_sig =
+                                            wallet_input.tap_key_sig;
+                                    }
+                                    // Copy final_script_witness
+                                    if merged.inputs[merged_idx].final_script_witness.is_none() {
+                                        merged.inputs[merged_idx].final_script_witness =
+                                            wallet_input.final_script_witness.clone();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // If the fee input (last input) is still unsigned and all inputs have
         // witness_utxo, try manual signing. This handles the case where BDK fails
