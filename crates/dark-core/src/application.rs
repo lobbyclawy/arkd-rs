@@ -2613,10 +2613,21 @@ impl ArkService {
         // may have already been replaced by a new round when the scheduler
         // ticks between clients submitting their signed PSBTs.
         //
-        // IMPORTANT: Match inputs by outpoint, not by index. Go SDK may return
-        // PSBTs with inputs in a different order than the server expects.
-        let mut merged = incoming_psbt;
-        for (_rid, partial_b64) in partials.iter() {
+        // IMPORTANT: Use the server's original PSBT (first partial) as the base
+        // for merging to ensure consistent input ordering. Client PSBTs may have
+        // inputs in a different order, so we match by outpoint, not by index.
+        let server_psbt_b64 = partials
+            .first()
+            .map(|(_, b64)| b64.clone())
+            .unwrap_or_else(|| signed_commitment_tx.to_string());
+        let server_psbt_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&server_psbt_b64)
+            .map_err(|e| ArkError::Internal(format!("Invalid base64 server PSBT: {e}")))?;
+        let mut merged = bitcoin::psbt::Psbt::deserialize(&server_psbt_bytes)
+            .map_err(|e| ArkError::Internal(format!("Invalid server PSBT: {e}")))?;
+
+        // Skip the first partial (server's original) when merging since it's already our base
+        for (_rid, partial_b64) in partials.iter().skip(1) {
             if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(partial_b64) {
                 if let Ok(partial) = bitcoin::psbt::Psbt::deserialize(&bytes) {
                     // Build outpoint -> index map for the partial PSBT
