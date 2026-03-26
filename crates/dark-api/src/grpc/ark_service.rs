@@ -283,13 +283,24 @@ impl ArkServiceTrait for ArkGrpcService {
             })
             .collect();
 
-        let intent = dark_core::domain::Intent::new(
+        let mut intent = dark_core::domain::Intent::new(
             "grpc-register".to_string(),
             req.pubkey.clone(),
             format!("register:{}:{}", req.pubkey, req.amount),
             inputs,
         )
         .map_err(|e| Status::invalid_argument(format!("Invalid intent: {e}")))?;
+
+        // Auto-generate an off-chain receiver for the requested amount/pubkey.
+        // This mirrors the Go server's RegisterIntent which derives receivers
+        // from the proof PSBT outputs. RegisterForRound is a simplified legacy
+        // API that doesn't carry a PSBT, so we create the receiver explicitly.
+        intent
+            .add_receivers(vec![dark_core::domain::Receiver::offchain(
+                req.amount,
+                req.pubkey.clone(),
+            )])
+            .map_err(|e| Status::internal(format!("Failed to add receiver: {e}")))?;
 
         let intent_id = self
             .core

@@ -13,12 +13,21 @@ use dark_api::proto::ark_v1::{
     ConfirmRegistrationRequest, DeleteIntentRequest, FinalizePendingTxsRequest, FinalizeTxRequest,
     GetEventStreamRequest, GetInfoRequest, GetRoundRequest, GetSubscriptionRequest,
     GetTransactionsStreamRequest, GetVirtualTxsRequest, GetVtxoChainRequest, GetVtxosRequest,
-    IndexerChainedTxType, IndexerOutpoint, Intent as ProtoIntent, IssueAssetRequest,
-    ListRoundsRequest, RedeemNotesRequest, RegisterForRoundRequest, RegisterIntentRequest,
-    ReissueAssetRequest, RequestExitRequest, SubmitSignedForfeitTxsRequest,
-    SubmitTreeNoncesRequest, SubmitTreeSignaturesRequest, SubmitTxRequest,
-    SubscribeForScriptsRequest, UnsubscribeForScriptsRequest,
+    IndexerChainedTxType, IndexerOutpoint, Input as ProtoInput, Intent as ProtoIntent,
+    IssueAssetRequest, ListRoundsRequest, Outpoint as ProtoOutpoint, RedeemNotesRequest,
+    RegisterForRoundRequest, RegisterIntentRequest, ReissueAssetRequest, RequestExitRequest,
+    SubmitSignedForfeitTxsRequest, SubmitTreeNoncesRequest, SubmitTreeSignaturesRequest,
+    SubmitTxRequest, SubscribeForScriptsRequest, UnsubscribeForScriptsRequest,
 };
+
+/// A boarding UTXO to include as input when registering for a round.
+#[derive(Debug, Clone)]
+pub struct BoardingUtxo {
+    /// Transaction ID of the on-chain UTXO.
+    pub txid: String,
+    /// Output index.
+    pub vout: u32,
+}
 use tonic::transport::Channel;
 
 /// Client for communicating with an dark server.
@@ -405,8 +414,25 @@ impl ArkClient {
     ///
     /// Returns the server-assigned `intent_id` string on success.
     pub async fn register_intent(&mut self, pubkey: &str, amount: u64) -> ClientResult<String> {
+        self.register_intent_with_boarding(pubkey, amount, &[])
+            .await
+    }
+
+    /// Register an intent with optional boarding UTXO inputs.
+    ///
+    /// Same as [`register_intent`](Self::register_intent) but accepts boarding UTXOs
+    /// that should be included in the commitment transaction.
+    pub async fn register_intent_with_boarding(
+        &mut self,
+        pubkey: &str,
+        amount: u64,
+        boarding_utxos: &[BoardingUtxo],
+    ) -> ClientResult<String> {
         // Optimistic first attempt — succeeds immediately if round is already in registration.
-        match self.try_register_for_round(pubkey, amount).await {
+        match self
+            .try_register_for_round(pubkey, amount, boarding_utxos)
+            .await
+        {
             Ok(intent_id) => return Ok(intent_id),
             Err(ClientError::Rpc(msg)) if !msg.contains("Not in registration stage") => {
                 return Err(ClientError::Rpc(msg));
@@ -419,7 +445,10 @@ impl ArkClient {
 
         // Retry immediately after subscribing — the round might have just opened
         // while we were setting up the stream subscription.
-        match self.try_register_for_round(pubkey, amount).await {
+        match self
+            .try_register_for_round(pubkey, amount, boarding_utxos)
+            .await
+        {
             Ok(intent_id) => {
                 cancel();
                 return Ok(intent_id);
@@ -447,7 +476,10 @@ impl ArkClient {
         cancel();
 
         match result {
-            Ok(Ok(())) => self.try_register_for_round(pubkey, amount).await,
+            Ok(Ok(())) => {
+                self.try_register_for_round(pubkey, amount, boarding_utxos)
+                    .await
+            }
             Ok(Err(e)) => Err(e),
             Err(_elapsed) => Err(ClientError::Rpc(
                 "Timeout waiting for round to start (registration stage)".into(),
@@ -456,14 +488,30 @@ impl ArkClient {
     }
 
     /// Low-level `RegisterForRound` RPC call (no retry logic).
-    async fn try_register_for_round(&mut self, pubkey: &str, amount: u64) -> ClientResult<String> {
+    async fn try_register_for_round(
+        &mut self,
+        pubkey: &str,
+        amount: u64,
+        boarding_utxos: &[BoardingUtxo],
+    ) -> ClientResult<String> {
         let client = self.require_client()?;
+
+        let inputs: Vec<ProtoInput> = boarding_utxos
+            .iter()
+            .map(|bu| ProtoInput {
+                outpoint: Some(ProtoOutpoint {
+                    txid: bu.txid.clone(),
+                    vout: bu.vout,
+                }),
+                taproot_tree: None,
+            })
+            .collect();
 
         let response = client
             .register_for_round(RegisterForRoundRequest {
                 pubkey: pubkey.to_string(),
                 amount,
-                inputs: vec![],
+                inputs,
             })
             .await
             .map_err(|e| ClientError::Rpc(format!("RegisterForRound failed: {}", e)))?;
@@ -569,6 +617,21 @@ impl ArkClient {
         amount: u64,
         secret_key: &bitcoin::secp256k1::SecretKey,
     ) -> ClientResult<BatchTxRes> {
+        self.settle_with_key_and_boarding(pubkey, amount, secret_key, &[])
+            .await
+    }
+
+    /// Full settlement flow with MuSig2 signing and boarding UTXO inputs.
+    ///
+    /// Like [`settle_with_key`](Self::settle_with_key) but includes boarding UTXOs
+    /// in the `RegisterForRound` call so the server adds them to the commitment tx.
+    pub async fn settle_with_key_and_boarding(
+        &mut self,
+        pubkey: &str,
+        amount: u64,
+        secret_key: &bitcoin::secp256k1::SecretKey,
+        boarding_utxos: &[BoardingUtxo],
+    ) -> ClientResult<BatchTxRes> {
         // Subscribe to the event stream BEFORE registering so we never miss
         // the BatchStarted event that includes our intent.
         let mut grpc_client = self.require_client()?.clone();
@@ -578,7 +641,9 @@ impl ArkClient {
             .map_err(|e| ClientError::Rpc(format!("GetEventStream failed: {}", e)))?
             .into_inner();
 
-        let intent_id = self.register_intent(pubkey, amount).await?;
+        let intent_id = self
+            .register_intent_with_boarding(pubkey, amount, boarding_utxos)
+            .await?;
         let commitment_txid = crate::batch::run_batch_protocol_with_stream(
             &mut grpc_client,
             &intent_id,

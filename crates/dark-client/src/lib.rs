@@ -59,7 +59,7 @@ pub mod store;
 pub mod types;
 pub mod wallet;
 
-pub use client::{ArkClient, OffchainTxResult, RedeemBranch};
+pub use client::{ArkClient, BoardingUtxo, OffchainTxResult, RedeemBranch};
 pub use error::{ClientError, ClientResult};
 pub use types::{
     Asset, AssetMetadata, Balance, BatchEvent, BatchTxRes, BoardingAddress, ControlAssetOption,

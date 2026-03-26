@@ -631,6 +631,66 @@ fn generate_keypair() -> (bitcoin::secp256k1::SecretKey, String) {
     (sk, pubkey_hex)
 }
 
+/// Look up confirmed UTXOs for an address via Esplora and return them as
+/// [`BoardingUtxo`] values suitable for `settle_with_key_and_boarding`.
+async fn get_boarding_utxos(address: &str) -> Vec<dark_client::BoardingUtxo> {
+    let url = format!("{}/address/{}/utxo", esplora_url(), address);
+    let resp: Vec<serde_json::Value> = reqwest::get(&url)
+        .await
+        .expect("esplora utxo request")
+        .json()
+        .await
+        .expect("esplora utxo json");
+    resp.iter()
+        .filter_map(|u| {
+            // Only include confirmed UTXOs
+            if u.get("status")
+                .and_then(|s| s.get("confirmed"))
+                .and_then(|c| c.as_bool())
+                != Some(true)
+            {
+                return None;
+            }
+            let txid = u.get("txid")?.as_str()?.to_string();
+            let vout = u.get("vout")?.as_u64()? as u32;
+            Some(dark_client::BoardingUtxo { txid, vout })
+        })
+        .collect()
+}
+
+/// Settle with boarding: fund a boarding address, look up the UTXO, and settle.
+///
+/// This is a convenience wrapper around `settle_with_key_and_boarding` that:
+/// 1. Derives a boarding address for the given pubkey
+/// 2. Funds it via the regtest faucet
+/// 3. Waits for confirmations
+/// 4. Looks up the funded UTXO via Esplora
+/// 5. Calls `settle_with_key_and_boarding` with the boarding UTXO
+async fn fund_and_settle(
+    client: &mut dark_client::ArkClient,
+    pubkey: &str,
+    amount_sats: u64,
+    secret_key: &bitcoin::secp256k1::SecretKey,
+) -> dark_client::types::BatchTxRes {
+    let addrs = client.receive(pubkey).await.expect("receive failed");
+    let boarding_addr = &addrs.2.address;
+    assert!(!boarding_addr.is_empty(), "boarding address empty");
+
+    // Fund with a slight margin for fees (amount in BTC)
+    let amount_btc = (amount_sats as f64) / 100_000_000.0;
+    let _txid = faucet_fund(boarding_addr, amount_btc).await;
+    mine_blocks(6).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let utxos = get_boarding_utxos(boarding_addr).await;
+    assert!(!utxos.is_empty(), "no confirmed UTXOs at boarding address");
+
+    client
+        .settle_with_key_and_boarding(pubkey, amount_sats, secret_key, &utxos)
+        .await
+        .expect("settle_with_key_and_boarding failed")
+}
+
 /// Fund the regtest wallet and ensure 101+ confirmations for coinbase maturity.
 async fn ensure_funded() {
     let height = get_block_height().await;
@@ -789,10 +849,19 @@ async fn test_batch_session_refresh_vtxos() {
     mine_blocks(6).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
+    // Look up funded boarding UTXOs
+    let alice_utxos = get_boarding_utxos(&alice_board.2.address).await;
+    let bob_utxos = get_boarding_utxos(&bob_board.2.address).await;
+    assert!(
+        !alice_utxos.is_empty(),
+        "Alice: no confirmed boarding UTXOs"
+    );
+    assert!(!bob_utxos.is_empty(), "Bob: no confirmed boarding UTXOs");
+
     let settle_amount = 21_000u64;
     let (alice_res, bob_res) = tokio::join!(
-        alice.settle_with_key(&alice_pubkey, settle_amount, &alice_sk),
-        bob.settle_with_key(&bob_pubkey, settle_amount, &bob_sk),
+        alice.settle_with_key_and_boarding(&alice_pubkey, settle_amount, &alice_sk, &alice_utxos),
+        bob.settle_with_key_and_boarding(&bob_pubkey, settle_amount, &bob_sk, &bob_utxos),
     );
     let alice_batch = alice_res.expect("Alice: settle_with_key failed");
     let bob_batch = bob_res.expect("Bob: settle_with_key failed");
@@ -874,19 +943,15 @@ async fn test_unilateral_exit_leaf_vtxo() {
     let endpoint = grpc_endpoint();
     ensure_funded().await;
 
+    let (alice_sk, alice_pubkey) = generate_keypair();
     let mut alice = connect_client(&endpoint).await;
-    let info = alice.get_info().await.expect("GetInfo");
+    let _info = alice.get_info().await.expect("GetInfo");
 
-    // Fund Alice offchain
-    alice
-        .settle(&info.pubkey, 21_000)
-        .await
-        .expect("Alice: settle");
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Fund Alice offchain via boarding
+    let _batch = fund_and_settle(&mut alice, &alice_pubkey, 21_000, &alice_sk).await;
 
     // Unroll: fetch tree PSBTs, finalize, and broadcast
-    let tx_hexes = alice.unroll(&info.pubkey).await.expect("unroll failed");
+    let tx_hexes = alice.unroll(&alice_pubkey).await.expect("unroll failed");
     assert!(
         !tx_hexes.is_empty(),
         "unroll should produce at least one tx"
@@ -904,7 +969,7 @@ async fn test_unilateral_exit_leaf_vtxo() {
     mine_blocks(1).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let balance = alice.get_balance(&info.pubkey).await.expect("get_balance");
+    let balance = alice.get_balance(&alice_pubkey).await.expect("get_balance");
     eprintln!(
         "Post-unroll balance: offchain={} locked={}",
         balance.offchain.total,
@@ -922,29 +987,24 @@ async fn test_unilateral_exit_preconfirmed_vtxo() {
     let endpoint = grpc_endpoint();
     ensure_funded().await;
 
+    let (alice_sk, alice_pubkey) = generate_keypair();
     let mut alice = connect_client(&endpoint).await;
-    let info = alice.get_info().await.expect("GetInfo");
+    let _info = alice.get_info().await.expect("GetInfo");
 
+    let (_bob_sk, bob_pubkey) = generate_keypair();
     let mut bob = connect_client(&endpoint).await;
-    let bob_addr = bob.receive(&info.pubkey).await.expect("Bob: receive");
+    let bob_addr = bob.receive(&bob_pubkey).await.expect("Bob: receive");
     let bob_offchain = bob_addr.1.address;
 
     // Alice funds and sends to Bob offchain (preconfirmed)
-    alice
-        .settle(&info.pubkey, 100_000)
-        .await
-        .expect("Alice: settle");
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    let _batch = fund_and_settle(&mut alice, &alice_pubkey, 100_000, &alice_sk).await;
 
-    // Generate a keypair for signing the offchain tx.
-    let (alice_sk, _alice_pubkey) = generate_keypair();
     let _ = alice
-        .send_offchain(&info.pubkey, &bob_offchain, 21_000, &alice_sk)
+        .send_offchain(&alice_pubkey, &bob_offchain, 21_000, &alice_sk)
         .await;
 
     // Bob unrolls (checkpoint level)
-    let tx_hexes1 = bob.unroll(&info.pubkey).await.expect("Bob unroll level 1");
+    let tx_hexes1 = bob.unroll(&bob_pubkey).await.expect("Bob unroll level 1");
     eprintln!("Bob unroll (level 1): {} tx(es)", tx_hexes1.len());
     for tx_hex in &tx_hexes1 {
         let txid = broadcast_tx_hex(tx_hex).await;
@@ -954,7 +1014,7 @@ async fn test_unilateral_exit_preconfirmed_vtxo() {
     mine_blocks(2).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let tx_hexes2 = bob.unroll(&info.pubkey).await.expect("Bob unroll level 2");
+    let tx_hexes2 = bob.unroll(&bob_pubkey).await.expect("Bob unroll level 2");
     eprintln!("Bob unroll (level 2): {} tx(es)", tx_hexes2.len());
     for tx_hex in &tx_hexes2 {
         let txid = broadcast_tx_hex(tx_hex).await;
@@ -981,15 +1041,7 @@ async fn test_collaborative_exit_with_change() {
     let mut alice = connect_client(&endpoint).await;
     let _info = alice.get_info().await.expect("GetInfo");
 
-    let alice_board = alice.receive(&alice_pubkey).await.expect("receive");
-    let _fund = faucet_fund(&alice_board.2.address, 0.001).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let batch = alice
-        .settle_with_key(&alice_pubkey, 100_000, &alice_sk)
-        .await
-        .expect("settle_with_key");
+    let batch = fund_and_settle(&mut alice, &alice_pubkey, 100_000, &alice_sk).await;
     assert!(
         !batch.commitment_txid.starts_with("pending:"),
         "expected real txid"
@@ -1038,15 +1090,7 @@ async fn test_collaborative_exit_without_change() {
     let mut alice = connect_client(&endpoint).await;
     let _info = alice.get_info().await.expect("GetInfo");
 
-    let alice_board = alice.receive(&alice_pubkey).await.expect("receive");
-    let _fund = faucet_fund(&alice_board.2.address, 0.00021100).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let batch = alice
-        .settle_with_key(&alice_pubkey, 21_000, &alice_sk)
-        .await
-        .expect("settle_with_key");
+    let batch = fund_and_settle(&mut alice, &alice_pubkey, 21_000, &alice_sk).await;
     assert!(!batch.commitment_txid.starts_with("pending:"));
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -1156,15 +1200,7 @@ async fn test_offchain_tx() {
     let info = alice.get_info().await.expect("GetInfo");
     assert_eq!(info.network, "regtest");
 
-    let alice_board = alice.receive(&alice_pubkey).await.expect("receive");
-    let _fund = faucet_fund(&alice_board.2.address, 0.001).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let batch = alice
-        .settle_with_key(&alice_pubkey, 100_000, &alice_sk)
-        .await
-        .expect("settle_with_key");
+    let batch = fund_and_settle(&mut alice, &alice_pubkey, 100_000, &alice_sk).await;
     assert!(!batch.commitment_txid.starts_with("pending:"));
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -1200,15 +1236,7 @@ async fn test_offchain_tx_multiple() {
     let mut alice = connect_client(&endpoint).await;
     let _info = alice.get_info().await.expect("GetInfo");
 
-    let board = alice.receive(&alice_pubkey).await.expect("receive");
-    let _fund = faucet_fund(&board.2.address, 0.001).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let batch = alice
-        .settle_with_key(&alice_pubkey, 100_000, &alice_sk)
-        .await
-        .expect("settle_with_key");
+    let batch = fund_and_settle(&mut alice, &alice_pubkey, 100_000, &alice_sk).await;
     assert!(!batch.commitment_txid.starts_with("pending:"));
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -1244,15 +1272,7 @@ async fn test_offchain_tx_chain() {
     let mut alice = connect_client(&endpoint).await;
     let _info = alice.get_info().await.expect("GetInfo");
 
-    let board = alice.receive(&alice_pubkey).await.expect("receive");
-    let _fund = faucet_fund(&board.2.address, 0.001).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let batch = alice
-        .settle_with_key(&alice_pubkey, 50_000, &alice_sk)
-        .await
-        .expect("settle_with_key");
+    let batch = fund_and_settle(&mut alice, &alice_pubkey, 50_000, &alice_sk).await;
     assert!(!batch.commitment_txid.starts_with("pending:"));
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -1340,15 +1360,7 @@ async fn test_offchain_tx_concurrent_submit() {
     let mut alice2 = connect_client(&endpoint).await;
     let _info = alice1.get_info().await.expect("GetInfo");
 
-    let board = alice1.receive(&alice_pubkey).await.expect("receive");
-    let _fund = faucet_fund(&board.2.address, 0.001).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let batch = alice1
-        .settle_with_key(&alice_pubkey, 50_000, &alice_sk)
-        .await
-        .expect("settle_with_key");
+    let batch = fund_and_settle(&mut alice1, &alice_pubkey, 50_000, &alice_sk).await;
     assert!(!batch.commitment_txid.starts_with("pending:"));
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -1385,15 +1397,7 @@ async fn test_offchain_tx_finalize_pending() {
     let mut alice = connect_client(&endpoint).await;
     let _info = alice.get_info().await.expect("GetInfo");
 
-    let board = alice.receive(&alice_pubkey).await.expect("receive");
-    let _fund = faucet_fund(&board.2.address, 0.001).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let batch = alice
-        .settle_with_key(&alice_pubkey, 50_000, &alice_sk)
-        .await
-        .expect("settle_with_key");
+    let batch = fund_and_settle(&mut alice, &alice_pubkey, 50_000, &alice_sk).await;
     assert!(!batch.commitment_txid.starts_with("pending:"));
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -1561,15 +1565,7 @@ async fn test_sweep_batch() {
     assert_eq!(info.network, "regtest");
     ensure_funded().await;
 
-    let board = client.receive(&alice_pubkey).await.expect("receive");
-    let _fund = faucet_fund(&board.2.address, 0.00021).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let batch = client
-        .settle_with_key(&alice_pubkey, 21_000, &alice_sk)
-        .await
-        .expect("settle_with_key");
+    let batch = fund_and_settle(&mut client, &alice_pubkey, 21_000, &alice_sk).await;
     assert!(!batch.commitment_txid.starts_with("pending:"));
     eprintln!("✅ settled: {}", batch.commitment_txid);
 
@@ -1602,13 +1598,11 @@ async fn test_sweep_checkpoint() {
     ensure_funded().await;
 
     // Settle to create a VTXO.
-    let _ = client
-        .settle(&info.pubkey, 21_000)
-        .await
-        .expect("settle failed");
+    let (alice_sk, alice_pubkey) = generate_keypair();
+    let _ = fund_and_settle(&mut client, &alice_pubkey, 21_000, &alice_sk).await;
 
     // Unroll: finalize and broadcast tree txs
-    let tx_hexes = client.unroll(&info.pubkey).await.expect("unroll failed");
+    let tx_hexes = client.unroll(&alice_pubkey).await.expect("unroll failed");
     eprintln!("unroll: {} finalized tx(es)", tx_hexes.len());
     for tx_hex in &tx_hexes {
         let txid = broadcast_tx_hex(tx_hex).await;
@@ -1620,7 +1614,7 @@ async fn test_sweep_checkpoint() {
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     let vtxos = client
-        .list_vtxos(&info.pubkey)
+        .list_vtxos(&alice_pubkey)
         .await
         .expect("list_vtxos failed");
     let swept: Vec<_> = vtxos.iter().filter(|v| v.is_swept).collect();
@@ -1696,10 +1690,13 @@ async fn test_fee_programs_applied() {
     mine_blocks(6).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
+    let alice_utxos = get_boarding_utxos(&alice_board.2.address).await;
+    let bob_utxos = get_boarding_utxos(&bob_board.2.address).await;
+
     let amt = 21_000u64;
     let (ar, br) = tokio::join!(
-        alice.settle_with_key(&alice_pubkey, amt, &alice_sk),
-        bob.settle_with_key(&bob_pubkey, amt, &bob_sk)
+        alice.settle_with_key_and_boarding(&alice_pubkey, amt, &alice_sk, &alice_utxos),
+        bob.settle_with_key_and_boarding(&bob_pubkey, amt, &bob_sk, &bob_utxos)
     );
     let ab = ar.expect("Alice settle");
     let bb = br.expect("Bob settle");
@@ -1879,16 +1876,7 @@ async fn test_ban_protocol_violations() {
     assert_eq!(info.network, "regtest");
 
     // Fund Alice so she has VTXOs to participate with.
-    let alice_board = alice.receive(&alice_pubkey).await.expect("Alice receive");
-    let _fund = faucet_fund(&alice_board.2.address, 0.001).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Settle Alice so she has spendable VTXOs.
-    let alice_batch = alice
-        .settle_with_key(&alice_pubkey, 21_000, &alice_sk)
-        .await
-        .expect("Alice settle_with_key");
+    let alice_batch = fund_and_settle(&mut alice, &alice_pubkey, 21_000, &alice_sk).await;
     assert!(!alice_batch.commitment_txid.starts_with("pending:"));
     eprintln!("Alice settled: {}", alice_batch.commitment_txid);
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -2000,15 +1988,7 @@ async fn test_ban_rejected_after_violation() {
     let info = alice.get_info().await.expect("GetInfo");
     assert_eq!(info.network, "regtest");
 
-    let alice_board = alice.receive(&alice_pubkey).await.expect("Alice receive");
-    let _fund = faucet_fund(&alice_board.2.address, 0.001).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let alice_batch = alice
-        .settle_with_key(&alice_pubkey, 21_000, &alice_sk)
-        .await
-        .expect("Alice settle_with_key");
+    let alice_batch = fund_and_settle(&mut alice, &alice_pubkey, 21_000, &alice_sk).await;
     assert!(!alice_batch.commitment_txid.starts_with("pending:"));
     tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -2099,17 +2079,7 @@ async fn test_react_to_fraud_forfeited_vtxo() {
     assert_eq!(info.network, "regtest");
 
     // Step 1: Fund Alice and settle (commitment tx A).
-    let alice_board = alice.receive(&alice_pubkey).await.expect("receive");
-    eprintln!("Alice boarding addr: {}", alice_board.2.address);
-
-    let _fund_txid = faucet_fund(&alice_board.2.address, 0.00021).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let batch_a = alice
-        .settle_with_key(&alice_pubkey, 21_000, &alice_sk)
-        .await
-        .expect("settle A (settle_with_key)");
+    let batch_a = fund_and_settle(&mut alice, &alice_pubkey, 21_000, &alice_sk).await;
     let commitment_a = batch_a.commitment_txid.clone();
     assert!(
         !commitment_a.starts_with("pending:"),
@@ -2202,17 +2172,8 @@ async fn test_react_to_fraud_forfeited_with_batch() {
     let info = alice.get_info().await.expect("GetInfo");
     assert_eq!(info.network, "regtest");
 
-    // Fund Alice.
-    let alice_board = alice.receive(&alice_pubkey).await.expect("receive");
-    let _fund = faucet_fund(&alice_board.2.address, 0.00021).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Settle A — with batch output (other participants may join).
-    let batch_a = alice
-        .settle_with_key(&alice_pubkey, 21_000, &alice_sk)
-        .await
-        .expect("settle A");
+    // Fund Alice and settle A — with batch output (other participants may join).
+    let batch_a = fund_and_settle(&mut alice, &alice_pubkey, 21_000, &alice_sk).await;
     let commitment_a = batch_a.commitment_txid.clone();
     assert!(!commitment_a.starts_with("pending:"));
     eprintln!("Batch A commitment: {}", commitment_a);
@@ -2292,15 +2253,7 @@ async fn test_react_to_fraud_spent_vtxo() {
     assert_eq!(info.network, "regtest");
 
     // Step 1: Fund Alice and settle to get VTXOs.
-    let alice_board = alice.receive(&alice_pubkey).await.expect("receive");
-    let _fund = faucet_fund(&alice_board.2.address, 0.00021).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let batch = alice
-        .settle_with_key(&alice_pubkey, 21_000, &alice_sk)
-        .await
-        .expect("settle_with_key");
+    let batch = fund_and_settle(&mut alice, &alice_pubkey, 21_000, &alice_sk).await;
     let commitment_txid = batch.commitment_txid.clone();
     assert!(!commitment_txid.starts_with("pending:"));
     eprintln!("Commitment tx: {}", commitment_txid);
@@ -2505,15 +2458,7 @@ async fn test_delegate_refresh() {
     let info = alice.get_info().await.expect("GetInfo failed");
     assert_eq!(info.network, "regtest");
 
-    let alice_board = alice.receive(&alice_pubkey).await.expect("receive");
-    let _fund = faucet_fund(&alice_board.2.address, 0.00021).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let batch = alice
-        .settle_with_key(&alice_pubkey, 21_000, &alice_sk)
-        .await
-        .expect("settle_with_key");
+    let batch = fund_and_settle(&mut alice, &alice_pubkey, 21_000, &alice_sk).await;
     assert!(!batch.commitment_txid.starts_with("pending:"));
     eprintln!("Alice VTXO: {}", batch.commitment_txid);
     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -2568,15 +2513,7 @@ async fn test_delegate_refresh() {
     assert!(!did.is_empty());
     eprintln!("Delegate intent: {}", did);
 
-    let bob_board = bob.receive(&bob_pubkey).await.expect("receive");
-    let _bf = faucet_fund(&bob_board.2.address, 0.00021).await;
-    mine_blocks(6).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let bb = bob
-        .settle_with_key(&bob_pubkey, 21_000, &bob_sk)
-        .await
-        .expect("Bob settle_with_key");
+    let bb = fund_and_settle(&mut bob, &bob_pubkey, 21_000, &bob_sk).await;
     assert!(!bb.commitment_txid.starts_with("pending:"));
     eprintln!("Bob batch: {}", bb.commitment_txid);
     close();

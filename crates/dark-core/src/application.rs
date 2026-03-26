@@ -599,7 +599,11 @@ impl ArkService {
         // Adding it after client signing breaks taproot signatures because
         // SigHash::All covers all prevouts. The Go server adds its wallet
         // UTXOs in createCommitmentTx for the same reason.
-        let commitment_psbt_with_fee = if !boarding_inputs.is_empty() {
+        // Always add a server fee input to fund the commitment tx.
+        // For boarding rounds, the fee covers the gap between boarding inputs and
+        // outputs plus mining fees. For refresh-only rounds (no boarding inputs),
+        // the server wallet provides the sole funding input.
+        let commitment_psbt_with_fee = {
             // Decode PSBT to compute how much fee is needed.
             // If decoding fails (e.g. stub/mock tx builder), skip gracefully.
             use base64::Engine;
@@ -647,8 +651,6 @@ impl ArkService {
                 warn!("Could not decode commitment PSBT for fee calculation — skipping fee input");
                 result.commitment_tx.clone()
             }
-        } else {
-            result.commitment_tx.clone()
         };
 
         // Use the fee-augmented PSBT from here on
@@ -657,7 +659,7 @@ impl ArkService {
         // Extract and store the fee input signature from the BDK-signed PSBT.
         // This signature may be stripped when Go SDK clients round-trip the PSBT,
         // so we store it here and re-apply it after merge in broadcast_signed_commitment_tx().
-        if !boarding_inputs.is_empty() {
+        {
             use base64::Engine;
             if let Ok(bytes) =
                 base64::engine::general_purpose::STANDARD.decode(&result_commitment_tx)
@@ -725,10 +727,12 @@ impl ArkService {
         // Track boarding transaction IDs so we can mark them as claimed after round completion
         round.boarding_tx_ids = boarding_txs.iter().map(|bt| bt.id.to_string()).collect();
 
-        // If we added a server fee input, push the server-signed PSBT as
-        // the initial "partial" so broadcast_signed_commitment_tx() can
-        // merge the server's fee input signature with client signatures.
-        if round.has_boarding_inputs {
+        // Always push the server-signed PSBT as the initial "partial" so
+        // broadcast_signed_commitment_tx() can merge the server's fee input
+        // signature with client signatures. This applies to both boarding
+        // rounds and refresh-only rounds (server wallet always funds the
+        // commitment tx).
+        {
             let mut partials = self.partial_commitment_psbts.lock().await;
             partials.clear(); // Clear any stale partials from prior rounds
             partials.push((round.id.clone(), round.commitment_tx.clone()));
