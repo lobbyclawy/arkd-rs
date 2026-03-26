@@ -2612,11 +2612,33 @@ impl ArkService {
         // least one signature. This avoids relying on `current_round` which
         // may have already been replaced by a new round when the scheduler
         // ticks between clients submitting their signed PSBTs.
+        //
+        // IMPORTANT: Match inputs by outpoint, not by index. Go SDK may return
+        // PSBTs with inputs in a different order than the server expects.
         let mut merged = incoming_psbt;
         for (_rid, partial_b64) in partials.iter() {
             if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(partial_b64) {
                 if let Ok(partial) = bitcoin::psbt::Psbt::deserialize(&bytes) {
-                    for (i, input) in partial.inputs.iter().enumerate() {
+                    // Build outpoint -> index map for the partial PSBT
+                    let partial_outpoints: std::collections::HashMap<_, _> = partial
+                        .unsigned_tx
+                        .input
+                        .iter()
+                        .enumerate()
+                        .map(|(i, inp)| (inp.previous_output, i))
+                        .collect();
+
+                    for (merged_idx, merged_txin) in merged.unsigned_tx.input.iter().enumerate() {
+                        // Find matching input in partial PSBT by outpoint
+                        let Some(&partial_idx) =
+                            partial_outpoints.get(&merged_txin.previous_output)
+                        else {
+                            continue;
+                        };
+                        let Some(input) = partial.inputs.get(partial_idx) else {
+                            continue;
+                        };
+                        let i = merged_idx;
                         if i < merged.inputs.len() {
                             // Copy witness_utxo (needed for sighash computation)
                             if merged.inputs[i].witness_utxo.is_none() {
