@@ -67,8 +67,8 @@ jobs:
             --network nigiri \
             -p 5000:30000 \
             -v bitcoind-data:/config \
+            --entrypoint /build/electrs \
             ghcr.io/vulpemventures/electrs:latest \
-            /build/electrs \
             -vvvv \
             --network regtest \
             --daemon-rpc-addr bitcoind:18443 \
