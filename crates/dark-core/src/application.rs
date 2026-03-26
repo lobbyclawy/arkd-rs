@@ -2611,9 +2611,23 @@ impl ArkService {
                             if merged.inputs[i].tap_merkle_root.is_none() {
                                 merged.inputs[i].tap_merkle_root = input.tap_merkle_root;
                             }
+                            // Copy tap_key_origins (needed for BDK to recognize inputs it should sign)
+                            for (key, origin) in &input.tap_key_origins {
+                                merged.inputs[i]
+                                    .tap_key_origins
+                                    .entry(*key)
+                                    .or_insert(origin.clone());
+                            }
                             // Copy ECDSA partial sigs (for segwit v0 inputs)
                             for (key, sig) in &input.partial_sigs {
                                 merged.inputs[i].partial_sigs.entry(*key).or_insert(*sig);
+                            }
+                            // Copy bip32_derivation (for BDK to recognize segwit v0 inputs)
+                            for (key, origin) in &input.bip32_derivation {
+                                merged.inputs[i]
+                                    .bip32_derivation
+                                    .entry(*key)
+                                    .or_insert(origin.clone());
                             }
                             // Copy final_script_witness if already finalized
                             if merged.inputs[i].final_script_witness.is_none() {
