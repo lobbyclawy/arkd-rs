@@ -5,11 +5,17 @@
 //! 2. Subscribe to GetEventStream
 //! 3. Process events through state machine
 //! 4. MuSig2 nonce generation + partial signing
-//! 5. Submit forfeit transactions
+//! 5. Build, sign, and submit forfeit transactions
 
 use std::collections::HashMap;
 
 use sha2::{Digest, Sha256};
+
+use bitcoin::consensus::Encodable;
+use bitcoin::hashes::Hash;
+use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
+use bitcoin::sighash::{Prevouts, SighashCache};
+use bitcoin::{Amount, OutPoint, ScriptBuf, TapSighashType, TxOut, Txid, XOnlyPublicKey};
 
 use musig2::{BinaryEncoding, KeyAggContext, PubNonce, SecNonce};
 
@@ -18,9 +24,21 @@ use dark_api::proto::ark_v1::{
     ark_service_client::ArkServiceClient, GetEventStreamRequest, SubmitSignedForfeitTxsRequest,
     SubmitTreeNoncesRequest, SubmitTreeSignaturesRequest, UpdateStreamTopicsRequest,
 };
+use dark_bitcoin::ForfeitTx;
 use tonic::transport::Channel;
 
 use crate::error::{ClientError, ClientResult};
+
+/// A VTXO that will be spent in this round and needs a signed forfeit tx.
+#[derive(Debug, Clone)]
+pub struct VtxoInput {
+    /// Transaction ID of the VTXO being spent.
+    pub txid: String,
+    /// Output index within the transaction.
+    pub vout: u32,
+    /// Amount in satoshis.
+    pub amount: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
 enum BatchStep {
@@ -146,7 +164,6 @@ impl SignerState {
             let mut msg = [0u8; 32];
             let hash = Sha256::digest(txid.as_bytes());
             msg.copy_from_slice(&hash);
-
             let partial_sig = dark_bitcoin::create_partial_sig(
                 &key_agg_ctx,
                 &self.secret_key,
@@ -164,11 +181,17 @@ impl SignerState {
 }
 
 /// Execute the full batch protocol for settle().
+///
+/// When `vtxos_to_forfeit` is non-empty, the client will build and sign forfeit
+/// transactions during `BatchFinalization` (one per VTXO, paired with connector
+/// tree leaves) and submit them via `SubmitSignedForfeitTxs`.
 #[allow(dead_code)]
 pub(crate) async fn run_batch_protocol(
     client: &mut ArkServiceClient<Channel>,
     intent_id: &str,
     secret_key: &bitcoin::secp256k1::SecretKey,
+    vtxos_to_forfeit: &[VtxoInput],
+    asp_forfeit_pubkey: Option<XOnlyPublicKey>,
 ) -> ClientResult<String> {
     let stream = client
         .get_event_stream(GetEventStreamRequest {})
@@ -176,7 +199,15 @@ pub(crate) async fn run_batch_protocol(
         .map_err(|e| ClientError::Rpc(format!("GetEventStream failed: {}", e)))?
         .into_inner();
 
-    run_batch_protocol_with_stream(client, intent_id, secret_key, stream).await
+    run_batch_protocol_with_stream_impl(
+        client,
+        intent_id,
+        secret_key,
+        vtxos_to_forfeit,
+        asp_forfeit_pubkey,
+        stream,
+    )
+    .await
 }
 
 /// Execute the full batch protocol using a pre-existing event stream.
@@ -188,6 +219,30 @@ pub(crate) async fn run_batch_protocol_with_stream(
     client: &mut ArkServiceClient<Channel>,
     intent_id: &str,
     secret_key: &bitcoin::secp256k1::SecretKey,
+    vtxos_to_forfeit: &[VtxoInput],
+    asp_forfeit_pubkey: Option<XOnlyPublicKey>,
+    stream: tonic::Streaming<dark_api::proto::ark_v1::RoundEvent>,
+) -> ClientResult<String> {
+    run_batch_protocol_with_stream_impl(
+        client,
+        intent_id,
+        secret_key,
+        vtxos_to_forfeit,
+        asp_forfeit_pubkey,
+        stream,
+    )
+    .await
+}
+
+/// Execute the full batch protocol using a pre-existing event stream (core impl).
+///
+/// Accepts optional forfeit params for VTXOs being spent in this round.
+pub(crate) async fn run_batch_protocol_with_stream_impl(
+    client: &mut ArkServiceClient<Channel>,
+    intent_id: &str,
+    secret_key: &bitcoin::secp256k1::SecretKey,
+    vtxos_to_forfeit: &[VtxoInput],
+    asp_forfeit_pubkey: Option<XOnlyPublicKey>,
     mut stream: tonic::Streaming<dark_api::proto::ark_v1::RoundEvent>,
 ) -> ClientResult<String> {
     let sk_bytes = secret_key.secret_bytes();
@@ -330,9 +385,42 @@ pub(crate) async fn run_batch_protocol_with_stream(
                     continue;
                 }
                 _commitment_tx = e.commitment_tx.clone();
+
+                // Build and sign forfeit transactions for VTXOs being spent.
+                let signed_forfeit_txs = if !vtxos_to_forfeit.is_empty() {
+                    let asp_pk = asp_forfeit_pubkey.ok_or_else(|| {
+                        ClientError::InvalidResponse(
+                            "VTXOs to forfeit but no ASP forfeit pubkey provided".into(),
+                        )
+                    })?;
+
+                    // Collect connector tree leaves (nodes with no children).
+                    let connector_leaves: Vec<&TreeTxNode> = flat_connector_tree
+                        .iter()
+                        .filter(|n| n.children.is_empty())
+                        .collect();
+
+                    if connector_leaves.len() < vtxos_to_forfeit.len() {
+                        return Err(ClientError::InvalidResponse(format!(
+                            "Not enough connector leaves ({}) for VTXOs to forfeit ({})",
+                            connector_leaves.len(),
+                            vtxos_to_forfeit.len(),
+                        )));
+                    }
+
+                    build_and_sign_forfeits(
+                        secret_key,
+                        vtxos_to_forfeit,
+                        &connector_leaves,
+                        asp_pk,
+                    )?
+                } else {
+                    vec![]
+                };
+
                 client
                     .submit_signed_forfeit_txs(SubmitSignedForfeitTxsRequest {
-                        signed_forfeit_txs: vec![],
+                        signed_forfeit_txs,
                         signed_commitment_tx: String::new(),
                     })
                     .await
@@ -359,4 +447,111 @@ pub(crate) async fn run_batch_protocol_with_stream(
             }
         }
     }
+}
+
+/// Build and sign forfeit transactions for each VTXO being refreshed.
+///
+/// Each VTXO is paired with a connector tree leaf. The forfeit tx spends the
+/// VTXO + connector output, paying the combined value (minus fees) to the ASP.
+/// The VTXO input is signed with a taproot key-path spend using `secret_key`.
+fn build_and_sign_forfeits(
+    secret_key: &bitcoin::secp256k1::SecretKey,
+    vtxos: &[VtxoInput],
+    connector_leaves: &[&TreeTxNode],
+    asp_pubkey: XOnlyPublicKey,
+) -> ClientResult<Vec<String>> {
+    let secp = Secp256k1::new();
+    let keypair = Keypair::from_secret_key(&secp, secret_key);
+    let (client_xonly, _parity) = keypair.x_only_public_key();
+
+    let mut signed_txs = Vec::with_capacity(vtxos.len());
+
+    for (i, vtxo) in vtxos.iter().enumerate() {
+        let connector_node = connector_leaves[i];
+
+        // Parse the connector transaction from hex.
+        let connector_tx =
+            dark_bitcoin::BitcoinTxDecoder::decode_hex(&connector_node.tx).map_err(|e| {
+                ClientError::InvalidResponse(format!("Failed to decode connector tx: {}", e))
+            })?;
+
+        // Find the first non-anchor output in the connector tx
+        // (skip OP_RETURN / anchor outputs).
+        let (conn_vout, conn_output) = connector_tx
+            .output
+            .iter()
+            .enumerate()
+            .find(|(_idx, out)| !out.script_pubkey.is_op_return() && out.value.to_sat() > 0)
+            .ok_or_else(|| {
+                ClientError::InvalidResponse(
+                    "No usable output in connector tx (all anchor/OP_RETURN)".into(),
+                )
+            })?;
+
+        let connector_txid = connector_tx.compute_txid();
+        let connector_outpoint = OutPoint {
+            txid: connector_txid,
+            vout: conn_vout as u32,
+        };
+        let connector_amount = conn_output.value;
+
+        // Parse VTXO outpoint.
+        let vtxo_txid = vtxo.txid.parse::<Txid>().map_err(|e| {
+            ClientError::InvalidResponse(format!("Invalid VTXO txid '{}': {}", vtxo.txid, e))
+        })?;
+        let vtxo_outpoint = OutPoint {
+            txid: vtxo_txid,
+            vout: vtxo.vout,
+        };
+        let vtxo_amount = Amount::from_sat(vtxo.amount);
+
+        // Build the unsigned forfeit transaction (2 sat/vB fee rate).
+        let forfeit_tx = ForfeitTx::build(
+            vtxo_outpoint,
+            vtxo_amount,
+            connector_outpoint,
+            connector_amount,
+            asp_pubkey,
+            2,
+        )
+        .map_err(|e| ClientError::InvalidResponse(format!("Failed to build forfeit tx: {}", e)))?;
+
+        // Compute the taproot key-path sighash for input 0 (the VTXO input).
+        let vtxo_script = ScriptBuf::new_p2tr_tweaked(
+            bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(client_xonly),
+        );
+        let prevouts = vec![
+            TxOut {
+                value: vtxo_amount,
+                script_pubkey: vtxo_script,
+            },
+            TxOut {
+                value: connector_amount,
+                script_pubkey: conn_output.script_pubkey.clone(),
+            },
+        ];
+
+        let mut cache = SighashCache::new(&forfeit_tx.tx);
+        let sighash = cache
+            .taproot_key_spend_signature_hash(0, &Prevouts::All(&prevouts), TapSighashType::Default)
+            .map_err(|e| {
+                ClientError::InvalidResponse(format!("Forfeit sighash computation failed: {}", e))
+            })?;
+
+        let msg = Message::from_digest(sighash.to_byte_array());
+        let sig = secp.sign_schnorr(&msg, &keypair);
+
+        // Attach the witness (64-byte Schnorr signature) to input 0.
+        let mut signed_tx = forfeit_tx.tx.clone();
+        signed_tx.input[0].witness.push(sig.as_ref());
+
+        // Serialize the signed transaction to hex.
+        let mut buf = Vec::new();
+        signed_tx
+            .consensus_encode(&mut buf)
+            .map_err(|e| ClientError::InvalidResponse(format!("Failed to encode tx: {}", e)))?;
+        signed_txs.push(hex::encode(buf));
+    }
+
+    Ok(signed_txs)
 }
