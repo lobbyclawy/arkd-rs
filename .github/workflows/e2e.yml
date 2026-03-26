@@ -119,6 +119,9 @@ jobs:
             echo "⚠️ could not get dark wallet address (admin API may not be ready yet)"
           fi
 
+      - name: Install cargo-nextest
+        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+
       - name: Run Rust e2e tests
         env:
           INTEGRATION_TEST: "1"
@@ -126,14 +129,14 @@ jobs:
           ESPLORA_URL: "http://localhost:3000"
           DARK_GRPC_URL: "http://127.0.0.1:7070"
           DARK_ADMIN_URL: "http://localhost:7071"
-        run: cargo test --test e2e_regtest -- --ignored --test-threads=1 --nocapture
+        run: cargo nextest run --test e2e_regtest --run-ignored all --test-threads=1 --no-capture --fail-fast
 
       - name: Run integration tests
         env:
           INTEGRATION_TEST: "1"
           BITCOIN_RPC_URL: "http://admin1:123@localhost:18443"
           ESPLORA_URL: "http://localhost:3000"
-        run: cargo test --test integration -- --ignored --test-threads=1 --nocapture
+        run: cargo nextest run --test integration --run-ignored all --test-threads=1 --no-capture --fail-fast
 
       - name: Show dark logs on failure
         if: failure()
