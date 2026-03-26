@@ -342,9 +342,21 @@ impl LocalTxBuilder {
                     .map_err(|e| format!("Address network mismatch: {e}"))?;
                 outputs.push((addr.script_pubkey(), r.amount));
             } else if !r.pubkey.is_empty() {
-                // r.pubkey is already the final P2TR output key (VtxoTapKey) as extracted
-                // from the receiver's TxOut in the intent proof tx — use it directly.
+                // r.pubkey may be either a 32-byte x-only pubkey (64 hex chars)
+                // or a 33-byte compressed SEC pubkey (66 hex chars, 02/03 prefix).
+                // RegisterForRound sends compressed pubkeys; RegisterIntent may
+                // send x-only keys extracted from PSBT outputs.
                 let output_key = XOnlyPublicKey::from_str(&r.pubkey)
+                    .or_else(|_| {
+                        // Try parsing as compressed SEC pubkey and extract x-only
+                        let bytes = hex::decode(&r.pubkey)
+                            .map_err(|e| format!("Invalid pubkey hex '{}': {e}", r.pubkey))?;
+                        let compressed = bitcoin::secp256k1::PublicKey::from_slice(&bytes)
+                            .map_err(|e| {
+                                format!("Invalid compressed pubkey '{}': {e}", r.pubkey)
+                            })?;
+                        Ok::<XOnlyPublicKey, String>(compressed.x_only_public_key().0)
+                    })
                     .map_err(|e| format!("Invalid receiver pubkey '{}': {e}", r.pubkey))?;
                 let tweaked = bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(output_key);
                 let script = ScriptBuf::new_p2tr_tweaked(tweaked);
