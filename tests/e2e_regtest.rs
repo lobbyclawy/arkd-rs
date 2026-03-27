@@ -1555,16 +1555,19 @@ async fn test_intent_register_and_delete() {
 
     ensure_funded().await;
 
+    // Use a fresh keypair to avoid polluting the ban list with the server's own pubkey.
+    let (_sk, test_pubkey) = generate_keypair();
+
     // Register an intent.
     let intent_id = client
-        .register_intent(&info.pubkey, 10_000)
+        .register_intent(&test_pubkey, 10_000)
         .await
         .expect("register_intent failed");
     assert!(!intent_id.is_empty(), "intent_id must not be empty");
     eprintln!("✅ registered intent: {}", intent_id);
 
     // Second register — may succeed or fail depending on implementation.
-    let second_result = client.register_intent(&info.pubkey, 10_000).await;
+    let second_result = client.register_intent(&test_pubkey, 10_000).await;
     eprintln!("second register_intent: {:?}", second_result.is_ok());
 
     // Delete the first intent — must succeed.
@@ -1599,12 +1602,12 @@ async fn test_intent_concurrent_register() {
     c1.connect().await.expect("c1 connect");
     c2.connect().await.expect("c2 connect");
 
-    let info = c1.get_info().await.expect("GetInfo");
-    let pubkey = info.pubkey.clone();
+    let (_sk1, pubkey1) = generate_keypair();
+    let (_sk2, pubkey2) = generate_keypair();
 
     let (r1, r2) = tokio::join!(
-        c1.register_intent(&pubkey, 10_000),
-        c2.register_intent(&pubkey, 10_000),
+        c1.register_intent(&pubkey1, 10_000),
+        c2.register_intent(&pubkey2, 10_000),
     );
 
     let successes = [r1.is_ok(), r2.is_ok()];
@@ -1630,6 +1633,8 @@ async fn test_intent_join_round() {
 
     let mut alice = connect_client(&endpoint).await;
     let info = alice.get_info().await.expect("GetInfo");
+    // Use fresh keypair to avoid polluting the ban list with the server pubkey.
+    let (_sk, test_pubkey) = generate_keypair();
 
     // Subscribe to event stream to observe the round.
     let (mut events_rx, events_close) = alice
@@ -1639,7 +1644,7 @@ async fn test_intent_join_round() {
 
     // Register intent.
     let intent_id = alice
-        .register_intent(&info.pubkey, 10_000)
+        .register_intent(&test_pubkey, 10_000)
         .await
         .expect("register_intent");
     assert!(!intent_id.is_empty());
