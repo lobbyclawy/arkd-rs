@@ -2365,9 +2365,8 @@ async fn test_ban_protocol_violations() {
     close();
 
     // After skipping nonce submission, the round should have aborted.
-    // TODO: once ban tracking is fully wired, assert:
-    //   assert!(saw_signing, "must have seen TreeSigningStarted");
-    //   assert!(round_aborted, "round must abort when nonces not submitted");
+    assert!(saw_signing, "must have seen TreeSigningStarted");
+    assert!(round_aborted, "round must abort when nonces not submitted");
     eprintln!(
         "saw_signing={} round_aborted={}",
         saw_signing, round_aborted
@@ -2375,8 +2374,8 @@ async fn test_ban_protocol_violations() {
 
     // Verify Eve is now banned — settle and send_offchain should fail.
     let eve_settle = eve.settle(&eve_pubkey, 10_000).await;
-    // TODO: assert!(eve_settle.is_err(), "banned Eve cannot settle");
-    eprintln!("Eve settle after violation: ok={}", eve_settle.is_ok());
+    assert!(eve_settle.is_err(), "banned Eve cannot settle");
+    eprintln!("Eve settle after violation: err={}", eve_settle.unwrap_err());
 
     let eve_send = eve
         .send_offchain(
@@ -2386,8 +2385,8 @@ async fn test_ban_protocol_violations() {
             &_eve_sk,
         )
         .await;
-    // TODO: assert!(eve_send.is_err(), "banned Eve cannot send");
-    eprintln!("Eve send after violation: ok={}", eve_send.is_ok());
+    assert!(eve_send.is_err(), "banned Eve cannot send");
+    eprintln!("Eve send after violation: err={}", eve_send.unwrap_err());
 
     eprintln!("✅ test_ban_protocol_violations passed");
 }
@@ -2453,16 +2452,19 @@ async fn test_ban_rejected_after_violation() {
 
     // Eve should now be banned. Verify she cannot register a new intent.
     let register_result = eve.register_intent(&eve_pubkey, 10_000).await;
-    // TODO: assert!(register_result.is_err(), "banned Eve cannot register intent");
+    assert!(
+        register_result.is_err(),
+        "banned Eve cannot register intent"
+    );
     eprintln!(
-        "Eve register_intent after ban: ok={}",
-        register_result.is_ok()
+        "Eve register_intent after ban: err={}",
+        register_result.unwrap_err()
     );
 
-    // Also verify settle is rejected.
+    // Also verify settle is rejected (settle calls register_intent internally).
     let settle_result = eve.settle(&eve_pubkey, 10_000).await;
-    // TODO: assert!(settle_result.is_err(), "banned Eve cannot settle");
-    eprintln!("Eve settle after ban: ok={}", settle_result.is_ok());
+    assert!(settle_result.is_err(), "banned Eve cannot settle");
+    eprintln!("Eve settle after ban: err={}", settle_result.unwrap_err());
 
     // And send_offchain is rejected.
     let send_result = eve
@@ -2473,8 +2475,8 @@ async fn test_ban_rejected_after_violation() {
             &_eve_sk,
         )
         .await;
-    // TODO: assert!(send_result.is_err(), "banned Eve cannot send offchain");
-    eprintln!("Eve send after ban: ok={}", send_result.is_ok());
+    assert!(send_result.is_err(), "banned Eve cannot send offchain");
+    eprintln!("Eve send after ban: err={}", send_result.unwrap_err());
 
     eprintln!("✅ test_ban_rejected_after_violation passed");
 }

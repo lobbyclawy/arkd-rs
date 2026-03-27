@@ -1207,6 +1207,65 @@ impl ArkService {
             "Round aborted"
         );
 
+        // ── Auto-ban non-responding cosigners on signing timeout ──────────
+        // When a round is aborted because cosigners failed to submit nonces,
+        // identify which cosigners didn't respond and ban them. This prevents
+        // them from poisoning future rounds with intents they'll never complete.
+        if reason == "signing timeout" {
+            // Collect all expected cosigner pubkeys from the round's intents
+            let expected_cosigners: std::collections::HashSet<String> = failed_round
+                .intents
+                .values()
+                .flat_map(|i| i.cosigners_public_keys.iter())
+                .cloned()
+                .collect();
+
+            // Check who actually submitted nonces
+            let submitted_cosigners: std::collections::HashSet<String> = match self
+                .signing_session_store
+                .get_session(&failed_round.id)
+                .await
+            {
+                Ok(Some(session)) => session
+                    .tree_nonces
+                    .iter()
+                    .map(|(pk, _)| pk.clone())
+                    .collect(),
+                _ => std::collections::HashSet::new(),
+            };
+
+            // Ban cosigners who failed to submit nonces
+            for cosigner_pk in &expected_cosigners {
+                // Check both compressed (66-char) and x-only (64-char) forms
+                let x_only = if cosigner_pk.len() == 66 {
+                    cosigner_pk[2..].to_string()
+                } else {
+                    cosigner_pk.clone()
+                };
+                let submitted = submitted_cosigners.contains(cosigner_pk)
+                    || submitted_cosigners.contains(&x_only);
+
+                if !submitted {
+                    warn!(
+                        pubkey = %cosigner_pk,
+                        round_id = %failed_round.id,
+                        "Auto-banning cosigner who failed to submit nonces"
+                    );
+                    if let Err(e) = self
+                        .ban_repo
+                        .ban(
+                            cosigner_pk,
+                            crate::domain::BanReason::FailedToConfirm,
+                            &failed_round.id,
+                        )
+                        .await
+                    {
+                        error!(pubkey = %cosigner_pk, error = %e, "Failed to auto-ban cosigner");
+                    }
+                }
+            }
+        }
+
         // Emit BatchFailed event
         self.events
             .publish_event(ArkEvent::RoundFailed {
@@ -1464,6 +1523,19 @@ impl ArkService {
     /// Register an intent
     #[instrument(skip(self, intent))]
     pub async fn register_intent(&self, intent: Intent) -> ArkResult<String> {
+        // ── Ban check ─────────────────────────────────────────────────────
+        // Reject intents from banned participants. Check all cosigner pubkeys
+        // since that's how participants are identified during tree signing.
+        for cosigner_pk in &intent.cosigners_public_keys {
+            if self.ban_repo.is_banned(cosigner_pk).await? {
+                warn!(pubkey = %cosigner_pk, "Rejecting intent from banned participant");
+                return Err(ArkError::Internal(format!(
+                    "participant {} is banned",
+                    cosigner_pk
+                )));
+            }
+        }
+
         // If no round is active, the current round has ended, or the round is no
         // longer accepting registrations (e.g. it transitioned to finalization),
         // start a new round now.

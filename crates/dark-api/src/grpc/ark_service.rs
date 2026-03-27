@@ -607,6 +607,34 @@ impl ArkServiceTrait for ArkGrpcService {
             return Err(Status::invalid_argument("signed_ark_tx is required"));
         }
 
+        // ── Ban check ────────────────────────────────────────────────────
+        // Extract sender pubkey(s) from the PSBT inputs and reject if banned.
+        {
+            use base64::Engine;
+            if let Ok(psbt_bytes) =
+                base64::engine::general_purpose::STANDARD.decode(&req.signed_ark_tx)
+            {
+                if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&psbt_bytes) {
+                    for input in &psbt.inputs {
+                        if let Some(internal_key) = &input.tap_internal_key {
+                            let pubkey_hex = hex::encode(internal_key.serialize());
+                            if self
+                                .core
+                                .is_participant_banned(&pubkey_hex)
+                                .await
+                                .unwrap_or(false)
+                            {
+                                return Err(Status::permission_denied(format!(
+                                    "participant {} is banned",
+                                    pubkey_hex
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Validate the ark tx PSBT before co-signing.
         {
             use base64::Engine;
