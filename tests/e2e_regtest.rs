@@ -1685,9 +1685,26 @@ async fn test_sweep_batch() {
     assert!(!batch.commitment_txid.starts_with("pending:"));
     eprintln!("✅ settled: {}", batch.commitment_txid);
 
+    // Mine blocks and wait for the VTXO to expire by wall clock.
+    // With unilateral_exit_delay=30s in CI, waiting 35s is enough.
+    // The sweep service uses unix timestamps, not block heights.
     let sweep_blocks = info.unilateral_exit_delay / 600 + 10;
     mine_blocks(sweep_blocks).await;
-    tokio::time::sleep(Duration::from_secs(20)).await;
+    // Wait for expiry (delay + buffer)
+    let wait_secs = (info.unilateral_exit_delay + 10).min(60) as u64;
+    eprintln!(
+        "Waiting {}s for VTXO expiry (delay={}s)...",
+        wait_secs, info.unilateral_exit_delay
+    );
+    tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+
+    // Trigger sweep via admin API
+    let admin = AdminClient::new(&admin_url());
+    let sweep_result = admin
+        .force_sweep(false, vec![batch.commitment_txid.clone()])
+        .await;
+    eprintln!("Force sweep result: {:?}", sweep_result);
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     let vtxos = client.list_vtxos(&alice_pubkey).await.expect("list_vtxos");
     assert!(!vtxos.is_empty(), "should have VTXOs");
@@ -1755,8 +1772,9 @@ async fn test_sweep_force_by_admin() {
 
     ensure_funded().await;
 
+    let (_sk_sweep, sweep_pubkey) = generate_keypair();
     let _ = client
-        .settle(&info.pubkey, 546)
+        .settle(&sweep_pubkey, 546)
         .await
         .expect("settle failed");
 
@@ -1771,7 +1789,7 @@ async fn test_sweep_force_by_admin() {
         Err(e) => eprintln!("admin sweep unavailable (stub): {}", e),
     }
 
-    let vtxos = client.list_vtxos(&info.pubkey).await.unwrap_or_default();
+    let vtxos = client.list_vtxos(&sweep_pubkey).await.unwrap_or_default();
     eprintln!("✅ test_sweep_force_by_admin: {} VTXOs total", vtxos.len());
 }
 

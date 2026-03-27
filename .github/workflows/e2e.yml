@@ -83,6 +83,8 @@ jobs:
             'max_vtxo_amount_sats = 100000000' \
             'utxo_min_amount = 1000' \
             'utxo_max_amount = 100000000' \
+            'unilateral_exit_delay = 30' \
+            'boarding_exit_delay = 30' \
             > /tmp/dark-e2e.toml
 
       - name: Start dark server
