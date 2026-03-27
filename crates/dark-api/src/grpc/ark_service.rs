@@ -268,6 +268,20 @@ impl ArkServiceTrait for ArkGrpcService {
             return Err(Status::invalid_argument(format!("Invalid amount: {e}")));
         }
 
+        // Check if participant is banned
+        match self.core.is_participant_banned(&req.pubkey).await {
+            Ok(true) => {
+                return Err(Status::permission_denied(format!(
+                    "Participant {} is banned",
+                    req.pubkey
+                )));
+            }
+            Ok(false) => {}
+            Err(e) => {
+                warn!(error = %e, pubkey = %req.pubkey, "Failed to check ban status");
+            }
+        }
+
         // Build VTXO inputs from proto inputs
         let inputs: Vec<dark_core::domain::Vtxo> = req
             .inputs
