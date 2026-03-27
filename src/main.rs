@@ -279,6 +279,14 @@ async fn main() -> Result<()> {
             onchain_output_fee: file_config.fees.onchain_output_fee.unwrap_or(0),
             base_fee: file_config.fees.base_fee.unwrap_or(0),
         },
+        unilateral_exit_delay: file_config
+            .ark
+            .unilateral_exit_delay
+            .unwrap_or(dark_core::DEFAULT_UNILATERAL_EXIT_DELAY),
+        boarding_exit_delay: file_config
+            .ark
+            .boarding_exit_delay
+            .unwrap_or(dark_core::DEFAULT_BOARDING_EXIT_DELAY),
         ..Default::default()
     };
 
