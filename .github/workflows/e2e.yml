@@ -65,6 +65,11 @@ jobs:
       - name: Write dark config
         run: |
           printf '%s\n' \
+            '[server]' \
+            'esplora_url = "http://localhost:3000"' \
+            'no_macaroons = true' \
+            'no_tls = true' \
+            '' \
             '[bitcoin]' \
             'network = "regtest"' \
             'rpc_host = "127.0.0.1"' \
