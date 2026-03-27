@@ -554,15 +554,19 @@ fn sign_commitment_tx(
                     .iter()
                     .find(|(_control_block, (script, _version))| {
                         let script_bytes = script.as_bytes();
-                        // Cooperative leaf: contains our x-only key AND OP_CHECKSIGVERIFY (0xad).
-                        // The CSV exit leaf also contains our key but has OP_CSV (0xb2) instead.
-                        // Note: OP_CHECKSIG=0xac, OP_CHECKSIGVERIFY=0xad, OP_CSV=0xb2
-                        const OP_CHECKSIGVERIFY: u8 = 0xad;
+                        // Cooperative leaf: <user_xonly> OP_CHECKSIGVERIFY <asp_xonly> OP_CHECKSIG
+                        // CSV exit leaf:    <delay> OP_CSV OP_DROP <user_xonly> OP_CHECKSIG
+                        //
+                        // Use OP_CSV (0xb2) as a negative filter: the cooperative leaf
+                        // never contains OP_CSV, so skip any leaf that does.
+                        // Using OP_CHECKSIGVERIFY (0xad) as a positive filter is unreliable
+                        // because a user key byte could happen to equal 0xad.
+                        const OP_CSV: u8 = 0xb2;
                         let has_our_key = script_bytes
                             .windows(our_xonly_bytes.len())
                             .any(|w| w == our_xonly_bytes);
-                        let has_checksigverify = script_bytes.contains(&OP_CHECKSIGVERIFY);
-                        has_our_key && has_checksigverify
+                        let is_csv_leaf = script_bytes.contains(&OP_CSV);
+                        has_our_key && !is_csv_leaf
                     });
 
             let (control_block, (leaf_script, leaf_version)) = match leaf {
