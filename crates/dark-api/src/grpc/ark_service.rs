@@ -1414,7 +1414,19 @@ impl ArkServiceTrait for ArkGrpcService {
             {
                 Ok(txid) => info!(txid = %txid, "Commitment tx broadcast from client signature"),
                 Err(e) => {
-                    info!(error = %e, "Failed to broadcast client-signed commitment tx (non-fatal)")
+                    warn!(error = %e, round_id = %fallback_round_id, "Failed to broadcast commitment tx — emitting BatchFailed");
+                    // Emit BatchFailed so clients don't hang forever waiting
+                    // for BatchFinalized. The round may already be "ended"
+                    // (complete_round marks it as ended before broadcast),
+                    // so abort_round would fail. Emit the event directly.
+                    let _ = self.broker.publish(crate::proto::ark_v1::RoundEvent {
+                        event: Some(crate::proto::ark_v1::round_event::Event::BatchFailed(
+                            crate::proto::ark_v1::BatchFailedEvent {
+                                id: fallback_round_id.clone(),
+                                reason: format!("broadcast failed: {}", e),
+                            },
+                        )),
+                    });
                 }
             }
         } else if let Some(round) = round_snapshot {
@@ -1435,7 +1447,15 @@ impl ArkServiceTrait for ArkGrpcService {
                 {
                     Ok(txid) => info!(txid = %txid, "Commitment tx broadcast via server fallback"),
                     Err(e) => {
-                        info!(error = %e, "Server fallback broadcast failed (non-fatal)")
+                        warn!(error = %e, round_id = %round.id, "Server fallback broadcast failed — emitting BatchFailed");
+                        let _ = self.broker.publish(crate::proto::ark_v1::RoundEvent {
+                            event: Some(crate::proto::ark_v1::round_event::Event::BatchFailed(
+                                crate::proto::ark_v1::BatchFailedEvent {
+                                    id: round.id.clone(),
+                                    reason: format!("broadcast failed: {}", e),
+                                },
+                            )),
+                        });
                     }
                 }
             }
