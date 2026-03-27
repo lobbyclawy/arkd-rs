@@ -1178,6 +1178,9 @@ impl ArkService {
                 .await?;
         }
 
+        // Release reserved UTXOs so the wallet can reuse them in the next round.
+        self.wallet.release_all_utxos().await;
+
         Ok(round.clone())
     }
 
@@ -1274,6 +1277,9 @@ impl ArkService {
                 timestamp: chrono::Utc::now().timestamp(),
             })
             .await?;
+
+        // Release reserved UTXOs so the wallet can reuse them in the next round.
+        self.wallet.release_all_utxos().await;
 
         // Clear the current round so a new one can start
         *guard = None;

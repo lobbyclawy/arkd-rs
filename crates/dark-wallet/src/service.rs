@@ -199,6 +199,10 @@ impl WalletService for WalletServiceImpl {
         Ok(tx.is_some())
     }
 
+    async fn release_all_utxos(&self) {
+        self.manager.release_all_utxos().await;
+    }
+
     async fn add_fee_input(&self, psbt_base64: &str, fee_amount: u64) -> ArkResult<String> {
         // Decode the base64 PSBT
         let psbt_bytes = BASE64_STANDARD

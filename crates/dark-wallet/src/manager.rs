@@ -360,6 +360,20 @@ impl WalletManager {
         Ok(())
     }
 
+    /// Release all reserved UTXOs.
+    ///
+    /// Called when a round ends (success or failure) to make fee UTXOs
+    /// available for the next round. Spent UTXOs will be filtered out
+    /// naturally by BDK's `list_unspent()` on the next `select_utxos`.
+    pub async fn release_all_utxos(&self) {
+        let mut state = self.state.write().await;
+        let count = state.reserved_utxos.len();
+        state.reserved_utxos.clear();
+        if count > 0 {
+            tracing::info!(released = count, "Released all reserved UTXOs");
+        }
+    }
+
     /// Get unreserved UTXOs for coin selection
     pub async fn get_unreserved_utxos(
         &self,

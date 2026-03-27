@@ -135,6 +135,12 @@ pub trait WalletService: Send + Sync {
         ))
     }
 
+    /// Release all reserved UTXOs.
+    ///
+    /// Called when a round ends (success or failure) so fee UTXOs
+    /// become available for the next round.
+    async fn release_all_utxos(&self) {}
+
     /// Manually sign the fee input (last input) in a PSBT.
     ///
     /// This is a fallback for when BDK's sign() doesn't work. It requires
