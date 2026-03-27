@@ -2375,7 +2375,10 @@ async fn test_ban_protocol_violations() {
     // Verify Eve is now banned — settle and send_offchain should fail.
     let eve_settle = eve.settle(&eve_pubkey, 10_000).await;
     assert!(eve_settle.is_err(), "banned Eve cannot settle");
-    eprintln!("Eve settle after violation: err={}", eve_settle.unwrap_err());
+    eprintln!(
+        "Eve settle after violation: err={}",
+        eve_settle.unwrap_err()
+    );
 
     let eve_send = eve
         .send_offchain(
