@@ -725,7 +725,7 @@ impl ArkService {
                                     Ok(taproot_info) => {
                                         psbt.inputs[idx].tap_internal_key =
                                             Some(taproot_info.internal_key());
-                                        for (script_ver, _) in taproot_info.script_map() {
+                                        for script_ver in taproot_info.script_map().keys() {
                                             if let Some(cb) = taproot_info.control_block(script_ver)
                                             {
                                                 psbt.inputs[idx]
