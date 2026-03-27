@@ -587,8 +587,26 @@ impl LocalTxBuilder {
             if !psbt.inputs[i].tap_script_sigs.is_empty() {
                 let mut witness = Witness::default();
 
-                // Find the leaf script and control block from tap_scripts
-                let leaf_info = psbt.inputs[i].tap_scripts.iter().next();
+                // Find the leaf script and control block from tap_scripts that
+                // matches one of the tap_script_sigs (i.e. the leaf that was signed).
+                // tap_script_sigs keys are (pubkey, leaf_hash); we need to find the
+                // tap_scripts entry whose TapLeafHash matches a sig entry.
+                let leaf_info = {
+                    use bitcoin::taproot::{LeafVersion, TapLeafHash};
+                    let signed_leaf_hashes: std::collections::HashSet<TapLeafHash> = psbt.inputs[i]
+                        .tap_script_sigs
+                        .keys()
+                        .map(|(_, lh)| *lh)
+                        .collect();
+                    psbt.inputs[i]
+                        .tap_scripts
+                        .iter()
+                        .find(|(_, (script, version))| {
+                            let lh = TapLeafHash::from_script(script, *version);
+                            signed_leaf_hashes.contains(&lh)
+                        })
+                        .or_else(|| psbt.inputs[i].tap_scripts.iter().next())
+                };
 
                 if let Some((_control_block, (script, _version))) = &leaf_info {
                     // Parse pubkeys from the script to determine signature order.
