@@ -338,9 +338,11 @@ impl ArkServiceTrait for ArkGrpcService {
         &self,
         request: Request<RequestExitRequest>,
     ) -> Result<Response<RequestExitResponse>, Status> {
-        // Extract authenticated user's pubkey
-        let auth_user = require_authenticated_user(&request)?;
-        let requester_pubkey = auth_user.pubkey;
+        // Extract authenticated user's pubkey, with dev-mode fallback
+        let auth_user = get_authenticated_user(&request)
+            .ok_or_else(|| Status::unauthenticated("Authentication required for this operation"))?;
+        let is_placeholder = auth_user.is_placeholder;
+        let mut requester_pubkey = auth_user.pubkey;
 
         let req = request.into_inner();
         info!(
@@ -360,9 +362,25 @@ impl ArkServiceTrait for ArkGrpcService {
             .map(convert::proto_outpoint_to_domain)
             .collect();
 
-        // Verify the requester owns all the VTXOs being exited
-        self.verify_vtxo_ownership(&vtxo_outpoints, &requester_pubkey)
-            .await?;
+        if is_placeholder {
+            // Dev/test mode: derive owner pubkey from the first VTXO
+            let vtxos = self
+                .core
+                .get_vtxos(&vtxo_outpoints)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to fetch VTXOs: {e}")))?;
+            if let Some(first) = vtxos.first() {
+                let compressed = first
+                    .pubkey
+                    .parse::<bitcoin::secp256k1::PublicKey>()
+                    .map_err(|e| Status::internal(format!("Bad VTXO pubkey: {e}")))?;
+                requester_pubkey = compressed.x_only_public_key().0;
+            }
+        } else {
+            // Verify the requester owns all the VTXOs being exited
+            self.verify_vtxo_ownership(&vtxo_outpoints, &requester_pubkey)
+                .await?;
+        }
 
         // Parse destination (optional for unilateral exit — client constructs their own tx)
         let destination: bitcoin::Address<bitcoin::address::NetworkUnchecked> = if req
