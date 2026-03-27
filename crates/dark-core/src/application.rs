@@ -3008,6 +3008,29 @@ impl ArkService {
         //    Must run BEFORE wallet/BDK signing so tap_scripts and
         //    tap_internal_key metadata is still intact for the ASP
         //    signer to inspect.
+
+        // Debug: log merged PSBT state BEFORE ASP signing
+        for (i, inp) in merged.inputs.iter().enumerate() {
+            let sigs_info: Vec<_> = inp
+                .tap_script_sigs
+                .keys()
+                .map(|(pk, lh)| {
+                    format!(
+                        "pk={},lh={}",
+                        hex::encode(pk.serialize()),
+                        hex::encode(lh.as_byte_array())
+                    )
+                })
+                .collect();
+            info!(
+                input_idx = i,
+                tap_script_sigs_count = inp.tap_script_sigs.len(),
+                tap_script_sigs_keys = ?sigs_info,
+                tap_scripts_count = inp.tap_scripts.len(),
+                "Merged PSBT input BEFORE ASP signing"
+            );
+        }
+
         let after_asp = match self.signer.sign_transaction(&merged_b64_pre, false).await {
             Ok(s) => {
                 info!("ASP co-signing of merged PSBT succeeded");
@@ -3027,35 +3050,108 @@ impl ArkService {
                 .decode(&after_asp)
                 .or_else(|_| hex::decode(&after_asp))
                 .ok();
+            info!(
+                asp_decode_ok = bytes.is_some(),
+                asp_bytes_len = bytes.as_ref().map(|b| b.len()).unwrap_or(0),
+                "ASP PSBT decode attempt"
+            );
             if let Some(bytes) = bytes {
-                if let Ok(asp_psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
-                    let asp_outpoints: std::collections::HashMap<_, _> = asp_psbt
-                        .unsigned_tx
-                        .input
-                        .iter()
-                        .enumerate()
-                        .map(|(i, inp)| (inp.previous_output, i))
-                        .collect();
+                match bitcoin::psbt::Psbt::deserialize(&bytes) {
+                    Ok(asp_psbt) => {
+                        info!(
+                            asp_psbt_inputs = asp_psbt.inputs.len(),
+                            "ASP PSBT parsed successfully"
+                        );
 
-                    for (merged_idx, merged_txin) in merged.unsigned_tx.input.iter().enumerate() {
-                        if let Some(&asp_idx) = asp_outpoints.get(&merged_txin.previous_output) {
-                            if let Some(asp_input) = asp_psbt.inputs.get(asp_idx) {
-                                if merged_idx < merged.inputs.len() {
-                                    // Copy taproot script spend sigs from ASP
-                                    for (key, sig) in &asp_input.tap_script_sigs {
-                                        merged.inputs[merged_idx]
-                                            .tap_script_sigs
-                                            .entry(*key)
-                                            .or_insert(*sig);
-                                    }
-                                    // Copy taproot key spend sig if present
-                                    if merged.inputs[merged_idx].tap_key_sig.is_none() {
-                                        merged.inputs[merged_idx].tap_key_sig =
-                                            asp_input.tap_key_sig;
+                        // Log ASP PSBT tap_script_sigs for each input
+                        for (i, inp) in asp_psbt.inputs.iter().enumerate() {
+                            let sigs_info: Vec<_> = inp
+                                .tap_script_sigs
+                                .keys()
+                                .map(|(pk, lh)| {
+                                    format!(
+                                        "pk={},lh={}",
+                                        hex::encode(pk.serialize()),
+                                        hex::encode(lh.as_byte_array())
+                                    )
+                                })
+                                .collect();
+                            info!(
+                                input_idx = i,
+                                tap_script_sigs_count = inp.tap_script_sigs.len(),
+                                tap_script_sigs_keys = ?sigs_info,
+                                "ASP PSBT input tap_script_sigs"
+                            );
+                        }
+
+                        let asp_outpoints: std::collections::HashMap<_, _> = asp_psbt
+                            .unsigned_tx
+                            .input
+                            .iter()
+                            .enumerate()
+                            .map(|(i, inp)| (inp.previous_output, i))
+                            .collect();
+
+                        for (merged_idx, merged_txin) in merged.unsigned_tx.input.iter().enumerate()
+                        {
+                            let outpoint_found =
+                                asp_outpoints.get(&merged_txin.previous_output).copied();
+                            info!(
+                                merged_idx = merged_idx,
+                                outpoint = %merged_txin.previous_output,
+                                asp_idx = ?outpoint_found,
+                                "ASP merge: outpoint lookup"
+                            );
+
+                            if let Some(asp_idx) = outpoint_found {
+                                if let Some(asp_input) = asp_psbt.inputs.get(asp_idx) {
+                                    if merged_idx < merged.inputs.len() {
+                                        let before_count =
+                                            merged.inputs[merged_idx].tap_script_sigs.len();
+
+                                        // Copy taproot script spend sigs from ASP
+                                        for (key, sig) in &asp_input.tap_script_sigs {
+                                            let key_hex = format!(
+                                                "pk={},lh={}",
+                                                hex::encode(key.0.serialize()),
+                                                hex::encode(key.1.as_byte_array())
+                                            );
+                                            let already_exists = merged.inputs[merged_idx]
+                                                .tap_script_sigs
+                                                .contains_key(key);
+                                            info!(
+                                                merged_idx = merged_idx,
+                                                key = %key_hex,
+                                                already_exists = already_exists,
+                                                "ASP merge: inserting tap_script_sig"
+                                            );
+                                            merged.inputs[merged_idx]
+                                                .tap_script_sigs
+                                                .entry(*key)
+                                                .or_insert(*sig);
+                                        }
+
+                                        let after_count =
+                                            merged.inputs[merged_idx].tap_script_sigs.len();
+                                        info!(
+                                            merged_idx = merged_idx,
+                                            before = before_count,
+                                            after = after_count,
+                                            "ASP merge: tap_script_sigs count"
+                                        );
+
+                                        // Copy taproot key spend sig if present
+                                        if merged.inputs[merged_idx].tap_key_sig.is_none() {
+                                            merged.inputs[merged_idx].tap_key_sig =
+                                                asp_input.tap_key_sig;
+                                        }
                                     }
                                 }
                             }
                         }
+                    }
+                    Err(e) => {
+                        info!(error = %e, "ASP PSBT deserialize failed");
                     }
                 }
             }
