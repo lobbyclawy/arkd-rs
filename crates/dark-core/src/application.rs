@@ -653,8 +653,124 @@ impl ArkService {
             }
         };
 
-        // Use the fee-augmented PSBT from here on
-        let result_commitment_tx = commitment_psbt_with_fee;
+        // Use the fee-augmented PSBT from here on.
+        // Enrich boarding PSBT inputs with tap_scripts + tap_internal_key + witness_utxo
+        // so the Rust client can sign them via the cooperative script leaf (script-path spend).
+        let result_commitment_tx = {
+            use base64::Engine;
+
+            // Build outpoint -> (user_xonly, amount) map from intent inputs + boarding repo.
+            let mut boarding_info: std::collections::HashMap<
+                String,
+                (bitcoin::XOnlyPublicKey, u64),
+            > = std::collections::HashMap::new();
+
+            for intent in &intents {
+                for inp in &intent.inputs {
+                    if inp.amount > 0 && !inp.outpoint.txid.is_empty() {
+                        let xonly = hex::decode(&inp.pubkey).ok().and_then(|b| {
+                            if b.len() == 33 {
+                                bitcoin::XOnlyPublicKey::from_slice(&b[1..]).ok()
+                            } else {
+                                bitcoin::XOnlyPublicKey::from_slice(&b).ok()
+                            }
+                        });
+                        let outpoint_key = format!("{}:{}", inp.outpoint.txid, inp.outpoint.vout);
+                        let is_in_boarding = boarding_inputs.iter().any(|b| {
+                            format!("{}:{}", b.outpoint.txid, b.outpoint.vout) == outpoint_key
+                        });
+                        if let Some(xk) = xonly {
+                            if is_in_boarding {
+                                boarding_info.insert(outpoint_key, (xk, inp.amount));
+                            }
+                        }
+                    }
+                }
+            }
+            for (bi, bt) in boarding_inputs.iter().zip(boarding_txs.iter()) {
+                let key = format!("{}:{}", bi.outpoint.txid, bi.outpoint.vout);
+                boarding_info
+                    .entry(key)
+                    .or_insert((bt.recipient_pubkey, bi.amount));
+            }
+
+            // signer_pubkey is already an XOnlyPublicKey (ASP key).
+            let asp_xonly = signer_pubkey;
+
+            if !boarding_info.is_empty() {
+                if let Ok(bytes) =
+                    base64::engine::general_purpose::STANDARD.decode(&commitment_psbt_with_fee)
+                {
+                    if let Ok(mut psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
+                        let csv_delay = self.config.boarding_exit_delay.min(u16::MAX as u32) as u16;
+                        let network = match self.config.network.as_str() {
+                            "mainnet" | "bitcoin" => bitcoin::Network::Bitcoin,
+                            "testnet" => bitcoin::Network::Testnet,
+                            "signet" => bitcoin::Network::Signet,
+                            _ => bitcoin::Network::Regtest,
+                        };
+
+                        for (idx, input) in psbt.unsigned_tx.input.iter().enumerate() {
+                            let op_key = format!(
+                                "{}:{}",
+                                input.previous_output.txid, input.previous_output.vout
+                            );
+                            if let Some((user_xonly, amount)) = boarding_info.get(&op_key) {
+                                if !psbt.inputs[idx].tap_scripts.is_empty() {
+                                    continue;
+                                }
+                                match dark_bitcoin::build_vtxo_taproot(
+                                    user_xonly, &asp_xonly, csv_delay,
+                                ) {
+                                    Ok(taproot_info) => {
+                                        psbt.inputs[idx].tap_internal_key =
+                                            Some(taproot_info.internal_key());
+                                        for (script_ver, _) in taproot_info.script_map() {
+                                            if let Some(cb) = taproot_info.control_block(script_ver)
+                                            {
+                                                psbt.inputs[idx]
+                                                    .tap_scripts
+                                                    .insert(cb, script_ver.clone());
+                                            }
+                                        }
+                                        if psbt.inputs[idx].witness_utxo.is_none() {
+                                            let addr = bitcoin::Address::p2tr_tweaked(
+                                                taproot_info.output_key(),
+                                                network,
+                                            );
+                                            psbt.inputs[idx].witness_utxo = Some(bitcoin::TxOut {
+                                                value: bitcoin::Amount::from_sat(*amount),
+                                                script_pubkey: addr.script_pubkey(),
+                                            });
+                                        }
+                                        info!(
+                                            input_idx = idx,
+                                            outpoint = %op_key,
+                                            "Populated tap_scripts for boarding input"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            error = %e,
+                                            outpoint = %op_key,
+                                            "Failed to build boarding taproot"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        base64::engine::general_purpose::STANDARD.encode(psbt.serialize())
+                    } else {
+                        commitment_psbt_with_fee
+                    }
+                } else {
+                    commitment_psbt_with_fee
+                }
+            } else {
+                commitment_psbt_with_fee
+            }
+        };
 
         // Extract and store the fee input signature from the BDK-signed PSBT.
         // This signature may be stripped when Go SDK clients round-trip the PSBT,
