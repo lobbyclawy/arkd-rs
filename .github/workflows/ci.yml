@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -148,6 +152,7 @@ jobs:
     name: Build Release
     runs-on: ubuntu-latest
     needs: [test, clippy, fmt]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Free disk space
         run: |

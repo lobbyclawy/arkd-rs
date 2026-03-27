@@ -9,6 +9,10 @@ on:
     - cron: "0 3 * * *"  # 3 AM UTC nightly
   workflow_dispatch:
 
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
