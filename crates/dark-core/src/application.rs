@@ -1684,12 +1684,23 @@ impl ArkService {
         }
 
         let total_amount: u64 = vtxos.iter().map(|v| v.amount).sum();
+        let vtxo_ids = request.vtxo_ids;
         let exit = Exit::collaborative(
-            request.vtxo_ids,
+            vtxo_ids.clone(),
             request.destination,
             requester_pubkey,
             bitcoin::Amount::from_sat(total_amount),
         );
+
+        // Mark input VTXOs as spent so they no longer appear as spendable
+        let exit_id_str = exit.id.to_string();
+        let spend_list: Vec<(VtxoOutpoint, String)> = vtxo_ids
+            .iter()
+            .map(|id| (id.clone(), exit_id_str.clone()))
+            .collect();
+        self.vtxo_repo
+            .spend_vtxos(&spend_list, &exit_id_str)
+            .await?;
 
         self.exits.write().await.insert(exit.id, exit.clone());
         info!(exit_id = %exit.id, amount = total_amount, "Collaborative exit requested");
@@ -1729,12 +1740,18 @@ impl ArkService {
         let claimable_height = block_time.height as u32 + delay_blocks;
 
         let exit = Exit::unilateral(
-            request.vtxo_id,
+            request.vtxo_id.clone(),
             request.destination,
             requester_pubkey,
             bitcoin::Amount::from_sat(vtxo.amount),
             claimable_height,
         );
+
+        // Mark input VTXO as spent so it no longer appears as spendable
+        let exit_id_str = exit.id.to_string();
+        self.vtxo_repo
+            .spend_vtxos(&[(request.vtxo_id, exit_id_str.clone())], &exit_id_str)
+            .await?;
 
         self.exits.write().await.insert(exit.id, exit.clone());
         info!(
