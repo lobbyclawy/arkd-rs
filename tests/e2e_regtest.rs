@@ -2413,6 +2413,12 @@ async fn test_ban_rejected_after_violation() {
     let info = alice.get_info().await.expect("GetInfo");
     assert_eq!(info.network, "regtest");
 
+    // Wait for any leftover intents from the previous test to drain from the
+    // server before Alice registers. Without this, Alice can end up in the same
+    // round as a still-registered Eve from test_ban_protocol_violations, which
+    // causes a signing timeout that fails Alice's settle.
+    tokio::time::sleep(Duration::from_secs(15)).await;
+
     let alice_batch = fund_and_settle(&mut alice, &alice_pubkey, 21_000, &alice_sk).await;
     assert!(!alice_batch.commitment_txid.starts_with("pending:"));
     tokio::time::sleep(Duration::from_secs(2)).await;
