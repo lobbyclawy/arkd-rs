@@ -124,6 +124,7 @@ impl ArkClient {
             network: info.network,
             session_duration: info.session_duration as u32,
             unilateral_exit_delay: info.unilateral_exit_delay as u32,
+            boarding_exit_delay: info.boarding_exit_delay as u32,
             version: info.version,
             dust: info.dust as u64,
             vtxo_min_amount: info.vtxo_min_amount as u64,
@@ -322,14 +323,33 @@ impl ArkClient {
                 bitcoin::secp256k1::XOnlyPublicKey::from_slice(x_bytes).ok()
             });
             match xonly {
-                Some(xpk) => {
-                    let builder = bitcoin::taproot::TaprootBuilder::new();
-                    let spend_info = builder
-                        .finalize(&secp, xpk)
-                        .expect("valid taproot spend info");
-                    let output_key = spend_info.output_key();
-                    let address = bitcoin::Address::p2tr_tweaked(output_key, network);
-                    address.to_string()
+                Some(user_xpk) => {
+                    // Boarding address uses the same taproot structure as the server:
+                    // unspendable internal key + 2 leaves (CSV exit + cooperative).
+                    // This must match what the server injects as witness_utxo in finalize_round().
+                    let asp_xonly = parse_xonly_pubkey(&info.forfeit_pubkey).ok();
+                    let csv_delay = info.boarding_exit_delay.min(u16::MAX as u32) as u16;
+                    if let Some(asp_xpk) = asp_xonly {
+                        match dark_bitcoin::build_vtxo_taproot(&user_xpk, &asp_xpk, csv_delay) {
+                            Ok(taproot_info) => {
+                                let address = bitcoin::Address::p2tr_tweaked(
+                                    taproot_info.output_key(),
+                                    network,
+                                );
+                                address.to_string()
+                            }
+                            Err(_) => format!("bc1p_boarding_{}", &pubkey[..pubkey.len().min(32)]),
+                        }
+                    } else {
+                        // Fallback: key-path only (less correct but won't crash)
+                        let builder = bitcoin::taproot::TaprootBuilder::new();
+                        let spend_info = builder
+                            .finalize(&secp, user_xpk)
+                            .expect("valid taproot spend info");
+                        let output_key = spend_info.output_key();
+                        let address = bitcoin::Address::p2tr_tweaked(output_key, network);
+                        address.to_string()
+                    }
                 }
                 None => format!("bc1p_boarding_{}", &pubkey[..pubkey.len().min(32)]),
             }

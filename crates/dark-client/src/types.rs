@@ -12,6 +12,7 @@ pub struct ServerInfo {
     pub network: String,
     pub session_duration: u32,
     pub unilateral_exit_delay: u32,
+    pub boarding_exit_delay: u32,
     pub version: String,
     pub dust: u64,
     pub vtxo_min_amount: u64,
