@@ -715,10 +715,34 @@ async fn fund_and_settle(
     let utxos = get_boarding_utxos(boarding_addr).await;
     assert!(!utxos.is_empty(), "no confirmed UTXOs at boarding address");
 
-    client
-        .settle_with_key_and_boarding(pubkey, amount_sats, secret_key, &utxos)
-        .await
-        .expect("settle_with_key_and_boarding failed")
+    // Retry up to 3 times in case a round fails due to a banned/misbehaving
+    // participant from a previous test sharing the same server instance.
+    let mut last_err = None;
+    for attempt in 1..=3 {
+        match client
+            .settle_with_key_and_boarding(pubkey, amount_sats, secret_key, &utxos)
+            .await
+        {
+            Ok(result) => return result,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("Batch failed") || msg.contains("signing timeout") {
+                    eprintln!(
+                        "  settle attempt {}/3 got batch failure, retrying: {}",
+                        attempt, msg
+                    );
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    last_err = Some(e);
+                } else {
+                    panic!("settle_with_key_and_boarding failed: {}", e);
+                }
+            }
+        }
+    }
+    panic!(
+        "settle_with_key_and_boarding failed after 3 attempts: {}",
+        last_err.unwrap()
+    )
 }
 
 /// Fund the regtest wallet and ensure 101+ confirmations for coinbase maturity.
