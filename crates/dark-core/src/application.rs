@@ -3018,7 +3018,7 @@ impl ArkService {
                     format!(
                         "pk={},lh={}",
                         hex::encode(pk.serialize()),
-                        hex::encode(lh.as_byte_array())
+                        hex::encode(lh.to_byte_array())
                     )
                 })
                 .collect();
@@ -3072,7 +3072,7 @@ impl ArkService {
                                     format!(
                                         "pk={},lh={}",
                                         hex::encode(pk.serialize()),
-                                        hex::encode(lh.as_byte_array())
+                                        hex::encode(lh.to_byte_array())
                                     )
                                 })
                                 .collect();
@@ -3114,7 +3114,7 @@ impl ArkService {
                                             let key_hex = format!(
                                                 "pk={},lh={}",
                                                 hex::encode(key.0.serialize()),
-                                                hex::encode(key.1.as_byte_array())
+                                                hex::encode(key.1.to_byte_array())
                                             );
                                             let already_exists = merged.inputs[merged_idx]
                                                 .tap_script_sigs
