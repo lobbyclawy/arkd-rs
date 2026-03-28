@@ -174,6 +174,10 @@ async fn mine_blocks(n: u32) {
 }
 
 /// Broadcast a raw transaction hex via Esplora, return the txid.
+///
+/// If Esplora rejects the tx due to "min relay fee not met" (zero-fee v3
+/// tree transactions), falls back to `sendrawtransaction` via Bitcoin Core
+/// RPC with `maxfeerate=0`.
 async fn broadcast_tx_hex(tx_hex: &str) -> String {
     let url = format!("{}/tx", esplora_url());
     let client = reqwest::Client::new();
@@ -186,8 +190,57 @@ async fn broadcast_tx_hex(tx_hex: &str) -> String {
         .expect("broadcast failed");
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
-    assert!(status.is_success(), "broadcast failed ({status}): {body}");
-    body.trim().to_string()
+
+    if status.is_success() {
+        return body.trim().to_string();
+    }
+
+    // Fall back to Bitcoin Core RPC for zero-fee v3 transactions
+    if body.contains("min relay fee not met") {
+        return broadcast_tx_hex_rpc(tx_hex).await;
+    }
+
+    panic!("broadcast failed ({status}): {body}");
+}
+
+/// Broadcast a raw transaction via Bitcoin Core RPC with `maxfeerate=0`,
+/// allowing zero-fee transactions (e.g. v3 tree transactions).
+async fn broadcast_tx_hex_rpc(tx_hex: &str) -> String {
+    let url = bitcoin_rpc_url();
+    let parsed = url::Url::parse(&url).expect("valid RPC URL");
+    let user = parsed.username().to_string();
+    let pass = parsed.password().unwrap_or("").to_string();
+
+    let client = reqwest::Client::new();
+    let resp: serde_json::Value = client
+        .post(url.as_str())
+        .basic_auth(&user, Some(&pass))
+        .json(&serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": "broadcast",
+            "method": "sendrawtransaction",
+            "params": [tx_hex, 0]
+        }))
+        .send()
+        .await
+        .expect("sendrawtransaction request failed")
+        .json()
+        .await
+        .expect("sendrawtransaction json parse failed");
+
+    if let Some(err) = resp.get("error") {
+        if !err.is_null() {
+            panic!(
+                "sendrawtransaction RPC error: {}",
+                serde_json::to_string(err).unwrap_or_default()
+            );
+        }
+    }
+
+    resp["result"]
+        .as_str()
+        .expect("sendrawtransaction result should be txid string")
+        .to_string()
 }
 
 /// Send `amount_btc` from the regtest wallet to `address` via `sendtoaddress`.
