@@ -36,16 +36,25 @@ jobs:
           # Ark tree transactions have zero fees (v3/CPFP design).
           # Set minrelaytxfee=0 so sendrawtransaction accepts them.
           CONF=$(docker exec bitcoin find / -name bitcoin.conf 2>/dev/null | head -1)
+          echo "Found bitcoin.conf at: ${CONF}"
           docker exec bitcoin sh -c "echo 'minrelaytxfee=0' >> ${CONF}"
           docker restart bitcoin
-          # Wait for bitcoind to be ready
+          # Wait for bitcoind RPC to be ready
           for i in $(seq 1 30); do
             if docker exec bitcoin bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 getblockchaininfo >/dev/null 2>&1; then
-              echo "bitcoind ready"
+              echo "bitcoind ready after ${i}s"
               break
             fi
             sleep 1
           done
+          # Reload the default wallet (it was auto-created by nigiri on first start)
+          docker exec bitcoin bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 loadwallet "" 2>/dev/null || true
+          # Restart electrs so it reconnects to bitcoind
+          docker restart electrs 2>/dev/null || true
+          docker restart esplora 2>/dev/null || true
+          sleep 5
+          # Verify relay fee setting
+          docker exec bitcoin bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 getnetworkinfo | grep -i relay
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
