@@ -89,6 +89,17 @@ impl SignerService for LocalSigner {
         let num_inputs = psbt.inputs.len();
         let untweaked_keypair = Keypair::from_secret_key(&self.secp, &self.secret_key);
 
+        // Debug: log input state before signing
+        for (i, inp) in psbt.inputs.iter().enumerate() {
+            tracing::info!(
+                idx = i,
+                tap_scripts = inp.tap_scripts.len(),
+                tap_script_sigs = inp.tap_script_sigs.len(),
+                has_witness_utxo = inp.witness_utxo.is_some(),
+                "ASP signer: input state"
+            );
+        }
+
         for idx in 0..num_inputs {
             if !psbt.inputs[idx].tap_scripts.is_empty() {
                 // Script-path signing.
@@ -125,8 +136,18 @@ impl SignerService for LocalSigner {
                     .or_else(|| psbt.inputs[idx].tap_scripts.iter().next());
 
                 let (leaf_script, leaf_version) = match leaf_entry {
-                    Some((_, (s, v))) => (s.clone(), *v),
-                    None => continue,
+                    Some((_, (s, v))) => {
+                        tracing::info!(
+                            idx,
+                            leaf_len = s.as_bytes().len(),
+                            "ASP signer: found leaf for script-path signing"
+                        );
+                        (s.clone(), *v)
+                    }
+                    None => {
+                        tracing::info!(idx, "ASP signer: no matching leaf found, skipping");
+                        continue;
+                    }
                 };
 
                 let leaf_hash =
@@ -159,9 +180,19 @@ impl SignerService for LocalSigner {
                 };
 
                 let (xonly, _) = untweaked_keypair.x_only_public_key();
+                tracing::info!(
+                    idx,
+                    xonly = %hex::encode(xonly.serialize()),
+                    "ASP signer: inserting tap_script_sig"
+                );
                 psbt.inputs[idx]
                     .tap_script_sigs
                     .insert((xonly, leaf_hash), taproot_sig);
+                tracing::info!(
+                    idx,
+                    tap_script_sigs = psbt.inputs[idx].tap_script_sigs.len(),
+                    "ASP signer: tap_script_sigs after insert"
+                );
             } else {
                 // Key-path signing — only sign if this input doesn't already have
                 // a tap_key_sig from another signer (e.g. BDK wallet for server fee input).

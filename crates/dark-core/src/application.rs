@@ -3025,13 +3025,15 @@ impl ArkService {
                                 if merged_idx < merged.inputs.len() {
                                     // Copy taproot script spend sigs from ASP
                                     let asp_sigs_count = asp_input.tap_script_sigs.len();
-                                    if asp_sigs_count > 0 {
-                                        info!(
-                                            merged_idx,
-                                            asp_sigs_count,
-                                            "Merging ASP tap_script_sigs into merged PSBT"
-                                        );
-                                    }
+                                    let asp_tap_scripts_count = asp_input.tap_scripts.len();
+                                    info!(
+                                        merged_idx,
+                                        asp_idx,
+                                        asp_sigs_count,
+                                        asp_tap_scripts_count,
+                                        asp_has_witness_utxo = asp_input.witness_utxo.is_some(),
+                                        "ASP PSBT input state after signing"
+                                    );
                                     for (key, sig) in &asp_input.tap_script_sigs {
                                         let inserted = merged.inputs[merged_idx]
                                             .tap_script_sigs
