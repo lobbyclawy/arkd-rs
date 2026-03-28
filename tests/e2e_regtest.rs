@@ -3819,6 +3819,9 @@ async fn test_sweep_unrolled_batch() {
         .expect("create charlie note");
     let mike_note = admin.create_note(21_000).await.expect("create mike note");
 
+    // Wait for a round to enter registration stage before redeeming notes
+    tokio::time::sleep(Duration::from_secs(6)).await;
+
     // All 4 redeem notes in the same batch
     let (alice_res, bob_res, charlie_res, mike_res) = tokio::join!(
         alice.redeem_notes(vec![alice_note], &alice_pubkey),
@@ -3838,10 +3841,7 @@ async fn test_sweep_unrolled_batch() {
     assert_eq!(alice_txid, mike_txid, "alice and mike in same batch");
     eprintln!("✅ All 4 redeemed in batch: {}", alice_txid);
 
-    // Fund Alice's onchain address for unroll fees
-    let alice_addrs = alice.receive(&alice_pubkey).await.expect("alice receive");
-    let alice_onchain = &alice_addrs.0;
-    faucet_fund(alice_onchain, 0.01).await;
+    // Mine to confirm the commitment tx
     mine_blocks(6).await;
     tokio::time::sleep(Duration::from_secs(5)).await;
 
@@ -3849,13 +3849,13 @@ async fn test_sweep_unrolled_batch() {
     mine_blocks(1).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // First unroll — splits root batch in two
+    // First unroll — splits root batch in two (use CPFP for 0-fee v3 tree txs)
     let unroll1 = alice.unroll(&alice_pubkey).await;
     match &unroll1 {
         Ok(txs) => {
             eprintln!("✅ First unroll: {} txs", txs.len());
             for tx_hex in txs {
-                let txid = broadcast_tx_hex(tx_hex).await;
+                let txid = broadcast_tree_tx(tx_hex).await;
                 eprintln!("  broadcast: {}", txid);
             }
         }
@@ -3875,7 +3875,7 @@ async fn test_sweep_unrolled_batch() {
         Ok(txs) => {
             eprintln!("✅ Second unroll: {} txs", txs.len());
             for tx_hex in txs {
-                let txid = broadcast_tx_hex(tx_hex).await;
+                let txid = broadcast_tree_tx(tx_hex).await;
                 eprintln!("  broadcast: {}", txid);
             }
         }
