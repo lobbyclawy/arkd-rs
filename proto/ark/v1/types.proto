@@ -29,6 +29,13 @@ message Vtxo {
   string spent_by = 11;
   string settled_by = 12;
   string ark_txid = 13;
+  repeated VtxoAsset assets = 14;
+}
+
+// VtxoAsset represents an asset embedded in a VTXO.
+message VtxoAsset {
+  string asset_id = 1;
+  uint64 amount = 2;
 }
 
 // Tapscripts holds a list of taproot scripts.

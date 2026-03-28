@@ -161,7 +161,14 @@ impl ArkClient {
                 is_unrolled: v.is_unrolled,
                 spent_by: v.spent_by,
                 ark_txid: v.ark_txid,
-                assets: vec![],
+                assets: v
+                    .assets
+                    .iter()
+                    .map(|a| crate::types::Asset {
+                        asset_id: a.asset_id.clone(),
+                        amount: a.amount,
+                    })
+                    .collect(),
             });
         }
 
@@ -180,7 +187,14 @@ impl ArkClient {
                 is_unrolled: v.is_unrolled,
                 spent_by: v.spent_by,
                 ark_txid: v.ark_txid,
-                assets: vec![],
+                assets: v
+                    .assets
+                    .iter()
+                    .map(|a| crate::types::Asset {
+                        asset_id: a.asset_id.clone(),
+                        amount: a.amount,
+                    })
+                    .collect(),
             });
         }
 
@@ -1259,20 +1273,41 @@ impl ArkClient {
         if _supply == 0 {
             return Err(ClientError::Validation("amount must be > 0".into()));
         }
+
+        // Encode control_asset option into the name field as a tag for the server:
+        // "control:new:<amount>" or "control:existing:<id>"
+        let name = match &_control_asset {
+            Some(crate::types::ControlAssetOption::New(n)) => {
+                format!("control:new:{}", n.amount)
+            }
+            Some(crate::types::ControlAssetOption::Existing(e)) => {
+                format!("control:existing:{}", e.id)
+            }
+            None => String::new(),
+        };
+
         let client = self.require_client()?;
         let response = client
             .issue_asset(IssueAssetRequest {
                 pubkey: String::new(),
                 amount: _supply,
-                name: String::new(),
+                name,
                 ticker: String::new(),
             })
             .await
             .map_err(|e| ClientError::Rpc(format!("IssueAsset failed: {}", e)))?;
         let inner = response.into_inner();
+
+        // Use issued_asset_ids if present, otherwise fall back to single asset_id
+        let issued_assets = if inner.issued_asset_ids.is_empty() {
+            vec![inner.asset_id]
+        } else {
+            inner.issued_asset_ids
+        };
+
         Ok(crate::types::IssueAssetResult {
             txid: inner.txid,
-            issued_assets: vec![inner.asset_id],
+            issued_assets,
         })
     }
 
