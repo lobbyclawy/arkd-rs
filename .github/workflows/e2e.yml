@@ -31,39 +31,6 @@ jobs:
         with:
           use_liquid: false
 
-      - name: Allow zero-fee relay (for v3 tree txs)
-        run: |
-          # Ark tree transactions have zero fees (v3/CPFP design).
-          # Patch bitcoin.conf and restart to accept zero-fee txs.
-          # Find the host-side volume path
-          BITCOIN_VOL=$(docker inspect bitcoin --format '{{ range .Mounts }}{{ if eq .Destination "/data/.bitcoin" }}{{ .Source }}{{ end }}{{ end }}')
-          echo "Bitcoin volume: $BITCOIN_VOL"
-          echo "Current bitcoin.conf:"
-          cat "$BITCOIN_VOL/bitcoin.conf"
-          # Append minrelaytxfee=0 under [regtest] section
-          # Replace the [regtest] section to include minrelaytxfee=0
-          sed -i '/^\[regtest\]/a minrelaytxfee=0.00000000' "$BITCOIN_VOL/bitcoin.conf"
-          echo "Updated bitcoin.conf:"
-          cat "$BITCOIN_VOL/bitcoin.conf"
-          # Restart the container to pick up the config change
-          docker restart bitcoin
-          # Wait for bitcoind RPC to be ready
-          for i in $(seq 1 30); do
-            if docker exec bitcoin bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 getblockchaininfo >/dev/null 2>&1; then
-              echo "bitcoind ready after ${i}s"
-              break
-            fi
-            sleep 1
-          done
-          # Reload wallet
-          docker exec bitcoin bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 createwallet "" 2>/dev/null || \
-            docker exec bitcoin bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 loadwallet "" 2>/dev/null || true
-          # Verify the setting took effect
-          docker exec bitcoin bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 getnetworkinfo | grep -i relayfee
-          # Restart electrs to reconnect
-          docker restart electrs chopsticks 2>/dev/null || true
-          sleep 5
-
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 

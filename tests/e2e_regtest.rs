@@ -203,8 +203,9 @@ async fn broadcast_tx_hex(tx_hex: &str) -> String {
     panic!("broadcast failed ({status}): {body}");
 }
 
-/// Broadcast a raw transaction via Bitcoin Core RPC with `maxfeerate=0`,
-/// allowing zero-fee transactions (e.g. v3 tree transactions).
+/// Mine a zero-fee transaction directly into a block via `generateblock` RPC.
+/// This bypasses mempool relay-fee checks entirely, which is needed for v3
+/// tree transactions that have zero fees by design (CPFP in production).
 async fn broadcast_tx_hex_rpc(tx_hex: &str) -> String {
     let url = bitcoin_rpc_url();
     let parsed = url::Url::parse(&url).expect("valid RPC URL");
@@ -212,35 +213,61 @@ async fn broadcast_tx_hex_rpc(tx_hex: &str) -> String {
     let pass = parsed.password().unwrap_or("").to_string();
 
     let client = reqwest::Client::new();
-    let resp: serde_json::Value = client
+
+    // Get a mining address
+    let addr_resp: serde_json::Value = client
         .post(url.as_str())
         .basic_auth(&user, Some(&pass))
         .json(&serde_json::json!({
             "jsonrpc": "1.0",
-            "id": "broadcast",
-            "method": "sendrawtransaction",
-            "params": [tx_hex, 0]
+            "id": "addr",
+            "method": "getnewaddress",
+            "params": []
         }))
         .send()
         .await
-        .expect("sendrawtransaction request failed")
+        .expect("getnewaddress request")
         .json()
         .await
-        .expect("sendrawtransaction json parse failed");
+        .expect("getnewaddress json");
+    let address = addr_resp["result"]
+        .as_str()
+        .expect("getnewaddress result string");
 
-    if let Some(err) = resp.get("error") {
+    // Use generateblock to mine a block containing this raw tx.
+    let gen_resp: serde_json::Value = client
+        .post(url.as_str())
+        .basic_auth(&user, Some(&pass))
+        .json(&serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": "genblock",
+            "method": "generateblock",
+            "params": [address, [tx_hex]]
+        }))
+        .send()
+        .await
+        .expect("generateblock request")
+        .json()
+        .await
+        .expect("generateblock json");
+
+    if let Some(err) = gen_resp.get("error") {
         if !err.is_null() {
             panic!(
-                "sendrawtransaction RPC error: {}",
+                "generateblock RPC error: {}",
                 serde_json::to_string(err).unwrap_or_default()
             );
         }
     }
 
-    resp["result"]
-        .as_str()
-        .expect("sendrawtransaction result should be txid string")
-        .to_string()
+    // Compute the txid from the raw hex
+    let tx_bytes: Vec<u8> = (0..tx_hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&tx_hex[i..i + 2], 16).expect("valid hex"))
+        .collect();
+    let tx: bitcoin::Transaction =
+        bitcoin::consensus::deserialize(&tx_bytes).expect("valid transaction");
+    tx.compute_txid().to_string()
 }
 
 /// Send `amount_btc` from the regtest wallet to `address` via `sendtoaddress`.
