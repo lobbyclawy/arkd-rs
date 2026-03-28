@@ -124,6 +124,7 @@ impl ArkClient {
             network: info.network,
             session_duration: info.session_duration as u32,
             unilateral_exit_delay: info.unilateral_exit_delay as u32,
+            boarding_exit_delay: info.boarding_exit_delay as u32,
             version: info.version,
             dust: info.dust as u64,
             vtxo_min_amount: info.vtxo_min_amount as u64,
@@ -160,7 +161,14 @@ impl ArkClient {
                 is_unrolled: v.is_unrolled,
                 spent_by: v.spent_by,
                 ark_txid: v.ark_txid,
-                assets: vec![],
+                assets: v
+                    .assets
+                    .iter()
+                    .map(|a| crate::types::Asset {
+                        asset_id: a.asset_id.clone(),
+                        amount: a.amount,
+                    })
+                    .collect(),
             });
         }
 
@@ -179,7 +187,14 @@ impl ArkClient {
                 is_unrolled: v.is_unrolled,
                 spent_by: v.spent_by,
                 ark_txid: v.ark_txid,
-                assets: vec![],
+                assets: v
+                    .assets
+                    .iter()
+                    .map(|a| crate::types::Asset {
+                        asset_id: a.asset_id.clone(),
+                        amount: a.amount,
+                    })
+                    .collect(),
             });
         }
 
@@ -322,14 +337,34 @@ impl ArkClient {
                 bitcoin::secp256k1::XOnlyPublicKey::from_slice(x_bytes).ok()
             });
             match xonly {
-                Some(xpk) => {
-                    let builder = bitcoin::taproot::TaprootBuilder::new();
-                    let spend_info = builder
-                        .finalize(&secp, xpk)
-                        .expect("valid taproot spend info");
-                    let output_key = spend_info.output_key();
-                    let address = bitcoin::Address::p2tr_tweaked(output_key, network);
-                    address.to_string()
+                Some(user_xpk) => {
+                    // Boarding address uses the same taproot structure as the server:
+                    // unspendable internal key + 2 leaves (CSV exit + cooperative).
+                    // This must match what the server injects as witness_utxo in finalize_round().
+                    // Server uses signer_pubkey (not forfeit_pubkey) in build_vtxo_taproot
+                    let asp_xonly = parse_xonly_pubkey(&info.pubkey).ok();
+                    let csv_delay = info.boarding_exit_delay.min(u16::MAX as u32) as u16;
+                    if let Some(asp_xpk) = asp_xonly {
+                        match dark_bitcoin::build_vtxo_taproot(&user_xpk, &asp_xpk, csv_delay) {
+                            Ok(taproot_info) => {
+                                let address = bitcoin::Address::p2tr_tweaked(
+                                    taproot_info.output_key(),
+                                    network,
+                                );
+                                address.to_string()
+                            }
+                            Err(_) => format!("bc1p_boarding_{}", &pubkey[..pubkey.len().min(32)]),
+                        }
+                    } else {
+                        // Fallback: key-path only (less correct but won't crash)
+                        let builder = bitcoin::taproot::TaprootBuilder::new();
+                        let spend_info = builder
+                            .finalize(&secp, user_xpk)
+                            .expect("valid taproot spend info");
+                        let output_key = spend_info.output_key();
+                        let address = bitcoin::Address::p2tr_tweaked(output_key, network);
+                        address.to_string()
+                    }
                 }
                 None => format!("bc1p_boarding_{}", &pubkey[..pubkey.len().min(32)]),
             }
@@ -1229,8 +1264,13 @@ impl ArkClient {
     ///
     /// `control_asset` controls who can reissue; pass `None` for a fixed-supply asset.
     /// `metadata` attaches optional key-value data to the issuance.
+    /// Issue a new asset.
+    ///
+    /// `owner_pubkey` — if `Some`, the asset VTXO is assigned to this key;
+    /// if `None`, the server uses the session's default key.
     pub async fn issue_asset(
         &mut self,
+        owner_pubkey: Option<&str>,
         _supply: u64,
         _control_asset: Option<crate::types::ControlAssetOption>,
         _metadata: Option<crate::types::AssetMetadata>,
@@ -1238,25 +1278,51 @@ impl ArkClient {
         if _supply == 0 {
             return Err(ClientError::Validation("amount must be > 0".into()));
         }
+
+        // Encode control_asset option into the name field as a tag for the server:
+        // "control:new:<amount>" or "control:existing:<id>"
+        let name = match &_control_asset {
+            Some(crate::types::ControlAssetOption::New(n)) => {
+                format!("control:new:{}", n.amount)
+            }
+            Some(crate::types::ControlAssetOption::Existing(e)) => {
+                format!("control:existing:{}", e.id)
+            }
+            None => String::new(),
+        };
+
         let client = self.require_client()?;
         let response = client
             .issue_asset(IssueAssetRequest {
-                pubkey: String::new(),
+                pubkey: owner_pubkey.unwrap_or("").to_string(),
                 amount: _supply,
-                name: String::new(),
+                name,
                 ticker: String::new(),
             })
             .await
             .map_err(|e| ClientError::Rpc(format!("IssueAsset failed: {}", e)))?;
         let inner = response.into_inner();
+
+        // Use issued_asset_ids if present, otherwise fall back to single asset_id
+        let issued_assets = if inner.issued_asset_ids.is_empty() {
+            vec![inner.asset_id]
+        } else {
+            inner.issued_asset_ids
+        };
+
         Ok(crate::types::IssueAssetResult {
             txid: inner.txid,
-            issued_assets: vec![inner.asset_id],
+            issued_assets,
         })
     }
 
     /// Reissue more units of an existing asset (requires control asset).
-    pub async fn reissue_asset(&mut self, asset_id: &str, amount: u64) -> ClientResult<String> {
+    pub async fn reissue_asset(
+        &mut self,
+        owner_pubkey: &str,
+        asset_id: &str,
+        amount: u64,
+    ) -> ClientResult<String> {
         if asset_id.is_empty() {
             return Err(ClientError::Validation("asset_id must not be empty".into()));
         }
@@ -1267,7 +1333,7 @@ impl ArkClient {
         let response = client
             .reissue_asset(ReissueAssetRequest {
                 asset_id: asset_id.to_string(),
-                pubkey: String::new(),
+                pubkey: owner_pubkey.to_string(),
                 amount,
             })
             .await
@@ -1276,7 +1342,12 @@ impl ArkClient {
     }
 
     /// Burn `amount` units of `asset_id`, removing them permanently from circulation.
-    pub async fn burn_asset(&mut self, asset_id: &str, amount: u64) -> ClientResult<String> {
+    pub async fn burn_asset(
+        &mut self,
+        owner_pubkey: &str,
+        asset_id: &str,
+        amount: u64,
+    ) -> ClientResult<String> {
         if asset_id.is_empty() {
             return Err(ClientError::Validation("asset_id must not be empty".into()));
         }
@@ -1287,7 +1358,7 @@ impl ArkClient {
         let response = client
             .burn_asset(BurnAssetRequest {
                 asset_id: asset_id.to_string(),
-                pubkey: String::new(),
+                pubkey: owner_pubkey.to_string(),
                 amount,
             })
             .await
@@ -1815,7 +1886,7 @@ mod tests {
     #[tokio::test]
     async fn test_issue_asset_zero_supply_rejected() {
         let mut c = ArkClient::new("http://localhost:50051");
-        let result = c.issue_asset(0, None, None).await;
+        let result = c.issue_asset(None, 0, None, None).await;
         assert!(result.is_err(), "expected error for zero supply");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("amount must be > 0"), "got: {}", err);
@@ -1824,7 +1895,7 @@ mod tests {
     #[tokio::test]
     async fn test_issue_asset_rpc_call() {
         let mut c = ArkClient::new("http://localhost:50051");
-        let result = c.issue_asset(1_000, None, None).await;
+        let result = c.issue_asset(None, 1_000, None, None).await;
         // Without a live server it fails with a transport/connection error.
         assert!(result.is_err(), "expected error from disconnected client");
     }
@@ -1836,7 +1907,7 @@ mod tests {
             key: "TestToken".to_string(),
             value: "TTK".to_string(),
         };
-        let result = c.issue_asset(5_000, None, Some(metadata)).await;
+        let result = c.issue_asset(None, 5_000, None, Some(metadata)).await;
         // Without a live server it fails with a transport/connection error.
         assert!(result.is_err(), "expected error from disconnected client");
     }
@@ -1848,14 +1919,14 @@ mod tests {
             crate::types::ControlAssetOption::Existing(crate::types::ExistingControlAsset {
                 id: "ctrl-asset-abc".to_string(),
             });
-        let result = c.issue_asset(1_000, Some(control), None).await;
+        let result = c.issue_asset(None, 1_000, Some(control), None).await;
         assert!(result.is_err(), "expected error from disconnected client");
     }
 
     #[tokio::test]
     async fn test_reissue_asset_empty_id_rejected() {
         let mut c = ArkClient::new("http://localhost:50051");
-        let result = c.reissue_asset("", 500).await;
+        let result = c.reissue_asset("owner", "", 500).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("asset_id must not be empty"), "got: {}", err);
@@ -1864,7 +1935,7 @@ mod tests {
     #[tokio::test]
     async fn test_reissue_asset_zero_amount_rejected() {
         let mut c = ArkClient::new("http://localhost:50051");
-        let result = c.reissue_asset("asset-id-123", 0).await;
+        let result = c.reissue_asset("owner", "asset-id-123", 0).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("amount must be > 0"), "got: {}", err);
@@ -1873,14 +1944,14 @@ mod tests {
     #[tokio::test]
     async fn test_reissue_asset_rpc_call() {
         let mut c = ArkClient::new("http://localhost:50051");
-        let result = c.reissue_asset("asset-id-123", 500).await;
+        let result = c.reissue_asset("owner", "asset-id-123", 500).await;
         assert!(result.is_err(), "expected error from disconnected client");
     }
 
     #[tokio::test]
     async fn test_burn_asset_empty_id_rejected() {
         let mut c = ArkClient::new("http://localhost:50051");
-        let result = c.burn_asset("", 100).await;
+        let result = c.burn_asset("owner", "", 100).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("asset_id must not be empty"), "got: {}", err);
@@ -1889,7 +1960,7 @@ mod tests {
     #[tokio::test]
     async fn test_burn_asset_zero_amount_rejected() {
         let mut c = ArkClient::new("http://localhost:50051");
-        let result = c.burn_asset("asset-id-123", 0).await;
+        let result = c.burn_asset("owner", "asset-id-123", 0).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("amount must be > 0"), "got: {}", err);
@@ -1898,7 +1969,7 @@ mod tests {
     #[tokio::test]
     async fn test_burn_asset_rpc_call() {
         let mut c = ArkClient::new("http://localhost:50051");
-        let result = c.burn_asset("asset-id-123", 100).await;
+        let result = c.burn_asset("owner", "asset-id-123", 100).await;
         assert!(result.is_err(), "expected error from disconnected client");
     }
 

@@ -9,6 +9,10 @@ on:
     - cron: "0 3 * * *"  # 3 AM UTC nightly
   workflow_dispatch:
 
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -79,6 +83,8 @@ jobs:
             'max_vtxo_amount_sats = 100000000' \
             'utxo_min_amount = 1000' \
             'utxo_max_amount = 100000000' \
+            'unilateral_exit_delay = 30' \
+            'boarding_exit_delay = 30' \
             > /tmp/dark-e2e.toml
 
       - name: Start dark server
@@ -114,7 +120,7 @@ jobs:
             echo "Funding dark wallet at $DARK_ADDR"
             curl -s -X POST http://admin1:123@localhost:18443 \
               -H "Content-Type: application/json" \
-              -d "{\"jsonrpc\":\"1.0\",\"id\":\"fund\",\"method\":\"sendtoaddress\",\"params\":[\"$DARK_ADDR\",1.0]}"
+              -d "{\"jsonrpc\":\"1.0\",\"id\":\"fund\",\"method\":\"sendtoaddress\",\"params\":[\"$DARK_ADDR\",10.0]}"
             # Mine to confirm
             MINE_ADDR=$(curl -s -X POST http://admin1:123@localhost:18443 \
               -H "Content-Type: application/json" \

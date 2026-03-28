@@ -130,6 +130,10 @@ pub struct ArkSection {
     /// Maximum number of distinct assets allowed per VTXO.
     #[allow(dead_code)]
     pub max_assets_per_vtxo: Option<u32>,
+    /// CSV delay for unilateral VTXO exit (seconds). Default: 512.
+    pub unilateral_exit_delay: Option<u32>,
+    /// CSV delay for boarding inputs (seconds). Default: 1024.
+    pub boarding_exit_delay: Option<u32>,
 }
 
 /// Operator wallet configuration for BDK-backed wallet service.

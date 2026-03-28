@@ -51,7 +51,8 @@ pub use domain::{
     CrimeType, Exit, ExitError, ExitStatus, ExitSummary, ExitType, FlatTxTree, ForfeitRecord,
     ForfeitTx, InMemoryBanRepository, Intent, Receiver, Round, RoundConfig, RoundStage, RoundStats,
     ScheduledSessionConfig, Stage, TxTreeNode, UnilateralExitRequest, Vtxo, VtxoId, VtxoOutpoint,
-    DEFAULT_CHECKPOINT_EXIT_DELAY, DEFAULT_EVENT_CHANNEL_CAPACITY,
+    DEFAULT_BOARDING_EXIT_DELAY, DEFAULT_CHECKPOINT_EXIT_DELAY, DEFAULT_EVENT_CHANNEL_CAPACITY,
+    DEFAULT_UNILATERAL_EXIT_DELAY,
 };
 pub use error::{ArkError, ArkResult};
 pub use event_bus::{FilteredSubscriber, TokioBroadcastEventBus};

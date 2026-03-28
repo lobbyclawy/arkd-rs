@@ -37,6 +37,14 @@ pub fn vtxo_to_proto(vtxo: &Vtxo) -> ark_v1::Vtxo {
         spent_by: vtxo.spent_by.clone(),
         settled_by: vtxo.settled_by.clone(),
         ark_txid: vtxo.ark_txid.clone(),
+        assets: vtxo
+            .assets
+            .iter()
+            .map(|(asset_id, amount)| ark_v1::VtxoAsset {
+                asset_id: asset_id.clone(),
+                amount: *amount,
+            })
+            .collect(),
     }
 }
 

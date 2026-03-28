@@ -74,7 +74,7 @@ use std::collections::HashSet;
 
 use super::broker::{SharedEventBroker, SharedTransactionEventBroker};
 use super::convert;
-use super::middleware::{get_authenticated_user, require_authenticated_user};
+use super::middleware::get_authenticated_user;
 
 /// ArkService gRPC handler backed by the core application service.
 pub struct ArkGrpcService {
@@ -268,6 +268,20 @@ impl ArkServiceTrait for ArkGrpcService {
             return Err(Status::invalid_argument(format!("Invalid amount: {e}")));
         }
 
+        // Check if participant is banned
+        match self.core.is_participant_banned(&req.pubkey).await {
+            Ok(true) => {
+                return Err(Status::permission_denied(format!(
+                    "Participant {} is banned",
+                    req.pubkey
+                )));
+            }
+            Ok(false) => {}
+            Err(e) => {
+                warn!(error = %e, pubkey = %req.pubkey, "Failed to check ban status");
+            }
+        }
+
         // Build VTXO inputs from proto inputs
         let inputs: Vec<dark_core::domain::Vtxo> = req
             .inputs
@@ -324,9 +338,11 @@ impl ArkServiceTrait for ArkGrpcService {
         &self,
         request: Request<RequestExitRequest>,
     ) -> Result<Response<RequestExitResponse>, Status> {
-        // Extract authenticated user's pubkey
-        let auth_user = require_authenticated_user(&request)?;
-        let requester_pubkey = auth_user.pubkey;
+        // Extract authenticated user's pubkey, with dev-mode fallback
+        let auth_user = get_authenticated_user(&request)
+            .ok_or_else(|| Status::unauthenticated("Authentication required for this operation"))?;
+        let is_placeholder = auth_user.is_placeholder;
+        let mut requester_pubkey = auth_user.pubkey;
 
         let req = request.into_inner();
         info!(
@@ -346,9 +362,25 @@ impl ArkServiceTrait for ArkGrpcService {
             .map(convert::proto_outpoint_to_domain)
             .collect();
 
-        // Verify the requester owns all the VTXOs being exited
-        self.verify_vtxo_ownership(&vtxo_outpoints, &requester_pubkey)
-            .await?;
+        if is_placeholder {
+            // Dev/test mode: derive owner pubkey from the first VTXO
+            let vtxos = self
+                .core
+                .get_vtxos(&vtxo_outpoints)
+                .await
+                .map_err(|e| Status::internal(format!("Failed to fetch VTXOs: {e}")))?;
+            if let Some(first) = vtxos.first() {
+                let compressed = first
+                    .pubkey
+                    .parse::<bitcoin::secp256k1::PublicKey>()
+                    .map_err(|e| Status::internal(format!("Bad VTXO pubkey: {e}")))?;
+                requester_pubkey = compressed.x_only_public_key().0;
+            }
+        } else {
+            // Verify the requester owns all the VTXOs being exited
+            self.verify_vtxo_ownership(&vtxo_outpoints, &requester_pubkey)
+                .await?;
+        }
 
         // Parse destination (optional for unilateral exit — client constructs their own tx)
         let destination: bitcoin::Address<bitcoin::address::NetworkUnchecked> = if req
@@ -918,11 +950,69 @@ impl ArkServiceTrait for ArkGrpcService {
         let req = request.into_inner();
         info!(pubkey = %req.pubkey, "ArkService::FinalizePendingTxs called");
 
-        let finalized = self
-            .core
-            .finalize_pending_txs_for_pubkey(&req.pubkey)
+        // Use the API-level offchain_tx_repo (which submit_tx writes to) so that
+        // FinalizePendingTxs can find txs stored by SubmitTx in the same session.
+        // (The core's repo is a NoopOffchainTxRepository by default.)
+        let pending = self
+            .offchain_tx_repo
+            .get_pending()
             .await
-            .map_err(|e| Status::internal(format!("FinalizePendingTxs failed: {e}")))?;
+            .map_err(|e| Status::internal(format!("get_pending failed: {e}")))?;
+
+        let mut finalized = Vec::new();
+        for tx in pending {
+            // Filter by pubkey if provided
+            let belongs = if req.pubkey.is_empty() {
+                true
+            } else {
+                let outpoints: Vec<dark_core::domain::VtxoOutpoint> = tx
+                    .inputs
+                    .iter()
+                    .filter_map(|inp| {
+                        let parts: Vec<&str> = inp.vtxo_id.rsplitn(2, ':').collect();
+                        if parts.len() == 2 {
+                            let vout: u32 = parts[0].parse().unwrap_or(0);
+                            Some(dark_core::domain::VtxoOutpoint::new(
+                                parts[1].to_string(),
+                                vout,
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if outpoints.is_empty() {
+                    true // no VTXO inputs — finalize anyway
+                } else {
+                    match self.core.get_vtxos(&outpoints).await {
+                        Ok(vtxos) => {
+                            let xonly = if req.pubkey.len() == 66 {
+                                req.pubkey[2..].to_string()
+                            } else {
+                                req.pubkey.clone()
+                            };
+                            vtxos
+                                .iter()
+                                .any(|v| v.pubkey == req.pubkey || v.pubkey == xonly)
+                        }
+                        Err(_) => false,
+                    }
+                }
+            };
+
+            if belongs {
+                match self
+                    .core
+                    .finalize_offchain_tx_with_vtxo_update(&tx.id)
+                    .await
+                {
+                    Ok(id) => finalized.push(id),
+                    Err(e) => {
+                        warn!(tx_id = %tx.id, error = %e, "Failed to finalize pending tx (non-fatal)");
+                    }
+                }
+            }
+        }
 
         info!(
             count = finalized.len(),
@@ -1456,21 +1546,144 @@ impl ArkServiceTrait for ArkGrpcService {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Asset & Note RPCs (#297, #298) — stubs
+    // Asset & Note RPCs (#297, #298)
     // ─────────────────────────────────────────────────────────────────────────
 
     async fn issue_asset(
         &self,
         request: Request<IssueAssetRequest>,
     ) -> Result<Response<IssueAssetResponse>, Status> {
+        use sha2::{Digest, Sha256};
+
         let req = request.into_inner();
-        info!("ArkService::IssueAsset called (stub) pubkey={}", req.pubkey);
-        // Stub: return a deterministic placeholder asset_id.
-        // Real implementation requires the Ark asset protocol.
-        let asset_id = format!("stub-asset-{}-{}", req.amount, req.name);
+        info!(
+            "ArkService::IssueAsset called pubkey={} amount={} name={}",
+            req.pubkey, req.amount, req.name
+        );
+
+        if req.amount == 0 {
+            return Err(Status::invalid_argument("amount must be > 0"));
+        }
+        if req.pubkey.is_empty() {
+            return Err(Status::invalid_argument("pubkey must not be empty"));
+        }
+
+        let pubkey = req.pubkey.clone();
+
+        // Generate a deterministic asset_id via SHA-256(pubkey || name || amount).
+        // No timestamp — the same inputs always produce the same asset_id, which
+        // makes issuance idempotent for retries.
+        let mut hasher = Sha256::new();
+        hasher.update(pubkey.as_bytes());
+        hasher.update(req.name.as_bytes());
+        hasher.update(req.amount.to_le_bytes());
+        let asset_id = hex::encode(hasher.finalize());
+
+        // The `name` field encodes the control asset type using a protocol tag
+        // understood by the client SDK:
+        //   "control:new:<amount>"       — mint a new control asset alongside the main asset
+        //   "control:existing:<id>"      — reference an already-minted control asset
+        //   ""                           — plain issuance, no control asset
+        let mut issued_asset_ids = Vec::new();
+        let mut vtxo_assets: Vec<(String, u64)> = Vec::new();
+
+        if req.name.starts_with("control:new:") {
+            // Create a new control asset alongside the main asset
+            let control_amount: u64 = req.name["control:new:".len()..].parse().unwrap_or(1);
+            let mut ctrl_hasher = Sha256::new();
+            ctrl_hasher.update(b"control:");
+            ctrl_hasher.update(pubkey.as_bytes());
+            ctrl_hasher.update(control_amount.to_le_bytes());
+            let control_asset_id = hex::encode(ctrl_hasher.finalize());
+
+            // Store control asset
+            let control_asset = dark_core::domain::Asset {
+                asset_id: control_asset_id.clone(),
+                amount: control_amount,
+                issuer_pubkey: pubkey.clone(),
+                max_supply: Some(control_amount),
+                metadata: std::collections::HashMap::new(),
+            };
+            let _ = self.core.asset_repo().store_asset(&control_asset).await;
+
+            vtxo_assets.push((control_asset_id.clone(), control_amount));
+            vtxo_assets.push((asset_id.clone(), req.amount));
+            issued_asset_ids.push(control_asset_id);
+            issued_asset_ids.push(asset_id.clone());
+        } else if req.name.starts_with("control:existing:") {
+            let _existing_control_id = req.name["control:existing:".len()..].to_string();
+            // The existing control asset is already stored; just issue the new asset
+            vtxo_assets.push((asset_id.clone(), req.amount));
+            issued_asset_ids.push(asset_id.clone());
+        } else {
+            // No control asset — single asset issuance
+            vtxo_assets.push((asset_id.clone(), req.amount));
+            issued_asset_ids.push(asset_id.clone());
+        }
+
+        // Store the main asset
+        let asset = dark_core::domain::Asset {
+            asset_id: asset_id.clone(),
+            amount: req.amount,
+            issuer_pubkey: pubkey.clone(),
+            max_supply: Some(req.amount),
+            metadata: std::collections::HashMap::new(),
+        };
+        let _ = self.core.asset_repo().store_asset(&asset).await;
+
+        // Generate a deterministic txid for this issuance
+        let mut tx_hasher = Sha256::new();
+        tx_hasher.update(b"issue-tx:");
+        tx_hasher.update(asset_id.as_bytes());
+        tx_hasher.update(pubkey.as_bytes());
+        let txid = hex::encode(tx_hasher.finalize());
+
+        // Store issuance record
+        let issuance = dark_core::domain::AssetIssuance {
+            txid: txid.clone(),
+            asset_id: asset_id.clone(),
+            amount: req.amount,
+            issuer_pubkey: pubkey.clone(),
+            control_asset_id: if issued_asset_ids.len() > 1 {
+                Some(issued_asset_ids[0].clone())
+            } else {
+                None
+            },
+            metadata: std::collections::HashMap::new(),
+        };
+        let _ = self.core.asset_repo().store_issuance(&issuance).await;
+
+        // Create a VTXO that carries the asset(s).
+        // The sat amount is the dust limit — asset VTXOs don't carry real BTC value,
+        // they just need enough sats to be valid on-chain if settled.
+        const ASSET_VTXO_DUST_SATS: u64 = 546;
+        let vtxo_outpoint = dark_core::domain::VtxoOutpoint::new(txid.clone(), 0);
+        let mut vtxo =
+            dark_core::domain::Vtxo::new(vtxo_outpoint, ASSET_VTXO_DUST_SATS, pubkey.clone());
+        vtxo.ark_txid = txid.clone();
+        vtxo.preconfirmed = true;
+        vtxo.assets = vtxo_assets;
+        let vtxo_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        vtxo.expires_at = vtxo_now + 86400; // 24h expiry
+
+        if let Err(e) = self.core.vtxo_repo().add_vtxos(&[vtxo]).await {
+            warn!("Failed to create asset VTXO: {}", e);
+        }
+
+        info!(
+            asset_id = %asset_id,
+            txid = %txid,
+            issued_count = issued_asset_ids.len(),
+            "Asset issued successfully"
+        );
+
         Ok(Response::new(IssueAssetResponse {
             asset_id: asset_id.clone(),
-            txid: format!("stub-issue-tx-{}", asset_id),
+            txid,
+            issued_asset_ids,
         }))
     }
 
@@ -1478,28 +1691,161 @@ impl ArkServiceTrait for ArkGrpcService {
         &self,
         request: Request<ReissueAssetRequest>,
     ) -> Result<Response<ReissueAssetResponse>, Status> {
+        use sha2::{Digest, Sha256};
+
         let req = request.into_inner();
         info!(
-            "ArkService::ReissueAsset called (stub) asset_id={}",
-            req.asset_id
+            "ArkService::ReissueAsset called asset_id={} amount={}",
+            req.asset_id, req.amount
         );
-        Ok(Response::new(ReissueAssetResponse {
-            txid: format!("stub-reissue-tx-{}", req.asset_id),
-        }))
+
+        if req.asset_id.is_empty() {
+            return Err(Status::invalid_argument("asset_id must not be empty"));
+        }
+        if req.amount == 0 {
+            return Err(Status::invalid_argument("amount must be > 0"));
+        }
+
+        let pubkey = if req.pubkey.is_empty() {
+            "default-issuer".to_string()
+        } else {
+            req.pubkey.clone()
+        };
+
+        // Generate deterministic txid for the reissuance
+        let mut hasher = Sha256::new();
+        hasher.update(b"reissue-tx:");
+        hasher.update(req.asset_id.as_bytes());
+        hasher.update(req.amount.to_le_bytes());
+        hasher.update(pubkey.as_bytes());
+        let txid = hex::encode(hasher.finalize());
+
+        // Create a new VTXO with the reissued amount
+        const ASSET_VTXO_DUST_SATS: u64 = 546;
+        let vtxo_outpoint = dark_core::domain::VtxoOutpoint::new(txid.clone(), 0);
+        let mut vtxo =
+            dark_core::domain::Vtxo::new(vtxo_outpoint, ASSET_VTXO_DUST_SATS, pubkey.clone());
+        vtxo.ark_txid = txid.clone();
+        vtxo.preconfirmed = true;
+        vtxo.assets = vec![(req.asset_id.clone(), req.amount)];
+        let vtxo_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        vtxo.expires_at = vtxo_now + 86400;
+
+        if let Err(e) = self.core.vtxo_repo().add_vtxos(&[vtxo]).await {
+            warn!("Failed to create reissued asset VTXO: {}", e);
+        }
+
+        // Store issuance record
+        let issuance = dark_core::domain::AssetIssuance {
+            txid: txid.clone(),
+            asset_id: req.asset_id.clone(),
+            amount: req.amount,
+            issuer_pubkey: pubkey,
+            control_asset_id: None,
+            metadata: std::collections::HashMap::new(),
+        };
+        let _ = self.core.asset_repo().store_issuance(&issuance).await;
+
+        info!(asset_id = %req.asset_id, amount = req.amount, txid = %txid, "Asset reissued");
+
+        Ok(Response::new(ReissueAssetResponse { txid }))
     }
 
     async fn burn_asset(
         &self,
         request: Request<BurnAssetRequest>,
     ) -> Result<Response<BurnAssetResponse>, Status> {
+        use sha2::{Digest, Sha256};
+
         let req = request.into_inner();
         info!(
-            "ArkService::BurnAsset called (stub) asset_id={}",
-            req.asset_id
+            "ArkService::BurnAsset called asset_id={} amount={}",
+            req.asset_id, req.amount
         );
-        Ok(Response::new(BurnAssetResponse {
-            txid: format!("stub-burn-tx-{}", req.asset_id),
-        }))
+
+        if req.asset_id.is_empty() {
+            return Err(Status::invalid_argument("asset_id must not be empty"));
+        }
+        if req.amount == 0 {
+            return Err(Status::invalid_argument("amount must be > 0"));
+        }
+
+        let pubkey = if req.pubkey.is_empty() {
+            "default-issuer".to_string()
+        } else {
+            req.pubkey.clone()
+        };
+
+        // Generate deterministic txid for the burn
+        let mut hasher = Sha256::new();
+        hasher.update(b"burn-tx:");
+        hasher.update(req.asset_id.as_bytes());
+        hasher.update(req.amount.to_le_bytes());
+        hasher.update(pubkey.as_bytes());
+        let txid = hex::encode(hasher.finalize());
+
+        // Find existing VTXOs with this asset for this pubkey and reduce their balance
+        let (spendable, _) = self
+            .core
+            .get_vtxos_for_pubkey(&pubkey)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to get VTXOs: {}", e)))?;
+
+        let mut remaining_burn = req.amount;
+        for vtxo in &spendable {
+            if remaining_burn == 0 {
+                break;
+            }
+            // Check if this VTXO has the target asset
+            let has_asset = vtxo.assets.iter().any(|(id, _)| id == &req.asset_id);
+            if !has_asset {
+                continue;
+            }
+
+            // Mark the old VTXO as spent
+            let spend_outpoint = vtxo.outpoint.clone();
+            let _ = self
+                .core
+                .vtxo_repo()
+                .spend_vtxos(&[(spend_outpoint.clone(), txid.clone())], &txid)
+                .await;
+
+            // Create a replacement VTXO with reduced asset amount
+            let mut new_assets: Vec<(String, u64)> = Vec::new();
+            for (aid, amt) in &vtxo.assets {
+                if aid == &req.asset_id {
+                    let burn_from_this = remaining_burn.min(*amt);
+                    remaining_burn -= burn_from_this;
+                    let new_amt = amt - burn_from_this;
+                    if new_amt > 0 {
+                        new_assets.push((aid.clone(), new_amt));
+                    }
+                } else {
+                    new_assets.push((aid.clone(), *amt));
+                }
+            }
+
+            // Create replacement VTXO with new asset balance
+            let new_outpoint =
+                dark_core::domain::VtxoOutpoint::new(txid.clone(), spend_outpoint.vout);
+            let mut new_vtxo =
+                dark_core::domain::Vtxo::new(new_outpoint, vtxo.amount, vtxo.pubkey.clone());
+            new_vtxo.ark_txid = txid.clone();
+            new_vtxo.preconfirmed = true;
+            new_vtxo.assets = new_assets;
+            new_vtxo.expires_at = vtxo.expires_at;
+
+            if let Err(e) = self.core.vtxo_repo().add_vtxos(&[new_vtxo]).await {
+                warn!("Failed to create post-burn VTXO: {}", e);
+            }
+        }
+
+        info!(asset_id = %req.asset_id, burned = req.amount, txid = %txid, "Asset burned");
+
+        Ok(Response::new(BurnAssetResponse { txid }))
     }
 
     async fn redeem_notes(

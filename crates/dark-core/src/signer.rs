@@ -91,13 +91,43 @@ impl SignerService for LocalSigner {
 
         for idx in 0..num_inputs {
             if !psbt.inputs[idx].tap_scripts.is_empty() {
-                // Script-path signing: sign with the leaf script hash
-                let (leaf_script, leaf_version) = psbt.inputs[idx]
+                // Script-path signing.
+                //
+                // For boarding inputs (unspendable internal key), the cooperative leaf
+                // requires BOTH the user's signature AND the ASP's signature:
+                //   <user_xonly> OP_CHECKSIGVERIFY <asp_xonly> OP_CHECKSIG
+                //
+                // The ASP must sign the cooperative leaf (the one containing the ASP key).
+                // Skip the CSV exit leaf (which only has the user key).
+                //
+                // For other script-path inputs (e.g. connector outputs), sign the first leaf.
+                let our_xonly = {
+                    let pk = bitcoin::secp256k1::PublicKey::from_secret_key(
+                        &self.secp,
+                        &self.secret_key,
+                    );
+                    pk.x_only_public_key().0
+                };
+                let our_xonly_bytes = our_xonly.serialize();
+
+                // Find the leaf that contains the ASP key bytes.
+                // Cooperative leaf (68 bytes): <user_xonly(32)> OP_CHECKSIGVERIFY <asp_xonly(32)> OP_CHECKSIG
+                // If no leaf contains our key, fall back to the first leaf.
+                let leaf_entry = psbt.inputs[idx]
                     .tap_scripts
-                    .values()
-                    .next()
-                    .map(|(s, v)| (s.clone(), *v))
-                    .unwrap();
+                    .iter()
+                    .find(|(_, (script, _))| {
+                        script
+                            .as_bytes()
+                            .windows(our_xonly_bytes.len())
+                            .any(|w| w == our_xonly_bytes)
+                    })
+                    .or_else(|| psbt.inputs[idx].tap_scripts.iter().next());
+
+                let (leaf_script, leaf_version) = match leaf_entry {
+                    Some((_, (s, v))) => (s.clone(), *v),
+                    None => continue,
+                };
 
                 let leaf_hash =
                     bitcoin::taproot::TapLeafHash::from_script(&leaf_script, leaf_version);

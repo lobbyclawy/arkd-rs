@@ -341,6 +341,16 @@ impl ArkService {
         self.asset_repo.get_asset(asset_id).await
     }
 
+    /// Get a reference to the asset repository.
+    pub fn asset_repo(&self) -> &dyn AssetRepository {
+        &*self.asset_repo
+    }
+
+    /// Get a reference to the VTXO repository.
+    pub fn vtxo_repo(&self) -> &dyn VtxoRepository {
+        &*self.vtxo_repo
+    }
+
     /// Calculate the boarding fee for a given amount
     pub async fn calculate_boarding_fee(&self, amount_sats: u64) -> ArkResult<u64> {
         self.fee_manager.boarding_fee(amount_sats).await
@@ -653,8 +663,124 @@ impl ArkService {
             }
         };
 
-        // Use the fee-augmented PSBT from here on
-        let result_commitment_tx = commitment_psbt_with_fee;
+        // Use the fee-augmented PSBT from here on.
+        // Enrich boarding PSBT inputs with tap_scripts + tap_internal_key + witness_utxo
+        // so the Rust client can sign them via the cooperative script leaf (script-path spend).
+        let result_commitment_tx = {
+            use base64::Engine;
+
+            // Build outpoint -> (user_xonly, amount) map from intent inputs + boarding repo.
+            let mut boarding_info: std::collections::HashMap<
+                String,
+                (bitcoin::XOnlyPublicKey, u64),
+            > = std::collections::HashMap::new();
+
+            for intent in &intents {
+                for inp in &intent.inputs {
+                    if inp.amount > 0 && !inp.outpoint.txid.is_empty() {
+                        let xonly = hex::decode(&inp.pubkey).ok().and_then(|b| {
+                            if b.len() == 33 {
+                                bitcoin::XOnlyPublicKey::from_slice(&b[1..]).ok()
+                            } else {
+                                bitcoin::XOnlyPublicKey::from_slice(&b).ok()
+                            }
+                        });
+                        let outpoint_key = format!("{}:{}", inp.outpoint.txid, inp.outpoint.vout);
+                        let is_in_boarding = boarding_inputs.iter().any(|b| {
+                            format!("{}:{}", b.outpoint.txid, b.outpoint.vout) == outpoint_key
+                        });
+                        if let Some(xk) = xonly {
+                            if is_in_boarding {
+                                boarding_info.insert(outpoint_key, (xk, inp.amount));
+                            }
+                        }
+                    }
+                }
+            }
+            for (bi, bt) in boarding_inputs.iter().zip(boarding_txs.iter()) {
+                let key = format!("{}:{}", bi.outpoint.txid, bi.outpoint.vout);
+                boarding_info
+                    .entry(key)
+                    .or_insert((bt.recipient_pubkey, bi.amount));
+            }
+
+            // signer_pubkey is already an XOnlyPublicKey (ASP key).
+            let asp_xonly = signer_pubkey;
+
+            if !boarding_info.is_empty() {
+                if let Ok(bytes) =
+                    base64::engine::general_purpose::STANDARD.decode(&commitment_psbt_with_fee)
+                {
+                    if let Ok(mut psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
+                        let csv_delay = self.config.boarding_exit_delay.min(u16::MAX as u32) as u16;
+                        let network = match self.config.network.as_str() {
+                            "mainnet" | "bitcoin" => bitcoin::Network::Bitcoin,
+                            "testnet" => bitcoin::Network::Testnet,
+                            "signet" => bitcoin::Network::Signet,
+                            _ => bitcoin::Network::Regtest,
+                        };
+
+                        for (idx, input) in psbt.unsigned_tx.input.iter().enumerate() {
+                            let op_key = format!(
+                                "{}:{}",
+                                input.previous_output.txid, input.previous_output.vout
+                            );
+                            if let Some((user_xonly, amount)) = boarding_info.get(&op_key) {
+                                if !psbt.inputs[idx].tap_scripts.is_empty() {
+                                    continue;
+                                }
+                                match dark_bitcoin::build_vtxo_taproot(
+                                    user_xonly, &asp_xonly, csv_delay,
+                                ) {
+                                    Ok(taproot_info) => {
+                                        psbt.inputs[idx].tap_internal_key =
+                                            Some(taproot_info.internal_key());
+                                        for script_ver in taproot_info.script_map().keys() {
+                                            if let Some(cb) = taproot_info.control_block(script_ver)
+                                            {
+                                                psbt.inputs[idx]
+                                                    .tap_scripts
+                                                    .insert(cb, script_ver.clone());
+                                            }
+                                        }
+                                        if psbt.inputs[idx].witness_utxo.is_none() {
+                                            let addr = bitcoin::Address::p2tr_tweaked(
+                                                taproot_info.output_key(),
+                                                network,
+                                            );
+                                            psbt.inputs[idx].witness_utxo = Some(bitcoin::TxOut {
+                                                value: bitcoin::Amount::from_sat(*amount),
+                                                script_pubkey: addr.script_pubkey(),
+                                            });
+                                        }
+                                        info!(
+                                            input_idx = idx,
+                                            outpoint = %op_key,
+                                            "Populated tap_scripts for boarding input"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            error = %e,
+                                            outpoint = %op_key,
+                                            "Failed to build boarding taproot"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        base64::engine::general_purpose::STANDARD.encode(psbt.serialize())
+                    } else {
+                        commitment_psbt_with_fee
+                    }
+                } else {
+                    commitment_psbt_with_fee
+                }
+            } else {
+                commitment_psbt_with_fee
+            }
+        };
 
         // Extract and store the fee input signature from the BDK-signed PSBT.
         // This signature may be stripped when Go SDK clients round-trip the PSBT,
@@ -1034,6 +1160,71 @@ impl ArkService {
                 }
             }
 
+            // Mark intent input VTXOs (off-chain refresh inputs) as spent now that
+            // the round completed and new output VTXOs were created.
+            let spend_list: Vec<(VtxoOutpoint, String)> = intents
+                .iter()
+                .flat_map(|intent| {
+                    intent.inputs.iter().filter_map(|inp| {
+                        if inp.outpoint.txid.is_empty() {
+                            None
+                        } else {
+                            Some((inp.outpoint.clone(), commitment_txid.clone()))
+                        }
+                    })
+                })
+                .collect();
+            if !spend_list.is_empty() {
+                if let Err(e) = self
+                    .vtxo_repo
+                    .spend_vtxos(&spend_list, &commitment_txid)
+                    .await
+                {
+                    warn!(error = %e, "Failed to mark intent input VTXOs as spent (non-fatal)");
+                } else {
+                    info!(
+                        count = spend_list.len(),
+                        "Marked intent input VTXOs as spent"
+                    );
+                }
+            }
+
+            // For each pubkey that has new output VTXOs, mark any prior unspent VTXOs
+            // for that pubkey as spent (VTXO refresh / implicit forfeit).
+            // This handles the case where RegisterForRound doesn't pass VTXO inputs explicitly.
+            let new_outpoints: std::collections::HashSet<String> = vtxos
+                .iter()
+                .map(|v| format!("{}:{}", v.outpoint.txid, v.outpoint.vout))
+                .collect();
+            let pubkeys_with_new_vtxos: std::collections::HashSet<&str> =
+                vtxos.iter().map(|v| v.pubkey.as_str()).collect();
+            for pubkey in pubkeys_with_new_vtxos {
+                if let Ok((spendable, _)) = self.vtxo_repo.get_all_vtxos_for_pubkey(pubkey).await {
+                    let prior_outpoints: Vec<(VtxoOutpoint, String)> = spendable
+                        .into_iter()
+                        .filter(|v| {
+                            !new_outpoints
+                                .contains(&format!("{}:{}", v.outpoint.txid, v.outpoint.vout))
+                        })
+                        .map(|v| (v.outpoint, commitment_txid.clone()))
+                        .collect();
+                    if !prior_outpoints.is_empty() {
+                        if let Err(e) = self
+                            .vtxo_repo
+                            .spend_vtxos(&prior_outpoints, &commitment_txid)
+                            .await
+                        {
+                            warn!(error = %e, pubkey, "Failed to mark prior VTXOs as spent on refresh (non-fatal)");
+                        } else {
+                            info!(
+                                count = prior_outpoints.len(),
+                                pubkey, "Marked prior VTXOs as spent (VTXO refresh)"
+                            );
+                        }
+                    }
+                }
+            }
+
             for vtxo in &vtxos {
                 let _ = self
                     .events
@@ -1141,6 +1332,67 @@ impl ArkService {
             reason = %reason,
             "Round aborted"
         );
+
+        // ── Release boarding inputs so they don't accumulate ─────────────
+        // Mark boarding inputs from the failed round as "claimed" so they won't
+        // be re-included in the next round. Without this, a timeout leaves the
+        // boarding UTXOs in the pending pool, and the next round picks them up
+        // along with new ones — causing multiple-owner signing failures.
+        for boarding_id in &failed_round.boarding_tx_ids {
+            let _ = self.boarding_repo.mark_claimed(boarding_id).await;
+        }
+
+        // ── Auto-ban non-responding cosigners on signing timeout ──────────
+        if reason == "signing timeout" {
+            let expected_cosigners: std::collections::HashSet<String> = failed_round
+                .intents
+                .values()
+                .flat_map(|i| i.cosigners_public_keys.iter())
+                .cloned()
+                .collect();
+
+            let submitted_cosigners: std::collections::HashSet<String> = match self
+                .signing_session_store
+                .get_session(&failed_round.id)
+                .await
+            {
+                Ok(Some(session)) => session
+                    .tree_nonces
+                    .iter()
+                    .map(|(pk, _)| pk.clone())
+                    .collect(),
+                _ => std::collections::HashSet::new(),
+            };
+
+            for cosigner_pk in &expected_cosigners {
+                let x_only = if cosigner_pk.len() == 66 {
+                    cosigner_pk[2..].to_string()
+                } else {
+                    cosigner_pk.clone()
+                };
+                let submitted = submitted_cosigners.contains(cosigner_pk)
+                    || submitted_cosigners.contains(&x_only);
+
+                if !submitted {
+                    warn!(
+                        pubkey = %cosigner_pk,
+                        round_id = %failed_round.id,
+                        "Auto-banning cosigner who failed to submit nonces"
+                    );
+                    if let Err(e) = self
+                        .ban_repo
+                        .ban(
+                            cosigner_pk,
+                            crate::domain::BanReason::FailedToConfirm,
+                            &failed_round.id,
+                        )
+                        .await
+                    {
+                        error!(pubkey = %cosigner_pk, error = %e, "Failed to auto-ban cosigner");
+                    }
+                }
+            }
+        }
 
         // Emit BatchFailed event
         self.events
@@ -2763,9 +3015,10 @@ impl ArkService {
         // This preserves our consistent input ordering even if ASP returns different order.
         {
             use base64::Engine;
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(&after_asp)
-                .or_else(|_| hex::decode(&after_asp))
+            // Signer returns hex-encoded PSBT when extract_raw=false.
+            // Try hex first (most likely), then fall back to base64.
+            let bytes = hex::decode(&after_asp)
+                .or_else(|_| base64::engine::general_purpose::STANDARD.decode(&after_asp))
                 .ok();
             if let Some(bytes) = bytes {
                 if let Ok(asp_psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
@@ -2782,11 +3035,17 @@ impl ArkService {
                             if let Some(asp_input) = asp_psbt.inputs.get(asp_idx) {
                                 if merged_idx < merged.inputs.len() {
                                     // Copy taproot script spend sigs from ASP
+                                    let asp_sigs_added = asp_input.tap_script_sigs.len();
                                     for (key, sig) in &asp_input.tap_script_sigs {
                                         merged.inputs[merged_idx]
                                             .tap_script_sigs
-                                            .entry(*key)
-                                            .or_insert(*sig);
+                                            .insert(*key, *sig);
+                                    }
+                                    if asp_sigs_added > 0 {
+                                        info!(
+                                            merged_idx,
+                                            asp_sigs_added, "Merged ASP tap_script_sigs"
+                                        );
                                     }
                                     // Copy taproot key spend sig if present
                                     if merged.inputs[merged_idx].tap_key_sig.is_none() {

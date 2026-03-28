@@ -539,6 +539,7 @@ message IssueAssetRequest {
 message IssueAssetResponse {
   string asset_id = 1;
   string txid = 2;
+  repeated string issued_asset_ids = 3;
 }
 
 // ReissueAsset
