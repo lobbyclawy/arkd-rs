@@ -76,7 +76,7 @@ jobs:
             'url = "sqlite:///tmp/dark-e2e.db"' \
             '' \
             '[ark]' \
-            'round_duration_secs = 10' \
+            'round_duration_secs = 5' \
             'vtxo_expiry_blocks = 144' \
             'connector_timelock_blocks = 12' \
             'min_vtxo_amount_sats = 1000' \
