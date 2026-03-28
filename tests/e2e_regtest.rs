@@ -1875,7 +1875,7 @@ fn filter_vtxos_with_asset(
 ) -> Vec<dark_client::types::Vtxo> {
     vtxos
         .iter()
-        .filter(|v| v.assets.iter().any(|a| a.asset_id == asset_id))
+        .filter(|v| !v.is_spent && !v.is_swept && v.assets.iter().any(|a| a.asset_id == asset_id))
         .cloned()
         .collect()
 }
