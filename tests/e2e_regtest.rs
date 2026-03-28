@@ -2003,7 +2003,7 @@ async fn test_asset_transfer_and_renew() {
     // attaches assets based on VTXO ownership. When send_offchain gains explicit asset
     // support, update this call to pass TRANSFER_AMOUNT.
     let send_result = alice
-        .send_offchain(&alice_pubkey, bob_offchain, 400, &alice_sk)
+        .send_offchain(&alice_pubkey, bob_offchain, 1_000, &alice_sk)
         .await
         .expect("send_offchain to Bob failed");
     assert!(!send_result.txid.is_empty(), "send txid must not be empty");
