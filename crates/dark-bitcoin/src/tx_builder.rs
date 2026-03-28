@@ -842,7 +842,10 @@ mod tests {
         assert!(psbt.unsigned_tx.output.len() >= 2);
         // VTXO root output should carry the receiver amount + tree fee budget
         // 1 receiver → 1 tree tx → fee budget = TREE_TX_FEE = 300
-        assert_eq!(psbt.unsigned_tx.output[0].value.to_sat(), 50_000 + TREE_TX_FEE);
+        assert_eq!(
+            psbt.unsigned_tx.output[0].value.to_sat(),
+            50_000 + TREE_TX_FEE
+        );
     }
 
     // ── Test 2: VTXO tree with multiple receivers produces real tree ─

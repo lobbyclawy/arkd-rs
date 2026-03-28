@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 use async_trait::async_trait;
 use bitcoin::consensus::deserialize;
-use bitcoin::key::{TapTweak, TweakedPublicKey};
+use bitcoin::key::TapTweak;
 use bitcoin::psbt::Psbt;
 use bitcoin::taproot::ControlBlock;
 use bitcoin::{
