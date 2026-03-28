@@ -1317,7 +1317,12 @@ impl ArkClient {
     }
 
     /// Reissue more units of an existing asset (requires control asset).
-    pub async fn reissue_asset(&mut self, asset_id: &str, amount: u64) -> ClientResult<String> {
+    pub async fn reissue_asset(
+        &mut self,
+        owner_pubkey: &str,
+        asset_id: &str,
+        amount: u64,
+    ) -> ClientResult<String> {
         if asset_id.is_empty() {
             return Err(ClientError::Validation("asset_id must not be empty".into()));
         }
@@ -1328,7 +1333,7 @@ impl ArkClient {
         let response = client
             .reissue_asset(ReissueAssetRequest {
                 asset_id: asset_id.to_string(),
-                pubkey: String::new(),
+                pubkey: owner_pubkey.to_string(),
                 amount,
             })
             .await
@@ -1337,7 +1342,12 @@ impl ArkClient {
     }
 
     /// Burn `amount` units of `asset_id`, removing them permanently from circulation.
-    pub async fn burn_asset(&mut self, asset_id: &str, amount: u64) -> ClientResult<String> {
+    pub async fn burn_asset(
+        &mut self,
+        owner_pubkey: &str,
+        asset_id: &str,
+        amount: u64,
+    ) -> ClientResult<String> {
         if asset_id.is_empty() {
             return Err(ClientError::Validation("asset_id must not be empty".into()));
         }
@@ -1348,7 +1358,7 @@ impl ArkClient {
         let response = client
             .burn_asset(BurnAssetRequest {
                 asset_id: asset_id.to_string(),
-                pubkey: String::new(),
+                pubkey: owner_pubkey.to_string(),
                 amount,
             })
             .await

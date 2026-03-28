@@ -2286,7 +2286,7 @@ async fn test_asset_burn_and_reissue() {
 
     // ── Burn 1500 units ─────────────────────────────────────────────────
     let burn_txid = alice
-        .burn_asset(&asset_id, BURN_AMOUNT)
+        .burn_asset(&alice_pubkey, &asset_id, BURN_AMOUNT)
         .await
         .expect("BurnAsset failed");
     assert!(!burn_txid.is_empty(), "burn txid must not be empty");
@@ -2317,7 +2317,7 @@ async fn test_asset_burn_and_reissue() {
 
     // ── Reissue 1000 more units ─────────────────────────────────────────
     let reissue_txid = alice
-        .reissue_asset(&asset_id, REISSUE_AMOUNT)
+        .reissue_asset(&alice_pubkey, &asset_id, REISSUE_AMOUNT)
         .await
         .expect("ReissueAsset failed");
     assert!(!reissue_txid.is_empty(), "reissue txid must not be empty");
