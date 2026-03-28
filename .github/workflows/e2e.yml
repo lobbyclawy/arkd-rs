@@ -165,7 +165,6 @@ jobs:
     name: E2E tests (arkd Go)
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    needs: e2e
 
     steps:
       - uses: actions/checkout@v4
