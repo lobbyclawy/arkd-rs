@@ -1,4 +1,4 @@
-name: E2E Tests (Go arkd suite)
+name: E2E Tests (arkd Go)
 
 on:
   schedule:
@@ -15,7 +15,7 @@ env:
 
 jobs:
   go-e2e:
-    name: Go E2E tests (arkade-os/arkd suite against dark)
+    name: E2E tests (arkd Go)
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
