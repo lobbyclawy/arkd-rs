@@ -31,6 +31,24 @@ jobs:
         with:
           use_liquid: false
 
+      - name: Allow zero-fee relay (for v3 tree txs)
+        run: |
+          # Ark tree transactions have zero fees (v3/CPFP design).
+          # Set minrelaytxfee=0 so sendrawtransaction accepts them.
+          docker exec bitcoin bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 stop || true
+          sleep 2
+          CONF=$(docker exec bitcoin find / -name bitcoin.conf 2>/dev/null | head -1)
+          docker exec bitcoin sh -c "echo 'minrelaytxfee=0' >> ${CONF}"
+          docker start bitcoin
+          # Wait for bitcoind to be ready
+          for i in $(seq 1 30); do
+            if docker exec bitcoin bitcoin-cli -regtest -rpcuser=admin1 -rpcpassword=123 getblockchaininfo >/dev/null 2>&1; then
+              echo "bitcoind ready"
+              break
+            fi
+            sleep 1
+          done
+
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
