@@ -1564,29 +1564,26 @@ impl ArkServiceTrait for ArkGrpcService {
         if req.amount == 0 {
             return Err(Status::invalid_argument("amount must be > 0"));
         }
+        if req.pubkey.is_empty() {
+            return Err(Status::invalid_argument("pubkey must not be empty"));
+        }
 
-        // Determine the pubkey to use — prefer the request pubkey, fall back to a
-        // deterministic placeholder so tests that don't set it still get unique IDs.
-        let pubkey = if req.pubkey.is_empty() {
-            "default-issuer".to_string()
-        } else {
-            req.pubkey.clone()
-        };
+        let pubkey = req.pubkey.clone();
 
-        // Generate a unique, deterministic asset_id via SHA-256
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
+        // Generate a deterministic asset_id via SHA-256(pubkey || name || amount).
+        // No timestamp — the same inputs always produce the same asset_id, which
+        // makes issuance idempotent for retries.
         let mut hasher = Sha256::new();
         hasher.update(pubkey.as_bytes());
         hasher.update(req.name.as_bytes());
         hasher.update(req.amount.to_le_bytes());
-        hasher.update(now.to_le_bytes());
         let asset_id = hex::encode(hasher.finalize());
 
-        // Parse control_asset from the name field tag (set by client):
-        //   "control:new:<amount>" or "control:existing:<id>"
+        // The `name` field encodes the control asset type using a protocol tag
+        // understood by the client SDK:
+        //   "control:new:<amount>"       — mint a new control asset alongside the main asset
+        //   "control:existing:<id>"      — reference an already-minted control asset
+        //   ""                           — plain issuance, no control asset
         let mut issued_asset_ids = Vec::new();
         let mut vtxo_assets: Vec<(String, u64)> = Vec::new();
 
@@ -1596,7 +1593,7 @@ impl ArkServiceTrait for ArkGrpcService {
             let mut ctrl_hasher = Sha256::new();
             ctrl_hasher.update(b"control:");
             ctrl_hasher.update(pubkey.as_bytes());
-            ctrl_hasher.update(now.to_le_bytes());
+            ctrl_hasher.update(control_amount.to_le_bytes());
             let control_asset_id = hex::encode(ctrl_hasher.finalize());
 
             // Store control asset
@@ -1638,7 +1635,7 @@ impl ArkServiceTrait for ArkGrpcService {
         let mut tx_hasher = Sha256::new();
         tx_hasher.update(b"issue-tx:");
         tx_hasher.update(asset_id.as_bytes());
-        tx_hasher.update(now.to_le_bytes());
+        tx_hasher.update(pubkey.as_bytes());
         let txid = hex::encode(tx_hasher.finalize());
 
         // Store issuance record
@@ -1656,13 +1653,13 @@ impl ArkServiceTrait for ArkGrpcService {
         };
         let _ = self.core.asset_repo().store_issuance(&issuance).await;
 
-        // Create a VTXO that carries the asset(s)
+        // Create a VTXO that carries the asset(s).
+        // The sat amount is the dust limit — asset VTXOs don't carry real BTC value,
+        // they just need enough sats to be valid on-chain if settled.
+        const ASSET_VTXO_DUST_SATS: u64 = 546;
         let vtxo_outpoint = dark_core::domain::VtxoOutpoint::new(txid.clone(), 0);
-        let mut vtxo = dark_core::domain::Vtxo::new(
-            vtxo_outpoint,
-            450, // minimal sat amount for the VTXO
-            pubkey.clone(),
-        );
+        let mut vtxo =
+            dark_core::domain::Vtxo::new(vtxo_outpoint, ASSET_VTXO_DUST_SATS, pubkey.clone());
         vtxo.ark_txid = txid.clone();
         vtxo.preconfirmed = true;
         vtxo.assets = vtxo_assets;
@@ -1715,21 +1712,19 @@ impl ArkServiceTrait for ArkGrpcService {
             req.pubkey.clone()
         };
 
-        // Generate txid for the reissuance
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
+        // Generate deterministic txid for the reissuance
         let mut hasher = Sha256::new();
         hasher.update(b"reissue-tx:");
         hasher.update(req.asset_id.as_bytes());
         hasher.update(req.amount.to_le_bytes());
-        hasher.update(now.to_le_bytes());
+        hasher.update(pubkey.as_bytes());
         let txid = hex::encode(hasher.finalize());
 
         // Create a new VTXO with the reissued amount
+        const ASSET_VTXO_DUST_SATS: u64 = 546;
         let vtxo_outpoint = dark_core::domain::VtxoOutpoint::new(txid.clone(), 0);
-        let mut vtxo = dark_core::domain::Vtxo::new(vtxo_outpoint, 450, pubkey.clone());
+        let mut vtxo =
+            dark_core::domain::Vtxo::new(vtxo_outpoint, ASSET_VTXO_DUST_SATS, pubkey.clone());
         vtxo.ark_txid = txid.clone();
         vtxo.preconfirmed = true;
         vtxo.assets = vec![(req.asset_id.clone(), req.amount)];
@@ -1784,16 +1779,12 @@ impl ArkServiceTrait for ArkGrpcService {
             req.pubkey.clone()
         };
 
-        // Generate txid for the burn
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
+        // Generate deterministic txid for the burn
         let mut hasher = Sha256::new();
         hasher.update(b"burn-tx:");
         hasher.update(req.asset_id.as_bytes());
         hasher.update(req.amount.to_le_bytes());
-        hasher.update(now.to_le_bytes());
+        hasher.update(pubkey.as_bytes());
         let txid = hex::encode(hasher.finalize());
 
         // Find existing VTXOs with this asset for this pubkey and reduce their balance
