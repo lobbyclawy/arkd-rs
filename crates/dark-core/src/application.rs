@@ -2122,10 +2122,111 @@ impl ArkService {
                     }
                 }
                 Ok(false) => {
-                    info!(
-                        commitment_txid = %commitment_txid,
-                        "Commitment tx vout 0 not spent yet"
-                    );
+                    // Fallback: the Esplora outspend API is unreliable in some
+                    // environments (notably regtest with electrs). Try an
+                    // alternative detection path:
+                    //
+                    // 1. Look up the round that produced this commitment tx.
+                    // 2. Find the first tree transaction (the one that spends
+                    //    the commitment tx vout 0 when the user unrolls).
+                    // 3. Check if that tree tx is confirmed on-chain.
+                    //
+                    // If confirmed, the tree was unrolled.
+                    let mut found_onchain = false;
+                    match self
+                        .round_repo
+                        .get_round_by_commitment_txid(commitment_txid)
+                        .await
+                    {
+                        Ok(Some(round)) => {
+                            // The vtxo_tree is flattened bottom-up: children
+                            // first, root last. The root tx spends commitment
+                            // tx vout 0 when the user unrolls.
+                            //
+                            // Note: the stored `node.txid` may be stale if the
+                            // commitment tx was patched after fee-input addition.
+                            // Compute the real txid from the PSBT.
+                            if let Some(root_node) = round.vtxo_tree.last() {
+                                let tree_root_txid = Self::compute_txid_from_psbt(&root_node.tx)
+                                    .unwrap_or_else(|| root_node.txid.clone());
+                                info!(
+                                    tree_root_txid = %tree_root_txid,
+                                    commitment_txid = %commitment_txid,
+                                    tree_size = round.vtxo_tree.len(),
+                                    "Fallback: checking tree root tx confirmation"
+                                );
+                                match self.scanner.is_tx_confirmed(&tree_root_txid).await {
+                                    Ok(true) => {
+                                        info!(
+                                            tree_root_txid = %tree_root_txid,
+                                            commitment_txid = %commitment_txid,
+                                            "Tree root tx confirmed on-chain — marking group as unrolled"
+                                        );
+                                        found_onchain = true;
+                                    }
+                                    Ok(false) => {
+                                        info!(
+                                            tree_root_txid = %tree_root_txid,
+                                            commitment_txid = %commitment_txid,
+                                            "Tree root tx not yet confirmed"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        info!(
+                                            tree_root_txid = %tree_root_txid,
+                                            error = %e,
+                                            "Failed to check tree root tx confirmation"
+                                        );
+                                    }
+                                }
+                            } else {
+                                info!(
+                                    commitment_txid = %commitment_txid,
+                                    "Round found but vtxo_tree is empty"
+                                );
+                            }
+                        }
+                        Ok(None) => {
+                            info!(
+                                commitment_txid = %commitment_txid,
+                                "No round found for commitment txid (fallback skipped)"
+                            );
+                        }
+                        Err(e) => {
+                            info!(
+                                commitment_txid = %commitment_txid,
+                                error = %e,
+                                "Failed to look up round for commitment txid"
+                            );
+                        }
+                    }
+                    if found_onchain {
+                        for vtxo in vtxos {
+                            info!(
+                                outpoint = %vtxo.outpoint,
+                                commitment_txid = %commitment_txid,
+                                "Marking VTXO as unrolled (tree-root-confirmation fallback)"
+                            );
+                            if let Err(e) = self
+                                .vtxo_repo
+                                .mark_vtxos_unrolled(std::slice::from_ref(vtxo))
+                                .await
+                            {
+                                warn!(
+                                    outpoint = %vtxo.outpoint,
+                                    error = %e,
+                                    "Failed to mark VTXO as unrolled"
+                                );
+                            } else {
+                                count += 1;
+                            }
+                        }
+                    } else {
+                        info!(
+                            commitment_txid = %commitment_txid,
+                            "Commitment tx vout 0 not spent yet"
+                        );
+                    }
                 }
                 Err(e) => {
                     info!(
@@ -3945,6 +4046,16 @@ impl ArkService {
     /// Patch every vtxo tree node whose TxIn[0].previous_output.txid equals
     /// `old_txid` to reference `new_txid` instead.  This is required after
     /// adding the server fee input to the commitment tx, which changes its txid.
+    /// Extract the txid from a base64-encoded PSBT's unsigned transaction.
+    fn compute_txid_from_psbt(psbt_b64: &str) -> Option<String> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(psbt_b64)
+            .ok()?;
+        let psbt = bitcoin::psbt::Psbt::deserialize(&bytes).ok()?;
+        Some(psbt.unsigned_tx.compute_txid().to_string())
+    }
+
     fn patch_vtxo_tree_commitment_txid(
         tree: &[crate::domain::TxTreeNode],
         old_txid: &str,
