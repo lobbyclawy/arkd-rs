@@ -4136,18 +4136,15 @@ impl ArkService {
         use std::collections::HashMap;
 
         // Index nodes by their current txid for quick lookup.
-        let mut nodes: HashMap<String, crate::domain::TxTreeNode> = tree
-            .iter()
-            .map(|n| (n.txid.clone(), n.clone()))
-            .collect();
+        let mut nodes: HashMap<String, crate::domain::TxTreeNode> =
+            tree.iter().map(|n| (n.txid.clone(), n.clone())).collect();
 
         // Patch a single node's PSBT inputs, replacing old_parent_txid with
         // new_parent_txid. Returns (new_psbt_b64, new_txid) or None if unchanged.
-        let patch_node_input =
-            |node: &crate::domain::TxTreeNode,
-             old_parent: &str,
-             new_parent: &str|
-             -> Option<(String, String)> {
+        let patch_node_input = |node: &crate::domain::TxTreeNode,
+                                old_parent: &str,
+                                new_parent: &str|
+         -> Option<(String, String)> {
                 if node.tx.is_empty() {
                     return None;
                 }
@@ -4245,7 +4242,6 @@ impl ArkService {
                             n.children = new_children;
                         }
                     }
-
                 }
             }
         }
