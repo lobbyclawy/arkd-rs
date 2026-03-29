@@ -1074,6 +1074,7 @@ mod tests {
             swept: false,
             preconfirmed: false,
             expires_at: 9999,
+            expires_at_block: 0,
             created_at: 1000,
             assets: vec![],
         };
@@ -1112,6 +1113,7 @@ mod tests {
             swept: true,
             preconfirmed: false,
             expires_at: 0,
+            expires_at_block: 0,
             created_at: 0,
             assets: vec![],
         };
