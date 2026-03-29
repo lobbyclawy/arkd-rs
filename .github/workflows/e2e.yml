@@ -171,7 +171,6 @@ jobs:
 
   go-e2e:
     name: E2E tests (arkd Go)
-    if: false  # Disabled: pre-existing tree verification failure; workflow_dispatch still available
     runs-on: ubuntu-latest
     timeout-minutes: 90
 

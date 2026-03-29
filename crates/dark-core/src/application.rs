@@ -892,6 +892,69 @@ impl ArkService {
             .into_iter()
             .collect();
 
+        // ── Debug: validate tree root outputs match batch output ─────────
+        {
+            use base64::Engine;
+            let b64 = &result_commitment_tx;
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) {
+                if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
+                    let batch_amount = psbt.unsigned_tx.output.first().map(|o| o.value.to_sat());
+                    let output_count = psbt.unsigned_tx.output.len();
+                    let input_count = psbt.unsigned_tx.input.len();
+                    let commitment_txid = psbt.unsigned_tx.compute_txid().to_string();
+                    info!(
+                        batch_amount = ?batch_amount,
+                        output_count,
+                        input_count,
+                        commitment_txid = %commitment_txid,
+                        "GO_E2E_DEBUG: commitment tx after fee input"
+                    );
+                    for (i, o) in psbt.unsigned_tx.output.iter().enumerate() {
+                        info!(
+                            index = i,
+                            amount = o.value.to_sat(),
+                            script_len = o.script_pubkey.len(),
+                            "GO_E2E_DEBUG: commitment tx output"
+                        );
+                    }
+                }
+            }
+            // Find the root tree node (not a child of any other node)
+            let child_txids: std::collections::HashSet<String> = patched_vtxo_tree
+                .iter()
+                .flat_map(|n| n.children.values())
+                .cloned()
+                .collect();
+            for node in &patched_vtxo_tree {
+                if !child_txids.contains(&node.txid) {
+                    // This is likely the root
+                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&node.tx) {
+                        if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
+                            let root_output_sum: u64 = psbt.unsigned_tx.output.iter().map(|o| o.value.to_sat()).sum();
+                            let root_txid = psbt.unsigned_tx.compute_txid().to_string();
+                            let root_input_txid = psbt.unsigned_tx.input.first().map(|i| i.previous_output.txid.to_string());
+                            info!(
+                                root_output_sum,
+                                root_txid = %root_txid,
+                                root_input_txid = ?root_input_txid,
+                                stored_txid = %node.txid,
+                                num_outputs = psbt.unsigned_tx.output.len(),
+                                "GO_E2E_DEBUG: vtxo tree root node"
+                            );
+                            for (i, o) in psbt.unsigned_tx.output.iter().enumerate() {
+                                info!(
+                                    index = i,
+                                    amount = o.value.to_sat(),
+                                    script_len = o.script_pubkey.len(),
+                                    "GO_E2E_DEBUG: root tx output"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Inject cosigner pubkeys as PSBT Unknown fields into vtxo tree nodes
         // Format: Key = [0xDE] + "cosigner" + [4-byte BE index], Value = 33-byte compressed pubkey
         let vtxo_tree = Self::inject_cosigner_fields(&patched_vtxo_tree, &cosigners_pubkeys);
