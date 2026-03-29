@@ -3922,9 +3922,11 @@ async fn test_sweep_unrolled_batch() {
 
     // Mine more blocks to expire all remaining batch outputs
     mine_blocks(25).await;
-    tokio::time::sleep(Duration::from_secs(45)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
-    // Verify all VTXOs are swept
+    // After full expiry: Alice's VTXO was unrolled (on-chain), so it won't appear as swept —
+    // it's already claimed on-chain. Bob/Charlie/Mike's VTXOs may be swept by the server.
+    // Verify: no participant has un-swept, non-spent VTXOs that are neither unrolled nor swept.
     for (name, client, pubkey) in [
         ("Alice", &mut alice, &alice_pubkey),
         ("Bob", &mut bob, &bob_pubkey),
@@ -3932,22 +3934,25 @@ async fn test_sweep_unrolled_batch() {
         ("Mike", &mut mike, &mike_pubkey),
     ] {
         let vtxos = client.list_vtxos(pubkey).await.expect("list_vtxos");
-        let non_spent: Vec<_> = vtxos.iter().filter(|v| !v.is_spent).collect();
-        let swept: Vec<_> = non_spent.iter().filter(|v| v.is_swept).collect();
         eprintln!(
-            "{}: {} total, {} non-spent, {} swept",
+            "{}: {} total VTXOs (spent={}, swept={}, unrolled={})",
             name,
             vtxos.len(),
-            non_spent.len(),
-            swept.len()
+            vtxos.iter().filter(|v| v.is_spent).count(),
+            vtxos.iter().filter(|v| v.is_swept).count(),
+            vtxos.iter().filter(|v| v.is_unrolled).count(),
         );
-        if !non_spent.is_empty() {
-            assert!(
-                !swept.is_empty(),
-                "{} should have swept VTXOs after full expiry",
-                name
-            );
-        }
+        // All VTXOs should be in a terminal state: spent, swept, or unrolled
+        let active: Vec<_> = vtxos
+            .iter()
+            .filter(|v| !v.is_spent && !v.is_swept && !v.is_unrolled)
+            .collect();
+        assert!(
+            active.is_empty(),
+            "{} has {} active (non-terminal) VTXOs after full expiry",
+            name,
+            active.len()
+        );
     }
 
     eprintln!("✅ test_sweep_unrolled_batch passed");
