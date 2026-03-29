@@ -3819,18 +3819,38 @@ async fn test_sweep_unrolled_batch() {
         .expect("create charlie note");
     let mike_note = admin.create_note(21_000).await.expect("create mike note");
 
-    // Wait for a round to enter registration stage before redeeming notes
-    tokio::time::sleep(Duration::from_secs(6)).await;
+    // Retry redeem_notes until the server is in registration stage (up to 60s)
+    let alice_txid = {
+        let mut txid = String::new();
+        for attempt in 1..=12 {
+            match alice
+                .redeem_notes(vec![alice_note.clone()], &alice_pubkey)
+                .await
+            {
+                Ok(t) => {
+                    txid = t;
+                    break;
+                }
+                Err(e) if e.to_string().contains("Not in registration stage") => {
+                    eprintln!("attempt {attempt}: not in registration stage, retrying in 5s...");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+                Err(e) => panic!("alice redeem failed: {}", e),
+            }
+        }
+        assert!(
+            !txid.is_empty(),
+            "alice redeem timed out waiting for registration stage"
+        );
+        txid
+    };
 
-    // All 4 redeem notes in the same batch
-    let (alice_res, bob_res, charlie_res, mike_res) = tokio::join!(
-        alice.redeem_notes(vec![alice_note], &alice_pubkey),
+    // Now redeem the rest concurrently (round is open)
+    let (bob_res, charlie_res, mike_res) = tokio::join!(
         bob.redeem_notes(vec![bob_note], &bob_pubkey),
         charlie.redeem_notes(vec![charlie_note], &charlie_pubkey),
         mike.redeem_notes(vec![mike_note], &mike_pubkey),
     );
-
-    let alice_txid = alice_res.expect("alice redeem failed");
     let bob_txid = bob_res.expect("bob redeem failed");
     let charlie_txid = charlie_res.expect("charlie redeem failed");
     let mike_txid = mike_res.expect("mike redeem failed");
