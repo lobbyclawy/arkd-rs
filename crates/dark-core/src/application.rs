@@ -2083,7 +2083,17 @@ impl ArkService {
         }
 
         let mut count = 0u32;
+        info!(
+            commitment_groups = by_commitment.len(),
+            "check_unrolled_vtxos: checking {} commitment txids",
+            by_commitment.len()
+        );
         for (commitment_txid, vtxos) in &by_commitment {
+            info!(
+                commitment_txid = %commitment_txid,
+                vtxo_count = vtxos.len(),
+                "check_unrolled_vtxos: checking outspend for commitment txid"
+            );
             // The VTXO tree root is always at vout 0 of the commitment tx.
             // When a user unrolls, they broadcast the first tree transaction
             // which spends this output. Detecting the spend means the tree
@@ -2111,9 +2121,14 @@ impl ArkService {
                         }
                     }
                 }
-                Ok(false) => {} // Tree not unrolled yet
+                Ok(false) => {
+                    info!(
+                        commitment_txid = %commitment_txid,
+                        "Commitment tx vout 0 not spent yet"
+                    );
+                }
                 Err(e) => {
-                    debug!(
+                    info!(
                         commitment_txid = %commitment_txid,
                         error = %e,
                         "Failed to check commitment tx output spend status"
