@@ -1966,13 +1966,71 @@ impl ArkServiceTrait for ArkGrpcService {
         // auto-completes signing for rounds with no cosigners. Leave cosigners empty.
         intent.cosigners_public_keys = vec![];
 
-        let intent_id = match self.core.register_intent(intent).await {
-            Ok(id) => id,
-            Err(e) => {
-                // Registration failed — rollback pending notes so they're available again.
-                self.note_store.rollback_pending(&pending_key).await;
-                warn!("Intent registration failed, rolled back pending notes: {e}");
-                return Err(Status::internal(e.to_string()));
+        // Subscribe to the event bus BEFORE attempting registration so we
+        // never miss a RoundStarted event that fires between our attempt and
+        // the subscribe call.
+        let mut event_rx = self
+            .core
+            .subscribe_events()
+            .await
+            .map_err(|e| Status::internal(format!("Failed to subscribe to events: {e}")))?;
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+
+        let intent_id = loop {
+            match self.core.register_intent(intent.clone()).await {
+                Ok(id) => break id,
+                Err(e) => {
+                    let msg = e.to_string();
+                    if !msg.contains("Not in registration stage") {
+                        // Non-retryable error — rollback and return immediately.
+                        self.note_store.rollback_pending(&pending_key).await;
+                        warn!("Intent registration failed, rolled back pending notes: {e}");
+                        return Err(Status::internal(msg));
+                    }
+
+                    // The round is not currently accepting registrations.
+                    // Wait for the next RoundStarted event, then retry.
+                    info!("Round not in registration stage, waiting for next RoundStarted…");
+                    loop {
+                        let timeout =
+                            deadline.saturating_duration_since(tokio::time::Instant::now());
+                        if timeout.is_zero() {
+                            self.note_store.rollback_pending(&pending_key).await;
+                            warn!("Timed out waiting for registration window");
+                            return Err(Status::internal(
+                                "Timed out waiting for a round in registration stage".to_string(),
+                            ));
+                        }
+                        match tokio::time::timeout(timeout, event_rx.recv()).await {
+                            Ok(Ok(dark_core::domain::ArkEvent::RoundStarted { .. })) => {
+                                // New round started — break inner loop to retry registration.
+                                break;
+                            }
+                            Ok(Ok(_)) => {
+                                // Irrelevant event — keep waiting.
+                                continue;
+                            }
+                            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
+                                warn!(skipped = n, "Event subscriber lagged, continuing");
+                                continue;
+                            }
+                            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                                self.note_store.rollback_pending(&pending_key).await;
+                                return Err(Status::internal("Event bus closed".to_string()));
+                            }
+                            Err(_) => {
+                                // Timeout elapsed.
+                                self.note_store.rollback_pending(&pending_key).await;
+                                warn!("Timed out waiting for RoundStarted event");
+                                return Err(Status::internal(
+                                    "Timed out waiting for a round in registration stage"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
             }
         };
 
