@@ -729,6 +729,13 @@ pub struct ScriptSpentEvent {
     pub block_height: u32,
 }
 
+/// Notification when a new block is detected on-chain.
+#[derive(Debug, Clone)]
+pub struct NewBlockEvent {
+    /// The new chain tip height.
+    pub height: u32,
+}
+
 /// Blockchain scanner for watching on-chain VTXO spends.
 ///
 /// Implementations monitor the blockchain for transactions that spend
@@ -770,6 +777,18 @@ pub trait BlockchainScanner: Send + Sync {
     /// Default implementation returns `Ok(false)`.
     async fn is_output_spent(&self, _txid: &str, _vout: u32) -> ArkResult<bool> {
         Ok(false)
+    }
+
+    /// Get a receiver for new-block notifications.
+    ///
+    /// Emits a [`NewBlockEvent`] whenever the scanner detects a new chain tip.
+    /// This allows consumers to react immediately to new blocks rather than
+    /// relying solely on fixed-interval polling.
+    ///
+    /// Default implementation returns a channel that never fires.
+    fn block_notification_channel(&self) -> tokio::sync::broadcast::Receiver<NewBlockEvent> {
+        let (sender, _) = tokio::sync::broadcast::channel(1);
+        sender.subscribe()
     }
 }
 

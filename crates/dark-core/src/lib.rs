@@ -65,8 +65,9 @@ pub use ports::{
     FraudDetector, IndexerService, IndexerStats, LoggingEventPublisher, NoopAlerts,
     NoopBlockchainScanner, NoopCheckpointRepository, NoopConvictionRepository, NoopFeeManager,
     NoopForfeitRepository, NoopFraudDetector, NoopIndexerService, NoopOffchainTxRepository,
-    NoopScheduledSessionRepository, NoopSweepService, NoopTxDecoder, OffchainTxRepository,
-    RoundRepository, ScheduledSessionRepository, ScriptSpentEvent, SignerService, SweepResult,
+    NewBlockEvent, NoopScheduledSessionRepository, NoopSweepService, NoopTxDecoder,
+    OffchainTxRepository, RoundRepository, ScheduledSessionRepository, ScriptSpentEvent,
+    SignerService, SweepResult,
     SweepService, TxBuilder, TxDecoder, Unlocker, VtxoRepository, WalletBalance, WalletService,
 };
 pub use round_loop::spawn_round_loop;

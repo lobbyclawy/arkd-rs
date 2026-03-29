@@ -2178,39 +2178,68 @@ impl ArkService {
         Ok(count)
     }
 
-    /// Spawn a background maintenance loop that periodically:
+    /// Run all maintenance checks: unroll detection and expired VTXO sweeps.
+    async fn run_maintenance(self: &Arc<Self>) {
+        // 1. Check for unrolled VTXOs
+        if let Err(e) = self.check_unrolled_vtxos().await {
+            warn!(error = %e, "Maintenance: unroll check failed");
+        }
+
+        // 2. Sweep expired VTXOs (by wall-clock time)
+        if let Err(e) = self.sweep_expired_vtxos().await {
+            debug!(error = %e, "Maintenance: time-based sweep failed");
+        }
+
+        // 3. Sweep expired VTXOs (by block height)
+        // This handles block-height-based CSV configs where expires_at
+        // is a block height rather than a timestamp.
+        if let Err(e) = self.sweep_expired_by_height().await {
+            debug!(error = %e, "Maintenance: block-height sweep failed");
+        }
+    }
+
+    /// Spawn a background maintenance loop that:
     /// 1. Checks for unrolled VTXOs (on-chain tree broadcasts)
     /// 2. Sweeps expired VTXOs (by wall-clock time and block height)
     ///
-    /// This loop runs every 10 seconds and ensures the server stays
-    /// up-to-date with on-chain state, including after wallet lock/unlock.
+    /// Runs immediately on new block notifications from the scanner, and
+    /// also periodically (every 10 seconds) as a fallback to ensure the
+    /// server stays up-to-date even if block notifications are missed.
     pub fn spawn_maintenance_loop(self: &Arc<Self>) {
         let svc = Arc::clone(self);
         tokio::spawn(async move {
             info!("Maintenance loop started (unroll detection + sweep)");
+            let mut block_rx = svc.scanner.block_notification_channel();
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             // Skip the immediate first tick
             interval.tick().await;
 
             loop {
-                interval.tick().await;
-
-                // 1. Check for unrolled VTXOs
-                if let Err(e) = svc.check_unrolled_vtxos().await {
-                    warn!(error = %e, "Maintenance: unroll check failed");
+                tokio::select! {
+                    _ = interval.tick() => {
+                        debug!("Maintenance: periodic tick");
+                    }
+                    block_event = block_rx.recv() => {
+                        match block_event {
+                            Ok(event) => {
+                                info!(height = event.height, "Maintenance: new block detected, running checks");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                warn!(skipped = n, "Maintenance: block notification lagged");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                info!("Maintenance: block notification channel closed, falling back to periodic only");
+                                // Channel closed — fall through to periodic-only loop below
+                                loop {
+                                    interval.tick().await;
+                                    svc.run_maintenance().await;
+                                }
+                            }
+                        }
+                    }
                 }
 
-                // 2. Sweep expired VTXOs (by wall-clock time)
-                if let Err(e) = svc.sweep_expired_vtxos().await {
-                    debug!(error = %e, "Maintenance: time-based sweep failed");
-                }
-
-                // 3. Sweep expired VTXOs (by block height)
-                // This handles block-height-based CSV configs where expires_at
-                // is a block height rather than a timestamp.
-                if let Err(e) = svc.sweep_expired_by_height().await {
-                    debug!(error = %e, "Maintenance: block-height sweep failed");
-                }
+                svc.run_maintenance().await;
             }
         });
     }
