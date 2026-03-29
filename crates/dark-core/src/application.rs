@@ -506,7 +506,8 @@ impl ArkService {
             // We need just the raw bytes (push opcode + data).
             let seq_hex = hex::encode(seq_bytes.as_bytes());
             // Build full script:  <seq_push> OP_CSV OP_DROP 20 <pubkey32> OP_CHECKSIG
-            let pubkey_hex = hex::encode(signer_pubkey.serialize());
+            // Use forfeit_pubkey (same as Go server's checkpointClosure).
+            let pubkey_hex = hex::encode(forfeit_pubkey.serialize());
             format!("{}b27520{}ac", seq_hex, pubkey_hex)
         };
 
@@ -659,11 +660,17 @@ impl ArkService {
             "Including boarding inputs in round"
         );
 
-        // Build commitment transaction
-        let signer_pubkey = self.signer.get_pubkey().await?;
+        // Build commitment transaction.
+        // Use the forfeit pubkey (same key reported to clients in GetInfo)
+        // rather than the raw signer pubkey. The Go server uses forfeitPubkey
+        // for tree building, and the Go client validates the sweep tapscript
+        // using the same forfeit pubkey from GetInfo. Using the signer key
+        // instead would produce a different sweep script and a taproot
+        // script mismatch during client-side validation.
+        let forfeit_pubkey = self.wallet.get_forfeit_pubkey().await?;
         let result = self
             .tx_builder
-            .build_commitment_tx(&signer_pubkey, &intents, &boarding_inputs)
+            .build_commitment_tx(&forfeit_pubkey, &intents, &boarding_inputs)
             .await?;
 
         // Add server wallet fee input NOW, before the PSBT goes to clients.
@@ -765,8 +772,8 @@ impl ArkService {
                     .or_insert((bt.recipient_pubkey, bi.amount));
             }
 
-            // signer_pubkey is already an XOnlyPublicKey (ASP key).
-            let asp_xonly = signer_pubkey;
+            // Use the forfeit pubkey (same key used for tree building above).
+            let asp_xonly = forfeit_pubkey;
 
             if !boarding_info.is_empty() {
                 if let Ok(bytes) =
@@ -1541,13 +1548,15 @@ impl ArkService {
             .await?;
 
         // Build unsigned VTXO tree for the BatchStarted event
-        // (participants need this to verify before confirming)
-        let signer_pubkey = self.signer.get_pubkey().await?;
+        // (participants need this to verify before confirming).
+        // Use forfeit_pubkey for consistency with the Go server, which uses
+        // the forfeit key for sweep tapscripts in the VTXO tree.
+        let forfeit_pubkey = self.wallet.get_forfeit_pubkey().await?;
         let intents: Vec<Intent> = round.intents.values().cloned().collect();
         let boarding_inputs: Vec<crate::ports::BoardingInput> = vec![]; // TODO: include boarding
         let result = self
             .tx_builder
-            .build_commitment_tx(&signer_pubkey, &intents, &boarding_inputs)
+            .build_commitment_tx(&forfeit_pubkey, &intents, &boarding_inputs)
             .await?;
 
         // Store the unsigned tree on the round for later
