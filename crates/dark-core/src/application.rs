@@ -134,6 +134,10 @@ pub struct ArkConfig {
     pub allow_csv_block_type: bool,
     /// Fee program for intent fee calculation (CEL-based fee programs, #242)
     pub fee_program: FeeProgram,
+    /// VTXO expiry in blocks (optional).
+    /// When set, `expires_at` is stored as `creation_height + vtxo_expiry_blocks`
+    /// and the height-based sweep path is used instead of wall-clock time.
+    pub vtxo_expiry_blocks: Option<u32>,
 }
 
 impl Default for ArkConfig {
@@ -163,6 +167,7 @@ impl Default for ArkConfig {
             nostr_private_key: None,
             allow_csv_block_type: false,
             fee_program: FeeProgram::default(),
+            vtxo_expiry_blocks: None,
         }
     }
 }
@@ -383,6 +388,39 @@ impl ArkService {
     /// Get the Ark configuration.
     pub fn config(&self) -> &ArkConfig {
         &self.config
+    }
+
+    /// Compute the `expires_at` value for new VTXOs.
+    ///
+    /// When `vtxo_expiry_blocks` is configured, queries the scanner for the
+    /// current tip height and returns `tip + vtxo_expiry_blocks` (block-height
+    /// based expiry).  Otherwise falls back to wall-clock time:
+    /// `now() + vtxo_expiry_secs`.
+    async fn compute_vtxo_expiry(&self) -> i64 {
+        if let Some(blocks) = self.config.vtxo_expiry_blocks {
+            match self.scanner.tip_height().await {
+                Ok(tip) if tip > 0 => {
+                    let expires = tip as i64 + blocks as i64;
+                    tracing::debug!(
+                        tip_height = tip,
+                        vtxo_expiry_blocks = blocks,
+                        expires_at = expires,
+                        "Using block-height VTXO expiry"
+                    );
+                    return expires;
+                }
+                Ok(_) => {
+                    tracing::warn!("Scanner tip is 0; falling back to time-based VTXO expiry");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to get scanner tip; falling back to time-based VTXO expiry"
+                    );
+                }
+            }
+        }
+        chrono::Utc::now().timestamp() + self.config.vtxo_expiry_secs
     }
 
     /// Return a clone of the current round (if any) for read-only inspection.
@@ -951,7 +989,7 @@ impl ArkService {
             );
 
             // Create VTXOs from intents (same logic as complete_round)
-            let expiry_timestamp = chrono::Utc::now().timestamp() + self.config.vtxo_expiry_secs;
+            let expiry_timestamp = self.compute_vtxo_expiry().await;
             let mut vtxos = Vec::new();
             let mut vtxo_idx = 0u32;
             let leaf_nodes: Vec<&TxTreeNode> = round
@@ -1103,7 +1141,7 @@ impl ArkService {
 
         let intents: Vec<Intent> = round.intents.values().cloned().collect();
         let commitment_txid = round.commitment_txid.clone();
-        let expiry_timestamp = chrono::Utc::now().timestamp() + self.config.vtxo_expiry_secs;
+        let expiry_timestamp = self.compute_vtxo_expiry().await;
 
         let mut vtxos = Vec::new();
         let mut vtxo_idx = 0u32;
