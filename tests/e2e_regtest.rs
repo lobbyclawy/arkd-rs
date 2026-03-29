@@ -1923,18 +1923,11 @@ async fn test_sweep_batch() {
     assert!(!batch.commitment_txid.starts_with("pending:"));
     eprintln!("✅ settled: {}", batch.commitment_txid);
 
-    // Mine blocks and wait for the VTXO to expire by wall clock.
-    // With unilateral_exit_delay=30s in CI, waiting 35s is enough.
-    // The sweep service uses unix timestamps, not block heights.
-    let sweep_blocks = info.unilateral_exit_delay / 600 + 10;
-    mine_blocks(sweep_blocks).await;
-    // Wait for expiry (delay + buffer)
-    let wait_secs = (info.unilateral_exit_delay + 10).min(60) as u64;
-    eprintln!(
-        "Waiting {}s for VTXO expiry (delay={}s)...",
-        wait_secs, info.unilateral_exit_delay
-    );
-    tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+    // Mine blocks past vtxo_expiry_blocks (144 in e2e config) so the server
+    // considers VTXOs expired and eligible for sweeping.
+    mine_blocks(160).await;
+    // Give the sweep service time to detect the expired VTXOs.
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     // Trigger sweep via admin API
     let admin = AdminClient::new(&admin_url());
@@ -1980,9 +1973,9 @@ async fn test_sweep_checkpoint() {
         eprintln!("  broadcast: {}", txid);
     }
 
-    // Mine checkpoint expiry blocks.
-    mine_blocks(15).await;
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Mine past vtxo_expiry_blocks (144 in e2e config) so checkpoint outputs expire.
+    mine_blocks(160).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     let vtxos = client
         .list_vtxos(&alice_pubkey)
@@ -2016,8 +2009,9 @@ async fn test_sweep_force_by_admin() {
         .await
         .expect("settle failed");
 
-    mine_blocks(info.unilateral_exit_delay / 600 + 10).await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Mine past vtxo_expiry_blocks (144 in e2e config) so VTXOs expire.
+    mine_blocks(160).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     // Force sweep via admin REST API.
     let admin = AdminClient::from_env();
@@ -3729,9 +3723,8 @@ async fn test_sweep_with_restart() {
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Mine enough blocks to expire the batch output (vtxo_expiry_blocks = 144 in e2e config)
-    // The server sweeps VTXOs after vtxo_expiry_blocks have passed since the commitment tx.
-    mine_blocks(150).await;
+    // Mine past vtxo_expiry_blocks (144 in e2e config) so VTXOs expire.
+    mine_blocks(160).await;
 
     // Wait for server sweep cycle to run
     tokio::time::sleep(Duration::from_secs(20)).await;
@@ -3883,8 +3876,10 @@ async fn test_sweep_unrolled_batch() {
     mine_blocks(1).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Mine 11 blocks to expire the first sub-batch
-    mine_blocks(11).await;
+    // Mine enough blocks to expire the first sub-batch (vtxo_expiry_blocks = 144 in e2e config).
+    // At this point we've mined ~20 blocks since the commitment. Mine 140 more to reach ~160
+    // total, which expires the first unrolled sub-batch (confirmed earliest).
+    mine_blocks(140).await;
     tokio::time::sleep(Duration::from_secs(20)).await;
 
     // Check partial sweep — alice should NOT be swept yet, but ~2 of the others should
@@ -3919,8 +3914,9 @@ async fn test_sweep_unrolled_batch() {
         swept_count
     );
 
-    // Mine more blocks to expire all remaining batch outputs
-    mine_blocks(25).await;
+    // Mine more blocks to expire all remaining batch outputs.
+    // The second unroll was 10 blocks after the first, so mine enough to cover that gap.
+    mine_blocks(30).await;
     tokio::time::sleep(Duration::from_secs(20)).await;
 
     // After full expiry: Alice's VTXO was unrolled (on-chain), so it won't appear as swept —
