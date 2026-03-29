@@ -466,10 +466,16 @@ impl ArkService {
     /// Get service info
     pub async fn get_info(&self) -> ArkResult<ServiceInfo> {
         let signer_pubkey = self.signer.get_pubkey().await?;
-        let forfeit_pubkey = self.wallet.get_forfeit_pubkey().await?;
         let dust = self.wallet.get_dust_amount().await?;
 
-        // Derive forfeit address from the forfeit pubkey (P2TR)
+        // Use the signer pubkey as the forfeit pubkey. The signer key is
+        // the one used to ASP-sign VTXO tree nodes (taproot key-path spend).
+        // The Go SDK's ValidateVtxoTree checks the sweep tapscript against
+        // the forfeit pubkey from GetInfo, so the key used for tree building,
+        // signing, and GetInfo must all be the same — the signer key.
+        let forfeit_pubkey = signer_pubkey;
+
+        // Derive forfeit address from the signer pubkey (P2TR)
         let network = match self.config.network.as_str() {
             "mainnet" | "bitcoin" => bitcoin::Network::Bitcoin,
             "testnet" => bitcoin::Network::Testnet,
@@ -506,7 +512,7 @@ impl ArkService {
             // We need just the raw bytes (push opcode + data).
             let seq_hex = hex::encode(seq_bytes.as_bytes());
             // Build full script:  <seq_push> OP_CSV OP_DROP 20 <pubkey32> OP_CHECKSIG
-            // Use forfeit_pubkey (same as Go server's checkpointClosure).
+            // Use signer pubkey (matches tree building and ASP signing).
             let pubkey_hex = hex::encode(forfeit_pubkey.serialize());
             format!("{}b27520{}ac", seq_hex, pubkey_hex)
         };
@@ -519,14 +525,10 @@ impl ArkService {
             signer_pubkey,
             bitcoin::secp256k1::Parity::Even,
         );
-        let forfeit_pubkey_compressed = bitcoin::secp256k1::PublicKey::from_x_only_public_key(
-            forfeit_pubkey,
-            bitcoin::secp256k1::Parity::Even,
-        );
 
         Ok(ServiceInfo {
             signer_pubkey: hex::encode(signer_pubkey_compressed.serialize()),
-            forfeit_pubkey: hex::encode(forfeit_pubkey_compressed.serialize()),
+            forfeit_pubkey: hex::encode(signer_pubkey_compressed.serialize()),
             unilateral_exit_delay: self.config.unilateral_exit_delay as i64,
             session_duration: self.config.session_duration_secs as i64,
             network: self.config.network.clone(),
@@ -661,16 +663,15 @@ impl ArkService {
         );
 
         // Build commitment transaction.
-        // Use the forfeit pubkey (same key reported to clients in GetInfo)
-        // rather than the raw signer pubkey. The Go server uses forfeitPubkey
-        // for tree building, and the Go client validates the sweep tapscript
-        // using the same forfeit pubkey from GetInfo. Using the signer key
-        // instead would produce a different sweep script and a taproot
-        // script mismatch during client-side validation.
-        let forfeit_pubkey = self.wallet.get_forfeit_pubkey().await?;
+        // Use the signer pubkey — the same key reported as forfeit_pubkey in
+        // GetInfo and the same key used to ASP-sign tree nodes. The Go SDK's
+        // ValidateVtxoTree checks the sweep tapscript against GetInfo's
+        // forfeit pubkey, so tree building, signing, and GetInfo must all
+        // use the signer key.
+        let signer_pubkey = self.signer.get_pubkey().await?;
         let result = self
             .tx_builder
-            .build_commitment_tx(&forfeit_pubkey, &intents, &boarding_inputs)
+            .build_commitment_tx(&signer_pubkey, &intents, &boarding_inputs)
             .await?;
 
         // Add server wallet fee input NOW, before the PSBT goes to clients.
@@ -772,8 +773,8 @@ impl ArkService {
                     .or_insert((bt.recipient_pubkey, bi.amount));
             }
 
-            // Use the forfeit pubkey (same key used for tree building above).
-            let asp_xonly = forfeit_pubkey;
+            // Use the signer pubkey (same key used for tree building above).
+            let asp_xonly = signer_pubkey;
 
             if !boarding_info.is_empty() {
                 if let Ok(bytes) =
@@ -1548,14 +1549,14 @@ impl ArkService {
 
         // Build unsigned VTXO tree for the BatchStarted event
         // (participants need this to verify before confirming).
-        // Use forfeit_pubkey for consistency with the Go server, which uses
-        // the forfeit key for sweep tapscripts in the VTXO tree.
-        let forfeit_pubkey = self.wallet.get_forfeit_pubkey().await?;
+        // Use signer pubkey — same key used for ASP-signing tree nodes and
+        // reported as forfeit_pubkey in GetInfo.
+        let signer_pubkey = self.signer.get_pubkey().await?;
         let intents: Vec<Intent> = round.intents.values().cloned().collect();
         let boarding_inputs: Vec<crate::ports::BoardingInput> = vec![]; // TODO: include boarding
         let result = self
             .tx_builder
-            .build_commitment_tx(&forfeit_pubkey, &intents, &boarding_inputs)
+            .build_commitment_tx(&signer_pubkey, &intents, &boarding_inputs)
             .await?;
 
         // Store the unsigned tree on the round for later
@@ -4153,29 +4154,28 @@ impl ArkService {
                                 old_parent: &str,
                                 new_parent: &str|
          -> Option<(String, String)> {
-                if node.tx.is_empty() {
-                    return None;
+            if node.tx.is_empty() {
+                return None;
+            }
+            let new_parent_hash: bitcoin::Txid = new_parent.parse().ok()?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&node.tx)
+                .ok()?;
+            let mut psbt = bitcoin::psbt::Psbt::deserialize(&bytes).ok()?;
+            let mut changed = false;
+            for txin in psbt.unsigned_tx.input.iter_mut() {
+                if txin.previous_output.txid.to_string() == old_parent {
+                    txin.previous_output.txid = new_parent_hash;
+                    changed = true;
                 }
-                let new_parent_hash: bitcoin::Txid = new_parent.parse().ok()?;
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(&node.tx)
-                    .ok()?;
-                let mut psbt = bitcoin::psbt::Psbt::deserialize(&bytes).ok()?;
-                let mut changed = false;
-                for txin in psbt.unsigned_tx.input.iter_mut() {
-                    if txin.previous_output.txid.to_string() == old_parent {
-                        txin.previous_output.txid = new_parent_hash;
-                        changed = true;
-                    }
-                }
-                if !changed {
-                    return None;
-                }
-                let new_computed_txid = psbt.unsigned_tx.compute_txid().to_string();
-                let new_tx_b64 =
-                    base64::engine::general_purpose::STANDARD.encode(psbt.serialize());
-                Some((new_tx_b64, new_computed_txid))
-            };
+            }
+            if !changed {
+                return None;
+            }
+            let new_computed_txid = psbt.unsigned_tx.compute_txid().to_string();
+            let new_tx_b64 = base64::engine::general_purpose::STANDARD.encode(psbt.serialize());
+            Some((new_tx_b64, new_computed_txid))
+        };
 
         // Cascading patch: a queue of (old_txid_to_find_in_inputs, new_txid_to_set).
         // We start with the commitment txid change which affects the root.
@@ -4295,27 +4295,6 @@ impl ArkService {
         }
 
         base64::engine::general_purpose::STANDARD.encode(psbt.serialize())
-    }
-
-    /// Inject cosigner pubkeys into all vtxo tree node PSBTs
-    fn inject_cosigner_fields(
-        tree: &[crate::domain::TxTreeNode],
-        cosigners: &[String],
-    ) -> Vec<crate::domain::TxTreeNode> {
-        tree.iter()
-            .map(|node| {
-                let tx = if node.tx.is_empty() {
-                    node.tx.clone()
-                } else {
-                    Self::inject_cosigner_fields_single(&node.tx, cosigners)
-                };
-                crate::domain::TxTreeNode {
-                    txid: node.txid.clone(),
-                    tx,
-                    children: node.children.clone(),
-                }
-            })
-            .collect()
     }
 
     fn extract_txid_from_psbt(psbt_str: &str) -> Option<String> {
