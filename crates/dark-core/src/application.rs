@@ -1571,7 +1571,48 @@ impl ArkService {
         // reported as forfeit_pubkey in GetInfo.
         let signer_pubkey = self.signer.get_pubkey().await?;
         let intents: Vec<Intent> = round.intents.values().cloned().collect();
-        let boarding_inputs: Vec<crate::ports::BoardingInput> = vec![]; // TODO: include boarding
+        // Collect boarding inputs from intent proof tx inputs.
+        // Only include inputs that are on-chain boarding UTXOs (NOT already
+        // in the VTXO store as off-chain VTXOs). Off-chain VTXO inputs
+        // (e.g. delegate refresh) are spent virtually, not as commitment tx inputs.
+        let mut boarding_inputs: Vec<crate::ports::BoardingInput> = Vec::new();
+        for intent in &intents {
+            for inp in &intent.inputs {
+                if inp.amount > 0 && !inp.outpoint.txid.is_empty() {
+                    let outpoint_slice = [inp.outpoint.clone()];
+                    let is_offchain = self
+                        .vtxo_repo
+                        .get_vtxos(&outpoint_slice)
+                        .await
+                        .ok()
+                        .map(|v| !v.is_empty())
+                        .unwrap_or(false);
+
+                    if !is_offchain {
+                        boarding_inputs.push(crate::ports::BoardingInput {
+                            outpoint: inp.outpoint.clone(),
+                            amount: inp.amount,
+                        });
+                    }
+                }
+            }
+        }
+        // Also check the legacy boarding repo
+        let boarding_txs = self.claim_boarding_inputs().await.unwrap_or_default();
+        for bt in &boarding_txs {
+            if let (Some(txid), Some(vout)) = (bt.funding_txid.as_ref(), bt.funding_vout) {
+                boarding_inputs.push(crate::ports::BoardingInput {
+                    outpoint: VtxoOutpoint::new(txid.to_string(), vout),
+                    amount: bt.amount.to_sat(),
+                });
+            }
+        }
+
+        info!(
+            boarding_count = boarding_inputs.len(),
+            "Including boarding inputs in confirmation"
+        );
+
         let result = self
             .tx_builder
             .build_commitment_tx(&signer_pubkey, &intents, &boarding_inputs)
@@ -1581,6 +1622,8 @@ impl ArkService {
         round.vtxo_tree = result.vtxo_tree;
         round.connectors = result.connectors;
         round.connector_address = result.connector_address.clone();
+        round.has_boarding_inputs = !boarding_inputs.is_empty();
+        round.boarding_tx_ids = boarding_txs.iter().map(|bt| bt.id.to_string()).collect();
 
         let timestamp = chrono::Utc::now().timestamp();
 
