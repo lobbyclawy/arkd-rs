@@ -3999,29 +3999,43 @@ impl ArkService {
             }
         }
 
-        // Check if all inputs have at least one signature after merging
-        // and server signing.  Inputs without any signature still need
-        // another client's partial PSBT.
+        // Check if all inputs have sufficient signatures after merging
+        // and server signing.  For boarding inputs (script-path with
+        // collaborative leaf), we need at least 2 tap_script_sigs: the
+        // user's and the ASP's.  The ASP co-signs all boarding inputs
+        // when called above, so if a boarding input still has < 2 sigs
+        // it means the user's client hasn't submitted their partial yet.
+        // For key-path inputs (fee input), tap_key_sig suffices.
         let unsigned_count = merged
             .inputs
             .iter()
             .filter(|inp| {
-                inp.tap_key_sig.is_none()
-                    && inp.tap_script_sigs.is_empty()
-                    && inp.partial_sigs.is_empty()
-                    && inp.final_script_witness.is_none()
-                    && inp.final_script_sig.is_none()
+                // Already finalized — fully signed
+                if inp.final_script_witness.is_some() || inp.final_script_sig.is_some() {
+                    return false;
+                }
+                if !inp.tap_scripts.is_empty() {
+                    // Script-path input (boarding): needs both user + ASP sigs
+                    inp.tap_script_sigs.len() < 2
+                } else {
+                    // Key-path input (fee / other): needs tap_key_sig or partial_sigs
+                    inp.tap_key_sig.is_none() && inp.partial_sigs.is_empty()
+                }
             })
             .count();
 
         if unsigned_count > 0 {
             // Debug: log what each input has to help diagnose why some are unsigned
             for (i, input) in merged.inputs.iter().enumerate() {
-                let is_unsigned = input.tap_key_sig.is_none()
-                    && input.tap_script_sigs.is_empty()
-                    && input.partial_sigs.is_empty()
-                    && input.final_script_witness.is_none()
-                    && input.final_script_sig.is_none();
+                let is_unsigned = if input.final_script_witness.is_some()
+                    || input.final_script_sig.is_some()
+                {
+                    false
+                } else if !input.tap_scripts.is_empty() {
+                    input.tap_script_sigs.len() < 2
+                } else {
+                    input.tap_key_sig.is_none() && input.partial_sigs.is_empty()
+                };
                 let internal_key_hex = input
                     .tap_internal_key
                     .map(|k| hex::encode(k.serialize()))

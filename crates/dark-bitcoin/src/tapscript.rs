@@ -332,7 +332,7 @@ mod tests {
         let asp = xonly_key(2);
 
         let info_a = build_vtxo_taproot(&user, &asp, 144).unwrap();
-        let info_b = build_vtxo_taproot(&user, &asp, 1008).unwrap();
+        let info_b = build_vtxo_taproot(&user, &asp, 288).unwrap();
 
         assert_ne!(
             info_a.output_key(),
@@ -372,10 +372,11 @@ mod tests {
         // 1024 seconds → BIP68 sequence 0x400002
         let script = vtxo_expiry_script(&user, 1024).unwrap();
         let asm = script.to_asm_string();
-        // The pushed value should be 0x400002 = 4194306
+        // The pushed value 0x400002 is encoded as CScriptNum little-endian: 02 00 40
+        // to_asm_string() renders it as hex bytes "020040"
         assert!(
-            asm.contains("4194306"),
-            "script should push BIP68-encoded value 4194306: {asm}"
+            asm.contains("020040"),
+            "script should push BIP68-encoded value 0x400002 (LE hex 020040): {asm}"
         );
     }
 }
