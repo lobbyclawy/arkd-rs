@@ -3546,7 +3546,11 @@ impl ArkService {
         let psbt_hex = hex::encode(&psbt_bytes);
 
         // 3. ASP co-signs the PSBT (adds server signatures for boarding inputs)
-        let signed_psbt = match self.signer.sign_transaction(&commitment_psbt_b64, false).await {
+        let signed_psbt = match self
+            .signer
+            .sign_transaction(&commitment_psbt_b64, false)
+            .await
+        {
             Ok(s) => {
                 info!("ASP co-signed commitment PSBT for direct broadcast");
                 // Signer may return hex; convert to hex if not already
@@ -3566,11 +3570,17 @@ impl ArkService {
 
         // 4. Wallet (BDK) signs (fee input)
         let wallet_signed = {
-            let b64_for_wallet = base64::engine::general_purpose::STANDARD
-                .encode(hex::decode(&signed_psbt).map_err(|e| {
+            let psbt_bytes_for_wallet =
+                hex::decode(&signed_psbt).map_err(|e| {
                     ArkError::Internal(format!("hex decode after ASP sign: {e}"))
-                })?);
-            match self.wallet.sign_transaction(&b64_for_wallet, false).await {
+                })?;
+            let b64_for_wallet =
+                base64::engine::general_purpose::STANDARD.encode(psbt_bytes_for_wallet);
+            match self
+                .wallet
+                .sign_transaction(&b64_for_wallet, false)
+                .await
+            {
                 Ok(s) => {
                     info!("Wallet signed commitment PSBT for direct broadcast");
                     if let Ok(bytes) = hex::decode(&s) {
