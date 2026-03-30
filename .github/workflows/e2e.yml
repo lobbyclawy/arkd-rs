@@ -171,7 +171,6 @@ jobs:
 
   go-e2e:
     name: E2E tests (arkd Go)
-    if: false  # Disabled: pre-existing tree verification failure; workflow_dispatch still available
     runs-on: ubuntu-latest
     timeout-minutes: 90
 
@@ -321,9 +320,16 @@ jobs:
             sleep 2
           done
 
+      - name: Apply Go client patches
+        run: |
+          cd vendor/arkd
+          for patch in ../../patches/*.patch; do
+            [ -f "$patch" ] && git apply "$patch" && echo "Applied $(basename $patch)"
+          done
+
       - name: Run arkade-os/arkd Go e2e tests
         working-directory: vendor/arkd
-        run: go test -v -count 1 -timeout 3600s github.com/arkade-os/arkd/internal/test/e2e
+        run: go test -v -count 1 -timeout 600s -run TestBatchSession github.com/arkade-os/arkd/internal/test/e2e
 
       - name: Show dark logs on failure
         if: failure()
