@@ -470,6 +470,19 @@ impl IndexerServiceTrait for IndexerGrpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
+        for v in &vtxos {
+            info!(
+                outpoint = %v.outpoint,
+                amount = v.amount,
+                pubkey = %v.pubkey,
+                spent = v.spent,
+                preconfirmed = v.preconfirmed,
+                swept = v.swept,
+                unrolled = v.unrolled,
+                commitment_txids = ?v.commitment_txids,
+                "GetVtxos: VTXO detail"
+            );
+        }
         info!(
             vtxo_count = vtxos.len(),
             "GetVtxos: vtxos returned from store"
