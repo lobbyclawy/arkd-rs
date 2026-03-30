@@ -323,8 +323,8 @@ jobs:
       - name: Apply Go client patches
         run: |
           cd vendor/arkd
-          for patch in ../../patches/*.patch; do
-            [ -f "$patch" ] && git apply "$patch" && echo "Applied $(basename $patch)"
+          for p in ../../patches/*.patch; do
+            [ -f "$p" ] && git apply "$p" && echo "Applied $(basename $p)"
           done
 
       - name: Run arkade-os/arkd Go e2e tests

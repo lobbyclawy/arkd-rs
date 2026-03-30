@@ -196,13 +196,18 @@ message GetRoundResponse {
   RoundDetails round = 1;
 }
 
-message GetEventStreamRequest {}
+message GetEventStreamRequest {
+  // Initial topics to subscribe to (e.g. client pubkeys).
+  // Events with non-empty topic lists are only delivered when at least one
+  // topic matches. Events without topics are always delivered.
+  repeated string topics = 1;
+}
 
 message UpdateStreamTopicsRequest {
-  // Topics to subscribe to (legacy field)
-  repeated string topics = 1;
+  // Stream ID returned in StreamStartedEvent.
+  string stream_id = 1;
   // Topic update mode (Go arkd parity)
-  oneof update_mode {
+  oneof topics_change {
     ModifyTopics modify = 2;
     OverwriteTopics overwrite = 3;
   }
@@ -210,8 +215,8 @@ message UpdateStreamTopicsRequest {
 
 // ModifyTopics adds or removes specific topics.
 message ModifyTopics {
-  repeated string add = 1;
-  repeated string remove = 2;
+  repeated string add_topics = 1;
+  repeated string remove_topics = 2;
 }
 
 // OverwriteTopics replaces the entire topic set.
@@ -220,8 +225,12 @@ message OverwriteTopics {
 }
 
 message UpdateStreamTopicsResponse {
-  // Current subscribed topics after update
-  repeated string topics = 1;
+  // Topics that were added in this request.
+  repeated string topics_added = 1;
+  // Topics that were removed in this request.
+  repeated string topics_removed = 2;
+  // All topics currently subscribed to.
+  repeated string all_topics = 3;
 }
 
 message RoundEvent {

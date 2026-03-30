@@ -730,13 +730,13 @@ async fn test_admin_ban_participant_validation() {
 // ─── Event stream tests ─────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_event_stream_initial_heartbeat() {
+async fn test_event_stream_initial_stream_started() {
     use tokio_stream::StreamExt;
 
     let mut client = start_ark_server().await;
 
     let response = client
-        .get_event_stream(GetEventStreamRequest {})
+        .get_event_stream(GetEventStreamRequest { topics: vec![] })
         .await
         .expect("get_event_stream should succeed");
 
@@ -745,10 +745,13 @@ async fn test_event_stream_initial_heartbeat() {
     let event = first.expect("first item should be Ok");
 
     match event.event {
-        Some(dark_api::proto::ark_v1::round_event::Event::Heartbeat(_hb)) => {
-            // Heartbeat received — timestamp field was removed from proto
+        Some(dark_api::proto::ark_v1::round_event::Event::StreamStarted(ref started)) => {
+            assert!(
+                !started.id.is_empty(),
+                "StreamStarted should have a non-empty id"
+            );
         }
-        other => panic!("Expected heartbeat event, got: {:?}", other),
+        other => panic!("Expected StreamStarted event, got: {:?}", other),
     }
 }
 
@@ -756,10 +759,30 @@ async fn test_event_stream_initial_heartbeat() {
 async fn test_update_stream_topics_noop() {
     let mut client = start_ark_server().await;
 
+    // First open an event stream to get a stream_id
+    let mut stream = client
+        .get_event_stream(GetEventStreamRequest { topics: vec![] })
+        .await
+        .expect("should open event stream")
+        .into_inner();
+
+    // Read the StreamStarted event to get the stream_id
+    let first_event = stream.message().await.unwrap().unwrap();
+    let stream_id = match first_event.event {
+        Some(dark_api::proto::ark_v1::round_event::Event::StreamStarted(s)) => s.id,
+        other => panic!("Expected StreamStarted, got: {:?}", other),
+    };
+
     let response = client
         .update_stream_topics(UpdateStreamTopicsRequest {
-            topics: vec![],
-            update_mode: None,
+            stream_id,
+            topics_change: Some(
+                dark_api::proto::ark_v1::update_stream_topics_request::TopicsChange::Overwrite(
+                    dark_api::proto::ark_v1::OverwriteTopics {
+                        topics: vec!["test-topic".to_string()],
+                    },
+                ),
+            ),
         })
         .await;
 

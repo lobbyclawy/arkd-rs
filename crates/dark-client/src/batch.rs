@@ -197,7 +197,7 @@ pub(crate) async fn run_batch_protocol(
     asp_forfeit_pubkey: Option<XOnlyPublicKey>,
 ) -> ClientResult<String> {
     let stream = client
-        .get_event_stream(GetEventStreamRequest {})
+        .get_event_stream(GetEventStreamRequest { topics: vec![] })
         .await
         .map_err(|e| ClientError::Rpc(format!("GetEventStream failed: {}", e)))?
         .into_inner();
@@ -343,6 +343,7 @@ pub(crate) async fn run_batch_protocol_with_stream_impl(
     let mut vtxo_tree_txids: Vec<String> = Vec::new();
     let mut cosigner_pubkeys: Vec<String> = Vec::new();
     let mut batch_session_id = String::new();
+    let mut stream_id = String::new();
     let mut _commitment_tx = String::new();
 
     loop {
@@ -358,7 +359,11 @@ pub(crate) async fn run_batch_protocol_with_stream_impl(
         };
 
         match round_event {
-            round_event::Event::StreamStarted(_) | round_event::Event::Heartbeat(_) => {}
+            round_event::Event::StreamStarted(ref started) => {
+                stream_id = started.id.clone();
+                continue;
+            }
+            round_event::Event::Heartbeat(_) => {}
 
             round_event::Event::BatchStarted(e) => {
                 if step > BatchStep::Start {
@@ -378,6 +383,18 @@ pub(crate) async fn run_batch_protocol_with_stream_impl(
                     let mut bg_client = client.clone();
                     let bg_intent = intent_id.to_string();
                     let bg_pubkey = signer.pubkey_hex.clone();
+                    // Subscribe with both compressed (66-char) and x-only
+                    // (64-char) pubkey formats.  TreeTx events carry
+                    // compressed-pubkey topics while TreeNonces events carry
+                    // x-only-pubkey topics (the server strips the prefix
+                    // when forwarding nonces).  Without both formats the
+                    // topic filter would drop one of the two event types.
+                    let bg_xonly = if bg_pubkey.len() == 66 {
+                        bg_pubkey[2..].to_string()
+                    } else {
+                        bg_pubkey.clone()
+                    };
+                    let bg_stream_id = stream_id.clone();
                     tokio::spawn(async move {
                         let _ = bg_client
                             .confirm_registration(
@@ -388,8 +405,14 @@ pub(crate) async fn run_batch_protocol_with_stream_impl(
                             .await;
                         let _ = bg_client
                             .update_stream_topics(UpdateStreamTopicsRequest {
-                                topics: vec![bg_pubkey],
-                                update_mode: None,
+                                stream_id: bg_stream_id,
+                                topics_change: Some(
+                                    dark_api::proto::ark_v1::update_stream_topics_request::TopicsChange::Overwrite(
+                                        dark_api::proto::ark_v1::OverwriteTopics {
+                                            topics: vec![bg_pubkey, bg_xonly],
+                                        },
+                                    ),
+                                ),
                             })
                             .await;
                     });
