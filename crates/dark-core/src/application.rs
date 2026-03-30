@@ -1108,10 +1108,7 @@ impl ArkService {
                     round_id = %round.id,
                     "Auto-complete with boarding inputs — broadcasting commitment tx"
                 );
-                match self
-                    .wallet
-                    .broadcast_transaction(vec![round.commitment_tx.clone()])
-                    .await
+                match self.finalize_and_broadcast_commitment_psbt(&round.commitment_tx).await
                 {
                     Ok(txid) => {
                         info!(txid = %txid, "Commitment tx broadcast (auto-complete boarding)");
@@ -1375,10 +1372,7 @@ impl ArkService {
         // are actually spent on-chain.  Without this, the Go SDK's Balance()
         // still sees the boarding UTXO as locked (unspent at the boarding address).
         if has_boarding {
-            match self
-                .wallet
-                .broadcast_transaction(vec![round.commitment_tx.clone()])
-                .await
+            match self.finalize_and_broadcast_commitment_psbt(&round.commitment_tx).await
             {
                 Ok(txid) => {
                     info!(txid = %txid, "Commitment tx broadcast after tree signing");
@@ -3528,6 +3522,82 @@ impl ArkService {
     /// 4. Broadcast the raw transaction to the Bitcoin network
     /// 5. Update the round with the commitment txid
     /// 6. Emit `RoundBroadcast` event
+    /// Decode a base64-encoded commitment PSBT, finalize it, extract the raw
+    /// transaction, and broadcast it.  This is used when the server needs to
+    /// broadcast the commitment tx directly (e.g. boarding rounds without
+    /// cosigners, or after tree signing completes) rather than going through
+    /// the full `broadcast_signed_commitment_tx` merge flow.
+    async fn finalize_and_broadcast_commitment_psbt(
+        &self,
+        commitment_psbt_b64: &str,
+    ) -> ArkResult<String> {
+        use base64::Engine;
+
+        // 1. Decode base64 → raw PSBT bytes
+        let psbt_bytes = base64::engine::general_purpose::STANDARD
+            .decode(commitment_psbt_b64)
+            .map_err(|e| ArkError::Internal(format!("Invalid base64 commitment PSBT: {e}")))?;
+
+        // 2. Convert to hex (finalize_and_extract expects hex-encoded PSBT)
+        let psbt_hex = hex::encode(&psbt_bytes);
+
+        // 3. ASP co-signs the PSBT (adds server signatures for boarding inputs)
+        let signed_psbt = match self.signer.sign_transaction(&commitment_psbt_b64, false).await {
+            Ok(s) => {
+                info!("ASP co-signed commitment PSBT for direct broadcast");
+                // Signer may return hex; convert to hex if not already
+                if let Ok(bytes) = hex::decode(&s) {
+                    hex::encode(bytes)
+                } else if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&s) {
+                    hex::encode(bytes)
+                } else {
+                    psbt_hex.clone()
+                }
+            }
+            Err(e) => {
+                info!(error = %e, "ASP co-signing skipped for direct broadcast");
+                psbt_hex
+            }
+        };
+
+        // 4. Wallet (BDK) signs (fee input)
+        let wallet_signed = {
+            let b64_for_wallet = base64::engine::general_purpose::STANDARD
+                .encode(hex::decode(&signed_psbt).map_err(|e| {
+                    ArkError::Internal(format!("hex decode after ASP sign: {e}"))
+                })?);
+            match self.wallet.sign_transaction(&b64_for_wallet, false).await {
+                Ok(s) => {
+                    info!("Wallet signed commitment PSBT for direct broadcast");
+                    if let Ok(bytes) = hex::decode(&s) {
+                        hex::encode(bytes)
+                    } else if let Ok(bytes) =
+                        base64::engine::general_purpose::STANDARD.decode(&s)
+                    {
+                        hex::encode(bytes)
+                    } else {
+                        signed_psbt.clone()
+                    }
+                }
+                Err(e) => {
+                    info!(error = %e, "Wallet signing skipped for direct broadcast");
+                    signed_psbt
+                }
+            }
+        };
+
+        // 5. Finalize and extract raw transaction hex
+        let raw_tx = self
+            .tx_builder
+            .finalize_and_extract(&wallet_signed)
+            .await?;
+
+        // 6. Broadcast
+        let txid = self.wallet.broadcast_transaction(vec![raw_tx]).await?;
+        info!(txid = %txid, "Commitment tx broadcast via finalize_and_broadcast_commitment_psbt");
+        Ok(txid)
+    }
+
     ///
     /// The round must be in the Finalization stage with a non-empty `commitment_tx`.
     #[instrument(skip(self))]
