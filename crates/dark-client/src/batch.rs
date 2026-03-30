@@ -765,6 +765,9 @@ fn build_and_sign_forfeits(
     let keypair = Keypair::from_secret_key(&secp, secret_key);
     let (client_xonly, _parity) = keypair.x_only_public_key();
 
+    // Derive the tweaked ASP key for P2TR key-path spend (no script tree).
+    let (asp_tweaked, _parity) = asp_pubkey.tap_tweak(&secp, None);
+
     let mut signed_txs = Vec::with_capacity(vtxos.len());
 
     for (i, vtxo) in vtxos.iter().enumerate() {
@@ -812,7 +815,7 @@ fn build_and_sign_forfeits(
             vtxo_amount,
             connector_outpoint,
             connector_amount,
-            asp_pubkey,
+            asp_tweaked,
             2,
         )
         .map_err(|e| ClientError::InvalidResponse(format!("Failed to build forfeit tx: {}", e)))?;
