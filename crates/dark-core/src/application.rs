@@ -1401,6 +1401,11 @@ impl ArkService {
             })
             .await?;
 
+        // Release any wallet UTXO reservations so the next round can use them.
+        if let Err(e) = self.wallet.release_all_reservations().await {
+            warn!(error = %e, "Failed to release wallet reservations after round (non-fatal)");
+        }
+
         Ok(round.clone())
     }
 
@@ -1499,6 +1504,11 @@ impl ArkService {
                 timestamp: chrono::Utc::now().timestamp(),
             })
             .await?;
+
+        // Release any wallet UTXO reservations so the next round can use them.
+        if let Err(e) = self.wallet.release_all_reservations().await {
+            warn!(error = %e, "Failed to release wallet reservations after abort (non-fatal)");
+        }
 
         // Clear the current round so a new one can start
         *guard = None;

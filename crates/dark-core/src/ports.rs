@@ -151,6 +151,14 @@ pub trait WalletService: Send + Sync {
         ))
     }
 
+    /// Release all reserved UTXOs.
+    ///
+    /// Called after a round completes or is aborted so that the wallet's
+    /// UTXOs are available for the next round's fee input.
+    async fn release_all_reservations(&self) -> ArkResult<()> {
+        Ok(()) // default no-op for implementations that don't track reservations
+    }
+
     // ── Operator wallet management (gRPC WalletService) ──────────────
 
     /// Generate a new BIP-39 mnemonic seed phrase.
