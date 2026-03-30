@@ -13,8 +13,12 @@
 //! single root remains.
 
 use bitcoin::absolute::LockTime;
+use bitcoin::key::TapTweak;
+use bitcoin::secp256k1::Secp256k1;
 use bitcoin::transaction::Version;
-use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
+use bitcoin::{
+    Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness, XOnlyPublicKey,
+};
 
 use crate::error::BitcoinError;
 
@@ -73,26 +77,29 @@ pub struct ConnectorTree {
     pub leaves: Vec<ConnectorOutput>,
 }
 
-/// Create a minimal P2WSH output script (OP_TRUE for now).
+/// Create a P2TR (key-path only) output script for the ASP's public key.
 ///
-/// In production this would be replaced with a proper Taproot or
-/// multisig script, but for the initial connector tree construction
-/// a trivially-spendable script is sufficient.
-fn connector_script() -> ScriptBuf {
-    // OP_TRUE — anyone can spend.  This is a placeholder; the real
-    // protocol uses key-path spends gated by the ASP's key.
-    // TODO(#44): replace with ASP key-path Taproot script once forfeit
-    // submission flow is wired (Issue #42). Using OP_TRUE here is safe
-    // only for test/regtest environments.
-    bitcoin::script::Builder::new()
-        .push_opcode(bitcoin::opcodes::all::OP_PUSHNUM_1)
-        .into_script()
+/// Connector outputs are spent by the ASP via Taproot key-path spend.
+/// The key is tweaked with an empty merkle root (no script tree), matching
+/// the standard BIP-341 key-path-only construction used throughout the
+/// Ark protocol for ASP-controlled outputs.
+fn connector_script(asp_pubkey: &XOnlyPublicKey) -> ScriptBuf {
+    let secp = Secp256k1::verification_only();
+    let (tweaked, _parity) = asp_pubkey.tap_tweak(&secp, None);
+    ScriptBuf::new_p2tr_tweaked(tweaked)
 }
 
 /// Build a single connector transaction that spends `input` and fans
 /// out into `num_outputs` connector outputs, each holding `per_output`.
-fn build_connector_tx(input: OutPoint, num_outputs: usize, per_output: Amount) -> Transaction {
-    let script = connector_script();
+///
+/// Each output is a P2TR key-path spend controlled by the ASP.
+fn build_connector_tx(
+    input: OutPoint,
+    num_outputs: usize,
+    per_output: Amount,
+    asp_pubkey: &XOnlyPublicKey,
+) -> Transaction {
+    let script = connector_script(asp_pubkey);
 
     let tx_ins = vec![TxIn {
         previous_output: input,
@@ -124,6 +131,8 @@ impl ConnectorTree {
     /// * `funding_outpoint` — the outpoint in the commitment tx that funds
     ///   the root of the connector tree.
     /// * `dust_amount` — value for each leaf connector (typically 546 sats).
+    /// * `asp_pubkey` — the ASP's x-only public key used for key-path
+    ///   Taproot spends on every connector output.
     ///
     /// # Errors
     /// Returns [`ConnectorError`] when `participants == 0` or the dust
@@ -132,6 +141,7 @@ impl ConnectorTree {
         participants: usize,
         funding_outpoint: OutPoint,
         dust_amount: Amount,
+        asp_pubkey: &XOnlyPublicKey,
     ) -> Result<Self, ConnectorError> {
         if participants == 0 {
             return Err(ConnectorError::NoParticipants);
@@ -211,7 +221,7 @@ impl ConnectorTree {
                     continue;
                 }
 
-                let tx = build_connector_tx(parent_op, num_children, dust_amount);
+                let tx = build_connector_tx(parent_op, num_children, dust_amount, asp_pubkey);
                 let txid = tx.compute_txid();
 
                 all_nodes.push(ConnectorNode {
@@ -299,19 +309,35 @@ mod tests {
         }
     }
 
+    /// Deterministic ASP public key for tests.
+    fn dummy_asp_pubkey() -> XOnlyPublicKey {
+        // A valid x-only pubkey (generator point).
+        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            .parse::<bitcoin::secp256k1::PublicKey>()
+            .unwrap()
+            .x_only_public_key()
+            .0
+    }
+
     const DUST: Amount = Amount::from_sat(546);
 
     // ── Error cases ────────────────────────────────────────────────────
 
     #[test]
     fn zero_participants_errors() {
-        let err = ConnectorTree::build(0, dummy_outpoint(), DUST).unwrap_err();
+        let err = ConnectorTree::build(0, dummy_outpoint(), DUST, &dummy_asp_pubkey()).unwrap_err();
         assert!(matches!(err, ConnectorError::NoParticipants));
     }
 
     #[test]
     fn dust_below_minimum_errors() {
-        let err = ConnectorTree::build(4, dummy_outpoint(), Amount::from_sat(100)).unwrap_err();
+        let err = ConnectorTree::build(
+            4,
+            dummy_outpoint(),
+            Amount::from_sat(100),
+            &dummy_asp_pubkey(),
+        )
+        .unwrap_err();
         assert!(matches!(err, ConnectorError::DustTooLow(_)));
     }
 
@@ -319,7 +345,7 @@ mod tests {
 
     #[test]
     fn single_participant_trivial() {
-        let tree = ConnectorTree::build(1, dummy_outpoint(), DUST).unwrap();
+        let tree = ConnectorTree::build(1, dummy_outpoint(), DUST, &dummy_asp_pubkey()).unwrap();
         assert_eq!(tree.leaf_count(), 1);
         assert_eq!(tree.node_count(), 0, "no internal nodes needed");
         assert_eq!(tree.leaves[0], tree.root);
@@ -329,7 +355,7 @@ mod tests {
 
     #[test]
     fn four_participants_single_level() {
-        let tree = ConnectorTree::build(4, dummy_outpoint(), DUST).unwrap();
+        let tree = ConnectorTree::build(4, dummy_outpoint(), DUST, &dummy_asp_pubkey()).unwrap();
         assert_eq!(tree.leaf_count(), 4);
         assert_eq!(tree.node_count(), 1, "one internal tx fans out to 4 leaves");
         // All leaves should have distinct vouts in the same tx.
@@ -345,7 +371,7 @@ mod tests {
 
     #[test]
     fn sixteen_participants_two_levels() {
-        let tree = ConnectorTree::build(16, dummy_outpoint(), DUST).unwrap();
+        let tree = ConnectorTree::build(16, dummy_outpoint(), DUST, &dummy_asp_pubkey()).unwrap();
         assert_eq!(tree.leaf_count(), 16);
         // Level 1: 1 root tx → 4 outputs (4 children)
         // Level 2: 4 txs, each → 4 outputs = 16 leaves
@@ -357,7 +383,7 @@ mod tests {
 
     #[test]
     fn hundred_participants_multi_level() {
-        let tree = ConnectorTree::build(100, dummy_outpoint(), DUST).unwrap();
+        let tree = ConnectorTree::build(100, dummy_outpoint(), DUST, &dummy_asp_pubkey()).unwrap();
         assert_eq!(tree.leaf_count(), 100);
 
         // Verify tree depth:
@@ -371,7 +397,7 @@ mod tests {
 
     #[test]
     fn five_participants_uneven() {
-        let tree = ConnectorTree::build(5, dummy_outpoint(), DUST).unwrap();
+        let tree = ConnectorTree::build(5, dummy_outpoint(), DUST, &dummy_asp_pubkey()).unwrap();
         assert_eq!(tree.leaf_count(), 5);
         // ⌈5/4⌉ = 2 parent txs at level below root → 1 root tx → total = 3 nodes
         assert_eq!(tree.node_count(), 3);
@@ -379,14 +405,14 @@ mod tests {
 
     #[test]
     fn two_participants() {
-        let tree = ConnectorTree::build(2, dummy_outpoint(), DUST).unwrap();
+        let tree = ConnectorTree::build(2, dummy_outpoint(), DUST, &dummy_asp_pubkey()).unwrap();
         assert_eq!(tree.leaf_count(), 2);
         assert_eq!(tree.node_count(), 1);
     }
 
     #[test]
     fn three_participants() {
-        let tree = ConnectorTree::build(3, dummy_outpoint(), DUST).unwrap();
+        let tree = ConnectorTree::build(3, dummy_outpoint(), DUST, &dummy_asp_pubkey()).unwrap();
         assert_eq!(tree.leaf_count(), 3);
         assert_eq!(tree.node_count(), 1);
     }
@@ -395,7 +421,7 @@ mod tests {
 
     #[test]
     fn leaf_for_participant_bounds() {
-        let tree = ConnectorTree::build(10, dummy_outpoint(), DUST).unwrap();
+        let tree = ConnectorTree::build(10, dummy_outpoint(), DUST, &dummy_asp_pubkey()).unwrap();
         assert!(tree.leaf_for_participant(0).is_some());
         assert!(tree.leaf_for_participant(9).is_some());
         assert!(tree.leaf_for_participant(10).is_none());
@@ -405,7 +431,7 @@ mod tests {
 
     #[test]
     fn all_leaves_unique_outpoints() {
-        let tree = ConnectorTree::build(64, dummy_outpoint(), DUST).unwrap();
+        let tree = ConnectorTree::build(64, dummy_outpoint(), DUST, &dummy_asp_pubkey()).unwrap();
         let mut seen = std::collections::HashSet::new();
         for leaf in &tree.leaves {
             let key = (leaf.txid, leaf.vout);
@@ -417,8 +443,8 @@ mod tests {
 
     #[test]
     fn build_is_deterministic() {
-        let a = ConnectorTree::build(20, dummy_outpoint(), DUST).unwrap();
-        let b = ConnectorTree::build(20, dummy_outpoint(), DUST).unwrap();
+        let a = ConnectorTree::build(20, dummy_outpoint(), DUST, &dummy_asp_pubkey()).unwrap();
+        let b = ConnectorTree::build(20, dummy_outpoint(), DUST, &dummy_asp_pubkey()).unwrap();
         assert_eq!(a.leaves.len(), b.leaves.len());
         for (la, lb) in a.leaves.iter().zip(b.leaves.iter()) {
             assert_eq!(la, lb);
@@ -430,7 +456,7 @@ mod tests {
     #[test]
     fn root_matches_funding_outpoint() {
         let op = dummy_outpoint();
-        let tree = ConnectorTree::build(50, op, DUST).unwrap();
+        let tree = ConnectorTree::build(50, op, DUST, &dummy_asp_pubkey()).unwrap();
         assert_eq!(tree.root.txid, op.txid);
         assert_eq!(tree.root.vout, op.vout);
     }
@@ -439,7 +465,7 @@ mod tests {
 
     #[test]
     fn large_tree_1000_participants() {
-        let tree = ConnectorTree::build(1000, dummy_outpoint(), DUST).unwrap();
+        let tree = ConnectorTree::build(1000, dummy_outpoint(), DUST, &dummy_asp_pubkey()).unwrap();
         assert_eq!(tree.leaf_count(), 1000);
     }
 }
