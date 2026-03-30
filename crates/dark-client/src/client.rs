@@ -1271,20 +1271,30 @@ impl ArkClient {
     ///
     /// `owner_pubkey` — if `Some`, the asset VTXO is assigned to this key;
     /// if `None`, the server uses the session's default key.
+    ///
+    /// `supply` — the number of units to issue (must be > 0).
+    ///
+    /// `control_asset` — optional control asset configuration:
+    /// - `None` — issue a fixed-supply asset (no reissuance possible)
+    /// - `Some(New(amount))` — create a new control asset alongside this issuance
+    /// - `Some(Existing(id))` — link to an existing control asset for reissuance
+    ///
+    /// `metadata` — optional key-value metadata attached to the issuance.
     pub async fn issue_asset(
         &mut self,
         owner_pubkey: Option<&str>,
-        _supply: u64,
-        _control_asset: Option<crate::types::ControlAssetOption>,
-        _metadata: Option<crate::types::AssetMetadata>,
+        supply: u64,
+        control_asset: Option<crate::types::ControlAssetOption>,
+        metadata: Option<crate::types::AssetMetadata>,
     ) -> ClientResult<crate::types::IssueAssetResult> {
-        if _supply == 0 {
+        if supply == 0 {
             return Err(ClientError::Validation("amount must be > 0".into()));
         }
 
-        // Encode control_asset option into the name field as a tag for the server:
-        // "control:new:<amount>" or "control:existing:<id>"
-        let name = match &_control_asset {
+        // Encode control_asset option into the name field as a tag for the server.
+        // Format: "control:new:<amount>" or "control:existing:<id>" or empty.
+        // The server parses this to determine reissuance behaviour.
+        let name = match &control_asset {
             Some(crate::types::ControlAssetOption::New(n)) => {
                 format!("control:new:{}", n.amount)
             }
@@ -1294,13 +1304,20 @@ impl ArkClient {
             None => String::new(),
         };
 
+        // Encode metadata as "key:value" in the ticker field if provided.
+        // This allows attaching human-readable metadata to the issuance.
+        let ticker = metadata
+            .as_ref()
+            .map(|m| format!("{}:{}", m.key, m.value))
+            .unwrap_or_default();
+
         let client = self.require_client()?;
         let response = client
             .issue_asset(IssueAssetRequest {
                 pubkey: owner_pubkey.unwrap_or("").to_string(),
-                amount: _supply,
+                amount: supply,
                 name,
-                ticker: String::new(),
+                ticker,
             })
             .await
             .map_err(|e| ClientError::Rpc(format!("IssueAsset failed: {}", e)))?;
