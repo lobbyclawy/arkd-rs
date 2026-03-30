@@ -466,10 +466,16 @@ impl ArkService {
     /// Get service info
     pub async fn get_info(&self) -> ArkResult<ServiceInfo> {
         let signer_pubkey = self.signer.get_pubkey().await?;
-        let forfeit_pubkey = self.wallet.get_forfeit_pubkey().await?;
         let dust = self.wallet.get_dust_amount().await?;
 
-        // Derive forfeit address from the forfeit pubkey (P2TR)
+        // Use the signer pubkey as the forfeit pubkey. The signer key is
+        // the one used to ASP-sign VTXO tree nodes (taproot key-path spend).
+        // The Go SDK's ValidateVtxoTree checks the sweep tapscript against
+        // the forfeit pubkey from GetInfo, so the key used for tree building,
+        // signing, and GetInfo must all be the same — the signer key.
+        let forfeit_pubkey = signer_pubkey;
+
+        // Derive forfeit address from the signer pubkey (P2TR)
         let network = match self.config.network.as_str() {
             "mainnet" | "bitcoin" => bitcoin::Network::Bitcoin,
             "testnet" => bitcoin::Network::Testnet,
@@ -506,7 +512,8 @@ impl ArkService {
             // We need just the raw bytes (push opcode + data).
             let seq_hex = hex::encode(seq_bytes.as_bytes());
             // Build full script:  <seq_push> OP_CSV OP_DROP 20 <pubkey32> OP_CHECKSIG
-            let pubkey_hex = hex::encode(signer_pubkey.serialize());
+            // Use signer pubkey (matches tree building and ASP signing).
+            let pubkey_hex = hex::encode(forfeit_pubkey.serialize());
             format!("{}b27520{}ac", seq_hex, pubkey_hex)
         };
 
@@ -518,14 +525,10 @@ impl ArkService {
             signer_pubkey,
             bitcoin::secp256k1::Parity::Even,
         );
-        let forfeit_pubkey_compressed = bitcoin::secp256k1::PublicKey::from_x_only_public_key(
-            forfeit_pubkey,
-            bitcoin::secp256k1::Parity::Even,
-        );
 
         Ok(ServiceInfo {
             signer_pubkey: hex::encode(signer_pubkey_compressed.serialize()),
-            forfeit_pubkey: hex::encode(forfeit_pubkey_compressed.serialize()),
+            forfeit_pubkey: hex::encode(signer_pubkey_compressed.serialize()),
             unilateral_exit_delay: self.config.unilateral_exit_delay as i64,
             session_duration: self.config.session_duration_secs as i64,
             network: self.config.network.clone(),
@@ -659,7 +662,12 @@ impl ArkService {
             "Including boarding inputs in round"
         );
 
-        // Build commitment transaction
+        // Build commitment transaction.
+        // Use the signer pubkey — the same key reported as forfeit_pubkey in
+        // GetInfo and the same key used to ASP-sign tree nodes. The Go SDK's
+        // ValidateVtxoTree checks the sweep tapscript against GetInfo's
+        // forfeit pubkey, so tree building, signing, and GetInfo must all
+        // use the signer key.
         let signer_pubkey = self.signer.get_pubkey().await?;
         let result = self
             .tx_builder
@@ -765,7 +773,7 @@ impl ArkService {
                     .or_insert((bt.recipient_pubkey, bi.amount));
             }
 
-            // signer_pubkey is already an XOnlyPublicKey (ASP key).
+            // Use the signer pubkey (same key used for tree building above).
             let asp_xonly = signer_pubkey;
 
             if !boarding_info.is_empty() {
@@ -892,19 +900,18 @@ impl ArkService {
             .into_iter()
             .collect();
 
-        // Inject cosigner pubkeys as PSBT Unknown fields into vtxo tree nodes
-        // Format: Key = [0xDE] + "cosigner" + [4-byte BE index], Value = 33-byte compressed pubkey
-        let vtxo_tree = Self::inject_cosigner_fields(&patched_vtxo_tree, &cosigners_pubkeys);
+        // The vtxo tree PSBTs already have per-node cosigner fields set
+        // correctly by the tree builder (each node carries only its own
+        // cosigners). Do NOT overwrite them with the global cosigner list —
+        // that would give every node ALL cosigners, causing Go validation
+        // to aggregate the wrong set of keys and fail with
+        // "invalid taproot script".
+        //
+        // We still inject cosigner fields into the commitment tx PSBT
+        // (which has no tree-level cosigner fields) for protocol compat.
+        let vtxo_tree = patched_vtxo_tree;
         let commitment_tx =
             Self::inject_cosigner_fields_single(&result_commitment_tx, &cosigners_pubkeys);
-
-        // Log injection results
-        info!(
-            orig_len = result_commitment_tx.len(),
-            new_len = commitment_tx.len(),
-            vtxo_nodes = vtxo_tree.len(),
-            "PSBT cosigner field injection"
-        );
 
         // Store results on the round
         round.commitment_tx = commitment_tx;
@@ -1364,17 +1371,18 @@ impl ArkService {
             })
             .await?;
 
-        // For rounds without boarding inputs, emit RoundBroadcast immediately
-        // so clients see BatchFinalized without waiting for a broadcast.
-        if !has_boarding {
-            self.events
-                .publish_event(ArkEvent::RoundBroadcast {
-                    round_id: round.id.clone(),
-                    commitment_txid: commitment_txid.clone(),
-                    timestamp: chrono::Utc::now().timestamp(),
-                })
-                .await?;
-        }
+        // Emit RoundBroadcast so the event bridge sends BatchFinalized to clients.
+        // For rounds without boarding inputs this is immediate.  For rounds WITH
+        // boarding inputs, ideally we'd wait until the commitment tx is confirmed
+        // on-chain, but our server currently completes the round synchronously —
+        // so emit immediately to unblock waiting Go SDK clients.
+        self.events
+            .publish_event(ArkEvent::RoundBroadcast {
+                round_id: round.id.clone(),
+                commitment_txid: commitment_txid.clone(),
+                timestamp: chrono::Utc::now().timestamp(),
+            })
+            .await?;
 
         Ok(round.clone())
     }
@@ -1541,7 +1549,9 @@ impl ArkService {
             .await?;
 
         // Build unsigned VTXO tree for the BatchStarted event
-        // (participants need this to verify before confirming)
+        // (participants need this to verify before confirming).
+        // Use signer pubkey — same key used for ASP-signing tree nodes and
+        // reported as forfeit_pubkey in GetInfo.
         let signer_pubkey = self.signer.get_pubkey().await?;
         let intents: Vec<Intent> = round.intents.values().cloned().collect();
         let boarding_inputs: Vec<crate::ports::BoardingInput> = vec![]; // TODO: include boarding
@@ -4133,41 +4143,121 @@ impl ArkService {
         new_txid: &str,
     ) -> Vec<crate::domain::TxTreeNode> {
         use base64::Engine;
-        let Ok(new_hash) = new_txid.parse::<bitcoin::Txid>() else {
-            return tree.to_vec();
+        use std::collections::HashMap;
+
+        // Index nodes by their current txid for quick lookup.
+        let mut nodes: HashMap<String, crate::domain::TxTreeNode> =
+            tree.iter().map(|n| (n.txid.clone(), n.clone())).collect();
+
+        // Patch a single node's PSBT inputs, replacing old_parent_txid with
+        // new_parent_txid. Returns (new_psbt_b64, new_txid) or None if unchanged.
+        let patch_node_input = |node: &crate::domain::TxTreeNode,
+                                old_parent: &str,
+                                new_parent: &str|
+         -> Option<(String, String)> {
+            if node.tx.is_empty() {
+                return None;
+            }
+            let new_parent_hash: bitcoin::Txid = new_parent.parse().ok()?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&node.tx)
+                .ok()?;
+            let mut psbt = bitcoin::psbt::Psbt::deserialize(&bytes).ok()?;
+            let mut changed = false;
+            for txin in psbt.unsigned_tx.input.iter_mut() {
+                if txin.previous_output.txid.to_string() == old_parent {
+                    txin.previous_output.txid = new_parent_hash;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return None;
+            }
+            let new_computed_txid = psbt.unsigned_tx.compute_txid().to_string();
+            let new_tx_b64 = base64::engine::general_purpose::STANDARD.encode(psbt.serialize());
+            Some((new_tx_b64, new_computed_txid))
         };
 
-        tree.iter()
-            .map(|node| {
-                if node.tx.is_empty() {
-                    return node.clone();
-                }
-                let patched_tx = (|| -> Option<String> {
-                    let bytes = base64::engine::general_purpose::STANDARD
-                        .decode(&node.tx)
-                        .ok()?;
-                    let mut psbt = bitcoin::psbt::Psbt::deserialize(&bytes).ok()?;
-                    let mut changed = false;
-                    for txin in psbt.unsigned_tx.input.iter_mut() {
-                        if txin.previous_output.txid.to_string() == old_txid {
-                            txin.previous_output.txid = new_hash;
-                            changed = true;
-                        }
-                    }
-                    if !changed {
+        // Cascading patch: a queue of (old_txid_to_find_in_inputs, new_txid_to_set).
+        // We start with the commitment txid change which affects the root.
+        let mut queue: Vec<(String, String)> = vec![(old_txid.to_string(), new_txid.to_string())];
+
+        while let Some((old_parent, new_parent)) = queue.pop() {
+            // Find all nodes whose PSBT inputs reference old_parent.
+            let affected_txids: Vec<String> = nodes
+                .values()
+                .filter_map(|n| {
+                    if n.tx.is_empty() {
                         return None;
                     }
-                    Some(base64::engine::general_purpose::STANDARD.encode(psbt.serialize()))
-                })()
-                .unwrap_or_else(|| node.tx.clone());
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(&n.tx)
+                        .ok()?;
+                    let psbt = bitcoin::psbt::Psbt::deserialize(&bytes).ok()?;
+                    let references_old = psbt
+                        .unsigned_tx
+                        .input
+                        .iter()
+                        .any(|txin| txin.previous_output.txid.to_string() == old_parent);
+                    if references_old {
+                        Some(n.txid.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
 
-                crate::domain::TxTreeNode {
-                    txid: node.txid.clone(),
-                    tx: patched_tx,
-                    children: node.children.clone(),
+            for affected_old_txid in affected_txids {
+                let node = match nodes.get(&affected_old_txid) {
+                    Some(n) => n.clone(),
+                    None => continue,
+                };
+
+                if let Some((new_tx_b64, new_node_txid)) =
+                    patch_node_input(&node, &old_parent, &new_parent)
+                {
+                    // This node's txid changed; its children will need patching too.
+                    if affected_old_txid != new_node_txid {
+                        queue.push((affected_old_txid.clone(), new_node_txid.clone()));
+                    }
+
+                    // Update the node in our map under the new txid.
+                    nodes.remove(&affected_old_txid);
+                    nodes.insert(
+                        new_node_txid.clone(),
+                        crate::domain::TxTreeNode {
+                            txid: new_node_txid.clone(),
+                            tx: new_tx_b64,
+                            children: node.children.clone(),
+                        },
+                    );
+
+                    // Update any parent's children map that referenced the old txid.
+                    for n in nodes.values_mut() {
+                        let mut updated = false;
+                        let new_children: HashMap<u32, String> = n
+                            .children
+                            .iter()
+                            .map(|(&idx, child)| {
+                                if child == &affected_old_txid {
+                                    updated = true;
+                                    (idx, new_node_txid.clone())
+                                } else {
+                                    (idx, child.clone())
+                                }
+                            })
+                            .collect();
+                        if updated {
+                            n.children = new_children;
+                        }
+                    }
                 }
-            })
-            .collect()
+            }
+        }
+
+        // Return all nodes (order doesn't matter for the flat list since
+        // the tree structure is encoded in the children maps).
+        nodes.into_values().collect()
     }
 
     fn inject_cosigner_fields_single(psbt_b64: &str, cosigners: &[String]) -> String {
@@ -4206,27 +4296,6 @@ impl ArkService {
         }
 
         base64::engine::general_purpose::STANDARD.encode(psbt.serialize())
-    }
-
-    /// Inject cosigner pubkeys into all vtxo tree node PSBTs
-    fn inject_cosigner_fields(
-        tree: &[crate::domain::TxTreeNode],
-        cosigners: &[String],
-    ) -> Vec<crate::domain::TxTreeNode> {
-        tree.iter()
-            .map(|node| {
-                let tx = if node.tx.is_empty() {
-                    node.tx.clone()
-                } else {
-                    Self::inject_cosigner_fields_single(&node.tx, cosigners)
-                };
-                crate::domain::TxTreeNode {
-                    txid: node.txid.clone(),
-                    tx,
-                    children: node.children.clone(),
-                }
-            })
-            .collect()
     }
 
     fn extract_txid_from_psbt(psbt_str: &str) -> Option<String> {

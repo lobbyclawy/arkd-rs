@@ -81,10 +81,21 @@ impl WalletManager {
             })?;
         }
 
-        // Get or generate descriptors and mnemonic
-        let (external_desc, internal_desc, mnemonic) = Self::get_or_create_descriptors(&config)?;
+        // Get or generate mnemonic
+        let mnemonic = Self::get_or_create_mnemonic(&config)?;
 
-        debug!("Using external descriptor: {}", external_desc);
+        // Derive xpriv from mnemonic for BIP86 templates
+        let xkey: ExtendedKey = mnemonic
+            .clone()
+            .into_extended_key()
+            .map_err(|e| WalletError::KeyDerivationError(format!("Key derivation error: {e}")))?;
+        let xpriv = xkey
+            .into_xprv(config.network)
+            .ok_or_else(|| WalletError::KeyDerivationError("Failed to derive xpriv".to_string()))?;
+
+        // Create BIP86 templates (these retain the private keys for signing)
+        let external_template = Bip86(xpriv, KeychainKind::External);
+        let internal_template = Bip86(xpriv, KeychainKind::Internal);
 
         // Initialize file store for persistence
         let mut db = FileStore::open_or_create_new(b"dark-wallet", &db_path).map_err(|e| {
@@ -92,19 +103,27 @@ impl WalletManager {
         })?;
 
         // Try to load existing wallet or create new one
+        // When loading, we pass the templates so extract_keys() can extract the private keys
         let wallet = match Wallet::load()
-            .descriptor(KeychainKind::External, Some(external_desc.clone()))
-            .descriptor(KeychainKind::Internal, Some(internal_desc.clone()))
+            .descriptor(
+                KeychainKind::External,
+                Some(Bip86(xpriv, KeychainKind::External)),
+            )
+            .descriptor(
+                KeychainKind::Internal,
+                Some(Bip86(xpriv, KeychainKind::Internal)),
+            )
             .extract_keys()
             .load_wallet(&mut db)
         {
             Ok(Some(wallet)) => {
-                info!("Loaded existing wallet");
+                info!("Loaded existing wallet with private keys");
                 wallet
             }
             Ok(None) | Err(_) => {
-                info!("Creating new wallet");
-                Wallet::create(external_desc.clone(), internal_desc.clone())
+                info!("Creating new wallet with BIP86 templates");
+                // Use templates directly - this preserves private keys for signing
+                Wallet::create(external_template, internal_template)
                     .network(config.network)
                     .create_wallet(&mut db)
                     .map_err(|e| {
@@ -141,28 +160,8 @@ impl WalletManager {
         })
     }
 
-    /// Get or create wallet descriptors
-    fn get_or_create_descriptors(
-        config: &WalletConfig,
-    ) -> WalletResult<(String, String, Mnemonic)> {
-        // If descriptors are provided, use them
-        if let (Some(ext), Some(int)) = (&config.external_descriptor, &config.internal_descriptor) {
-            // We still need a mnemonic for the ASP key
-            let mnemonic = if let Some(m) = &config.mnemonic {
-                Mnemonic::parse_in(Language::English, m).map_err(|e| {
-                    WalletError::KeyDerivationError(format!("Invalid mnemonic: {e}"))
-                })?
-            } else {
-                // Generate a new one for ASP key only
-                let generated: GeneratedKey<Mnemonic, Tap> =
-                    Mnemonic::generate((WordCount::Words12, Language::English)).map_err(|e| {
-                        WalletError::KeyDerivationError(format!("Mnemonic generation error: {e:?}"))
-                    })?;
-                generated.into_key()
-            };
-            return Ok((ext.clone(), int.clone(), mnemonic));
-        }
-
+    /// Get or create mnemonic for the wallet
+    fn get_or_create_mnemonic(config: &WalletConfig) -> WalletResult<Mnemonic> {
         // Generate or parse mnemonic
         let mnemonic = if let Some(m) = &config.mnemonic {
             Mnemonic::parse_in(Language::English, m)
@@ -176,6 +175,15 @@ impl WalletManager {
             generated.into_key()
         };
 
+        Ok(mnemonic)
+    }
+
+    /// Get or create wallet descriptors (for debugging - not used in wallet creation)
+    #[allow(dead_code)]
+    fn get_descriptors_for_debug(
+        config: &WalletConfig,
+        mnemonic: &Mnemonic,
+    ) -> WalletResult<(String, String)> {
         // Derive Taproot (BIP86) descriptors from mnemonic
         let xkey: ExtendedKey = mnemonic
             .clone()
@@ -186,7 +194,7 @@ impl WalletManager {
             .into_xprv(config.network)
             .ok_or_else(|| WalletError::KeyDerivationError("Failed to derive xpriv".to_string()))?;
 
-        // Generate BIP86 Taproot descriptors
+        // Generate BIP86 Taproot descriptors (public key strings for logging)
         let (external_desc, _, _) = Bip86(xpriv, KeychainKind::External)
             .build(config.network)
             .map_err(|e| WalletError::InvalidDescriptor(format!("Descriptor build error: {e}")))?;
@@ -195,11 +203,7 @@ impl WalletManager {
             .build(config.network)
             .map_err(|e| WalletError::InvalidDescriptor(format!("Descriptor build error: {e}")))?;
 
-        Ok((
-            external_desc.to_string(),
-            internal_desc.to_string(),
-            mnemonic,
-        ))
+        Ok((external_desc.to_string(), internal_desc.to_string()))
     }
 
     /// Derive ASP keypair from mnemonic
@@ -634,6 +638,20 @@ impl WalletManager {
         // This ensures BDK populates all the necessary PSBT metadata for signing
         let mut wallet = self.wallet.write().await;
 
+        // Debug: verify the UTXO is in BDK's UTXO set
+        let bdk_has_utxo = wallet
+            .list_unspent()
+            .any(|u| u.outpoint == selected_utxo.outpoint);
+        let bdk_utxo_info = wallet
+            .list_unspent()
+            .find(|u| u.outpoint == selected_utxo.outpoint)
+            .map(|u| format!("keychain={:?} is_spent={}", u.keychain, u.is_spent));
+        info!(
+            bdk_has_utxo,
+            bdk_utxo_info = ?bdk_utxo_info,
+            "Verifying UTXO in BDK wallet"
+        );
+
         // Calculate how much change we'll have after covering the fee
         let change_amount = selected_utxo.amount.to_sat().saturating_sub(fee_amount);
 
@@ -648,44 +666,37 @@ impl WalletManager {
         );
         tx_builder.ordering(TxOrdering::Untouched);
 
-        let mut bdk_psbt = tx_builder
+        let bdk_psbt = tx_builder
             .finish()
             .map_err(|e| WalletError::BdkError(format!("Failed to build fee PSBT: {e}")))?;
 
-        // Sign the BDK-built PSBT — this will populate tap_key_sig
-        let sign_opts = bdk_wallet::SignOptions {
-            trust_witness_utxo: true,
-            try_finalize: false, // Don't finalize yet — we need to copy the sig data
-            ..Default::default()
-        };
-        let signed = wallet
-            .sign(&mut bdk_psbt, sign_opts)
-            .map_err(|e| WalletError::SigningError(format!("Failed to sign fee PSBT: {e}")))?;
+        // Debug: log the PSBT metadata
+        if let Some(inp) = bdk_psbt.inputs.first() {
+            info!(
+                has_witness_utxo = inp.witness_utxo.is_some(),
+                has_tap_internal_key = inp.tap_internal_key.is_some(),
+                tap_key_origins_count = inp.tap_key_origins.len(),
+                tap_scripts_count = inp.tap_scripts.len(),
+                "Fee PSBT input metadata from BDK TxBuilder"
+            );
+        }
 
-        info!(
-            bdk_signed = signed,
-            has_tap_key_sig = bdk_psbt
-                .inputs
-                .first()
-                .map(|i| i.tap_key_sig.is_some())
-                .unwrap_or(false),
-            "BDK signing result for fee input PSBT"
-        );
+        // DO NOT sign the separate bdk_psbt - its signature would be invalid for the
+        // full PSBT because Taproot sighash includes ALL outputs. Instead, we:
+        // 1. Copy the input metadata (without signature) to the main PSBT
+        // 2. Sign the main PSBT after adding the input/output
 
-        // Now we have a signed PSBT input from BDK. Add the input to the original PSBT.
-        // We need to:
-        // 1. Add the TxIn to psbt.unsigned_tx.input
-        // 2. Add the Input metadata to psbt.inputs
-        // 3. Add the output (change) to psbt.unsigned_tx.output and psbt.outputs
-
-        let bdk_input = &bdk_psbt.inputs[0];
+        // Get the input metadata (tap_internal_key, tap_key_origins, witness_utxo, etc.)
+        // but without any signature (we'll sign the full PSBT later)
+        let mut bdk_input = bdk_psbt.inputs[0].clone();
+        bdk_input.tap_key_sig = None; // Clear any signature - we'll sign the full PSBT
         let bdk_txin = &bdk_psbt.unsigned_tx.input[0];
 
         // Add the input to the unsigned transaction
         psbt.unsigned_tx.input.push(bdk_txin.clone());
 
-        // Add the input metadata (with all the BDK-populated signing info)
-        psbt.inputs.push(bdk_input.clone());
+        // Add the input metadata (with all the BDK-populated signing info, but no signature)
+        psbt.inputs.push(bdk_input);
 
         // Add the change output
         let change_output = &bdk_psbt.unsigned_tx.output[0];
@@ -695,51 +706,29 @@ impl WalletManager {
         // Reserve the UTXO so it's not reused
         self.reserve_utxo(selected_utxo.outpoint).await?;
 
-        // Now sign the full PSBT — BDK will skip inputs it doesn't own and only sign
-        // the fee input we just added. This ensures the signature is on the actual
-        // commitment PSBT rather than a separate one.
-        let sign_opts_full = bdk_wallet::SignOptions {
-            trust_witness_utxo: true,
-            try_finalize: false,
-            ..Default::default()
-        };
-        let full_signed = wallet
-            .sign(psbt, sign_opts_full)
-            .map_err(|e| WalletError::SigningError(format!("Failed to sign full PSBT: {e}")))?;
-
-        info!(
-            full_psbt_signed = full_signed,
-            fee_input_has_sig = psbt
-                .inputs
-                .last()
-                .map(|i| i.tap_key_sig.is_some())
-                .unwrap_or(false),
-            "BDK signing of full PSBT (fee input)"
-        );
-
         // Persist wallet state
         Self::persist_wallet_static(&mut wallet, &self.config.database_path)?;
         drop(wallet);
 
-        // If BDK didn't sign the fee input, manually sign it using the derivation info
-        let fee_input = psbt.inputs.last_mut();
-        if let Some(fee_input) = fee_input {
-            if fee_input.tap_key_sig.is_none() {
-                info!("BDK didn't sign fee input — attempting manual signing");
-                if let Err(e) = self
-                    .manual_sign_fee_input(psbt, psbt.inputs.len() - 1)
-                    .await
-                {
-                    warn!(error = %e, "Manual fee input signing failed");
-                } else {
-                    info!("Manual fee input signing succeeded");
-                }
-            }
-        }
-
+        // NOTE: We do NOT sign the fee input here. At this stage, other inputs
+        // (boarding inputs) don't have witness_utxo populated yet, so sighash
+        // computation would fail. The fee input will be signed later during the
+        // merge step in application.rs (after all inputs have witness_utxo).
+        // The fee input has all the metadata (tap_key_origins, witness_utxo, etc.)
+        // needed for signing later.
         info!(
             fee_input_idx = psbt.inputs.len() - 1,
-            "Fee input added and signed via BDK TxBuilder"
+            has_witness_utxo = psbt
+                .inputs
+                .last()
+                .map(|i| i.witness_utxo.is_some())
+                .unwrap_or(false),
+            has_tap_key_origins = psbt
+                .inputs
+                .last()
+                .map(|i| !i.tap_key_origins.is_empty())
+                .unwrap_or(false),
+            "Fee input added (will be signed during merge when all inputs have witness_utxo)"
         );
 
         Ok(true)
