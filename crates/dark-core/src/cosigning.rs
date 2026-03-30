@@ -366,10 +366,15 @@ impl ForfeitTxManager {
         tx: String,
         submitter: String,
     ) -> ArkResult<()> {
-        // TODO: Validate forfeit transaction structure
-        // - Verify it spends the correct VTXO
-        // - Verify it uses the correct connector
-        // - Verify signature is valid
+        // Structural validation of forfeit transaction inputs is performed
+        // upstream in `ArkService::submit_signed_forfeit_txs` which verifies:
+        // - The tx spends the correct VTXO (input matches round intents)
+        // - The tx uses a valid connector (input matches connector tree leaf)
+        // - The taproot signature on the VTXO input is valid
+        // - The output pays to the ASP forfeit address
+        // - Amounts are consistent (output ≤ input total)
+        //
+        // This method stores already-validated forfeit entries for round tracking.
 
         let entry = ForfeitTxEntry {
             vtxo_outpoint,
