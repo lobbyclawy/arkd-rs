@@ -75,6 +75,7 @@ use std::collections::HashSet;
 use super::broker::{SharedEventBroker, SharedTransactionEventBroker};
 use super::convert;
 use super::middleware::get_authenticated_user;
+use super::stream_registry::SharedStreamRegistry;
 
 /// ArkService gRPC handler backed by the core application service.
 pub struct ArkGrpcService {
@@ -87,6 +88,8 @@ pub struct ArkGrpcService {
     offchain_tx_repo: Arc<dyn OffchainTxRepository>,
     /// Shared note store for `RedeemNotes`.
     note_store: Arc<crate::notes::NoteStore>,
+    /// Per-stream topic registry for topic-filtered event delivery.
+    stream_registry: SharedStreamRegistry,
 }
 
 impl ArkGrpcService {
@@ -105,6 +108,7 @@ impl ArkGrpcService {
             tx_broker,
             offchain_tx_repo,
             note_store: Arc::new(crate::notes::NoteStore::new()),
+            stream_registry: Arc::new(super::stream_registry::StreamRegistry::new()),
         }
     }
 
@@ -124,6 +128,7 @@ impl ArkGrpcService {
             tx_broker,
             offchain_tx_repo,
             note_store,
+            stream_registry: Arc::new(super::stream_registry::StreamRegistry::new()),
         }
     }
 
@@ -514,23 +519,61 @@ impl ArkServiceTrait for ArkGrpcService {
 
     async fn get_event_stream(
         &self,
-        _request: Request<GetEventStreamRequest>,
+        request: Request<GetEventStreamRequest>,
     ) -> Result<Response<Self::GetEventStreamStream>, Status> {
-        info!("GetEventStream called");
+        let req = request.into_inner();
+        let initial_topics = req.topics;
+        info!(topics = ?initial_topics, "GetEventStream called");
+
+        let stream_id = uuid::Uuid::new_v4().to_string();
         let mut rx = self.broker.subscribe();
+        let registry = Arc::clone(&self.stream_registry);
+
+        // Register with initial topics
+        registry.register(&stream_id, initial_topics).await;
+        let stream_id_clone = stream_id.clone();
+        let registry_cleanup = Arc::clone(&registry);
 
         let output = stream! {
-            // Yield an initial heartbeat so the client knows the stream is alive
+            // Yield StreamStarted so the client can use the stream_id for UpdateStreamTopics
             yield Ok(RoundEvent {
-                event: Some(crate::proto::ark_v1::round_event::Event::Heartbeat(
-                    crate::proto::ark_v1::Heartbeat {},
+                event: Some(crate::proto::ark_v1::round_event::Event::StreamStarted(
+                    crate::proto::ark_v1::StreamStartedEvent {
+                        id: stream_id_clone.clone(),
+                    },
                 )),
             });
 
-            // Forward events from the broker
+            // Forward events from the broker, filtering by topics
             loop {
                 match rx.recv().await {
-                    Ok(event) => yield Ok(event),
+                    Ok(event) => {
+                        // Extract topic list from topic-bearing events
+                        let event_topics: Vec<String> = match &event.event {
+                            Some(crate::proto::ark_v1::round_event::Event::TreeNonces(e)) => {
+                                e.topic.clone()
+                            }
+                            Some(crate::proto::ark_v1::round_event::Event::TreeTx(e)) => {
+                                e.topic.clone()
+                            }
+                            Some(crate::proto::ark_v1::round_event::Event::TreeSignature(e)) => {
+                                e.topic.clone()
+                            }
+                            Some(crate::proto::ark_v1::round_event::Event::BatchFailed(_)) => {
+                                // BatchFailed is always broadcast to all subscribers.
+                                vec![]
+                            }
+                            // All other events (BatchStarted, BatchFinalization,
+                            // BatchFinalized, TreeSigningStarted, Heartbeat,
+                            // StreamStarted) are broadcast to all subscribers.
+                            _ => vec![],
+                        };
+
+                        // Check if this stream should receive this event
+                        if registry.includes_any(&stream_id_clone, &event_topics).await {
+                            yield Ok(event);
+                        }
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         warn!(skipped = n, "Event stream client lagged, skipped events");
                         // Continue receiving — don't break
@@ -540,6 +583,9 @@ impl ArkServiceTrait for ArkGrpcService {
                     }
                 }
             }
+
+            // Clean up when stream ends
+            registry_cleanup.unregister(&stream_id_clone).await;
         };
 
         Ok(Response::new(Box::pin(output)))
@@ -550,12 +596,73 @@ impl ArkServiceTrait for ArkGrpcService {
         request: Request<UpdateStreamTopicsRequest>,
     ) -> Result<Response<UpdateStreamTopicsResponse>, Status> {
         let req = request.into_inner();
-        info!(topics = ?req.topics, "UpdateStreamTopics called");
-        // Topic filtering is a future enhancement; accept and acknowledge
-        // Return the topics the client subscribed to
-        Ok(Response::new(UpdateStreamTopicsResponse {
-            topics: req.topics,
-        }))
+        let stream_id = &req.stream_id;
+        info!(stream_id = %stream_id, "UpdateStreamTopics called");
+
+        if stream_id.is_empty() {
+            return Err(Status::invalid_argument("stream_id is required"));
+        }
+
+        use crate::proto::ark_v1::update_stream_topics_request::TopicsChange;
+        match req.topics_change {
+            Some(TopicsChange::Overwrite(overwrite)) => {
+                let all_topics = self
+                    .stream_registry
+                    .overwrite_topics(stream_id, &overwrite.topics)
+                    .await
+                    .ok_or_else(|| Status::not_found(format!("stream {stream_id} not found")))?;
+                Ok(Response::new(UpdateStreamTopicsResponse {
+                    topics_added: vec![],
+                    topics_removed: vec![],
+                    all_topics,
+                }))
+            }
+            Some(TopicsChange::Modify(modify)) => {
+                let mut added = Vec::new();
+                let mut removed = Vec::new();
+
+                if !modify.add_topics.is_empty() {
+                    self.stream_registry
+                        .add_topics(stream_id, &modify.add_topics)
+                        .await
+                        .ok_or_else(|| {
+                            Status::not_found(format!("stream {stream_id} not found"))
+                        })?;
+                    added = modify.add_topics;
+                }
+                if !modify.remove_topics.is_empty() {
+                    self.stream_registry
+                        .remove_topics(stream_id, &modify.remove_topics)
+                        .await
+                        .ok_or_else(|| {
+                            Status::not_found(format!("stream {stream_id} not found"))
+                        })?;
+                    removed = modify.remove_topics;
+                }
+
+                let all_topics = self
+                    .stream_registry
+                    .get_topics(stream_id)
+                    .await
+                    .unwrap_or_default();
+
+                Ok(Response::new(UpdateStreamTopicsResponse {
+                    topics_added: added,
+                    topics_removed: removed,
+                    all_topics,
+                }))
+            }
+            None => {
+                // Legacy path: if `topics` field was provided in the old format,
+                // treat it as an overwrite for backwards compatibility.
+                // Note: proto oneof `topics_change` is separate from the old `topics` field.
+                // Since the new proto removed the old `topics` field and uses `stream_id` at
+                // field 1, this path handles the case where no topics_change is set.
+                Err(Status::invalid_argument(
+                    "topics_change is required (use modify or overwrite)",
+                ))
+            }
+        }
     }
 
     async fn estimate_intent_fee(
@@ -1107,6 +1214,10 @@ impl ArkServiceTrait for ArkGrpcService {
 
         // Skip first input (BIP-322 toSpend reference) — remaining are real UTXOs
         let mut inputs: Vec<dark_core::domain::Vtxo> = Vec::new();
+        // Track PSBT input index for each entry in `inputs` (needed to
+        // extract the correct per-input pubkey from the intent proof's
+        // tap_scripts later).
+        let mut input_psbt_indices: Vec<usize> = Vec::new();
         // Temporary pending key for note redemptions in this intent.
         let note_pending_key = format!("intent-notes:{}", proof_txid);
         let mut has_pending_notes = false;
@@ -1167,6 +1278,10 @@ impl ArkServiceTrait for ArkGrpcService {
                     amount,
                     String::new(),
                 ));
+                // Track the PSBT input index for this intent input so we
+                // can later extract the correct per-input pubkey from the
+                // intent proof's tap_scripts.
+                input_psbt_indices.push(i);
             }
         }
 
@@ -1224,20 +1339,65 @@ impl ArkServiceTrait for ArkGrpcService {
             }
         }
 
-        // Set input pubkeys from first receiver's pubkey
-        let owner_pubkey = receivers
+        // Set input pubkeys.
+        //
+        // For boarding inputs the user's **raw** x-only pubkey must be used
+        // (the same key that was used to derive the boarding address taproot
+        // tree).  The intent proof PSBT carries the collaborative tapscript
+        // leaf on each input as a `TaprootLeafScript`, and the first 32-byte
+        // data push in that script is the owner's x-only pubkey:
+        //
+        //   <owner_xonly> OP_CHECKSIGVERIFY <signer_xonly> OP_CHECKSIG
+        //
+        // We extract it here so that `finalize_round()` can reconstruct the
+        // correct boarding taproot tree later.  Fall back to the first
+        // receiver's pubkey for off-chain VTXO inputs (where the receiver
+        // key *is* the owner key).
+        let fallback_pubkey = receivers
             .iter()
             .find(|r| !r.pubkey.is_empty())
             .map(|r| r.pubkey.clone())
             .unwrap_or_default();
-        for inp in inputs.iter_mut() {
-            inp.pubkey = owner_pubkey.clone();
+
+        // Assign pubkeys: prefer per-input extraction from the intent proof
+        // PSBT's tap_scripts, fall back to receiver pubkey.
+        for (input_idx, inp) in inputs.iter_mut().enumerate() {
+            let psbt_idx = input_psbt_indices
+                .get(input_idx)
+                .copied()
+                .unwrap_or(input_idx + 1);
+            let mut found = false;
+            if let Some(psbt_input) = psbt.inputs.get(psbt_idx) {
+                // tap_scripts: BTreeMap<ControlBlock, (ScriptBuf, LeafVersion)>
+                // Look for a collaborative leaf: the script should contain at
+                // least two 32-byte pushes (owner + signer) separated by
+                // OP_CHECKSIGVERIFY.
+                for (script, _ver) in psbt_input.tap_scripts.values() {
+                    let script_bytes = script.as_bytes();
+                    // Collaborative leaf pattern:
+                    //   0x20 <32 bytes owner> OP_CHECKSIGVERIFY(0xad) 0x20 <32 bytes signer> OP_CHECKSIG(0xac)
+                    // Total: 1+32+1+1+32+1 = 68 bytes
+                    if script_bytes.len() >= 68
+                        && script_bytes[0] == 0x20
+                        && script_bytes[33] == 0xad // OP_CHECKSIGVERIFY
+                        && script_bytes[34] == 0x20
+                        && script_bytes[67] == 0xac
+                    {
+                        inp.pubkey = hex::encode(&script_bytes[1..33]);
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if !found {
+                inp.pubkey = fallback_pubkey.clone();
+            }
         }
 
         info!(
             inputs = inputs.len(),
             receivers = receivers.len(),
-            owner = %owner_pubkey,
+            owner = %fallback_pubkey,
             delegate = ?delegate_pubkey,
             "RegisterIntent: parsed BIP-322 proof"
         );

@@ -502,8 +502,8 @@ impl ArkService {
         //   ac               – OP_CHECKSIG
         let checkpoint_tapscript = {
             let delay = self.config.unilateral_exit_delay;
-            // BIP68 sequence for block-based relative lock: value fits in 16 bits, no flags.
-            let seq = delay as u64;
+            // BIP68 encode: >= 512 → seconds (sets type flag), < 512 → blocks (raw value)
+            let seq = dark_bitcoin::bip68_sequence(delay).unwrap_or(delay) as u64;
             // Minimal-push encoding of the sequence number (as Bitcoin Script integer).
             let seq_bytes = bitcoin::script::Builder::new()
                 .push_int(seq as i64)
@@ -781,7 +781,7 @@ impl ArkService {
                     base64::engine::general_purpose::STANDARD.decode(&commitment_psbt_with_fee)
                 {
                     if let Ok(mut psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
-                        let csv_delay = self.config.boarding_exit_delay.min(u16::MAX as u32) as u16;
+                        let boarding_delay = self.config.boarding_exit_delay;
                         let network = match self.config.network.as_str() {
                             "mainnet" | "bitcoin" => bitcoin::Network::Bitcoin,
                             "testnet" => bitcoin::Network::Testnet,
@@ -799,7 +799,9 @@ impl ArkService {
                                     continue;
                                 }
                                 match dark_bitcoin::build_vtxo_taproot(
-                                    user_xonly, &asp_xonly, csv_delay,
+                                    user_xonly,
+                                    &asp_xonly,
+                                    boarding_delay,
                                 ) {
                                     Ok(taproot_info) => {
                                         psbt.inputs[idx].tap_internal_key =
@@ -1109,8 +1111,7 @@ impl ArkService {
                     "Auto-complete with boarding inputs — broadcasting commitment tx"
                 );
                 match self
-                    .wallet
-                    .broadcast_transaction(vec![round.commitment_tx.clone()])
+                    .finalize_and_broadcast_commitment_psbt(&round.commitment_tx)
                     .await
                 {
                     Ok(txid) => {
@@ -1371,11 +1372,13 @@ impl ArkService {
             })
             .await?;
 
+        // For boarding rounds, the commitment tx is broadcast when clients submit
+        // their signed commitment PSBTs via SubmitSignedBatchTx / the event stream.
+        // The server merges all partial signatures and broadcasts the finalized tx.
+        // We do NOT broadcast here because we only have the server's signatures —
+        // the boarding inputs also need client signatures to be valid.
+
         // Emit RoundBroadcast so the event bridge sends BatchFinalized to clients.
-        // For rounds without boarding inputs this is immediate.  For rounds WITH
-        // boarding inputs, ideally we'd wait until the commitment tx is confirmed
-        // on-chain, but our server currently completes the round synchronously —
-        // so emit immediately to unblock waiting Go SDK clients.
         self.events
             .publish_event(ArkEvent::RoundBroadcast {
                 round_id: round.id.clone(),
@@ -3367,6 +3370,12 @@ impl ArkService {
                 std::collections::HashMap<String, String>,
             > = std::collections::HashMap::new();
 
+            // cosigners_by_txid: txid -> Vec<compressed_pubkey>
+            // Used as topic for event filtering so clients only receive
+            // TreeNonces events for tree nodes they cosign.
+            let mut cosigners_by_txid: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+
             if let Some(session) = session {
                 for (participant_pubkey_compressed, nonce_blob) in &session.tree_nonces {
                     // Convert compressed pubkey hex (66 chars) to x-only pubkey hex (64 chars)
@@ -3393,20 +3402,26 @@ impl ArkService {
                     // Add this participant's nonces to the per-txid map
                     for (txid, nonce_hex) in participant_nonces {
                         nonces_by_txid
-                            .entry(txid)
+                            .entry(txid.clone())
                             .or_default()
                             .insert(x_only_pubkey_hex.clone(), nonce_hex);
+                        cosigners_by_txid
+                            .entry(txid)
+                            .or_default()
+                            .push(participant_pubkey_compressed.clone());
                     }
                 }
             }
 
             // Emit one TreeNoncesForwarded event per txid
             for (txid, nonces_by_pubkey) in &nonces_by_txid {
+                let cosigners_compressed = cosigners_by_txid.get(txid).cloned().unwrap_or_default();
                 self.events
                     .publish_event(ArkEvent::TreeNoncesForwarded {
                         round_id: round_id.clone(),
                         txid: txid.clone(),
                         nonces_by_pubkey: nonces_by_pubkey.clone(),
+                        cosigners_compressed,
                     })
                     .await?;
             }
@@ -3514,6 +3529,82 @@ impl ArkService {
     /// 4. Broadcast the raw transaction to the Bitcoin network
     /// 5. Update the round with the commitment txid
     /// 6. Emit `RoundBroadcast` event
+    ///
+    /// Decode a base64-encoded commitment PSBT, finalize it, extract the raw
+    /// transaction, and broadcast it.  This is used when the server needs to
+    /// broadcast the commitment tx directly (e.g. boarding rounds without
+    /// cosigners, or after tree signing completes) rather than going through
+    /// the full `broadcast_signed_commitment_tx` merge flow.
+    async fn finalize_and_broadcast_commitment_psbt(
+        &self,
+        commitment_psbt_b64: &str,
+    ) -> ArkResult<String> {
+        use base64::Engine;
+
+        // 1. Decode base64 → raw PSBT bytes
+        let psbt_bytes = base64::engine::general_purpose::STANDARD
+            .decode(commitment_psbt_b64)
+            .map_err(|e| ArkError::Internal(format!("Invalid base64 commitment PSBT: {e}")))?;
+
+        // 2. Convert to hex (finalize_and_extract expects hex-encoded PSBT)
+        let psbt_hex = hex::encode(&psbt_bytes);
+
+        // 3. ASP co-signs the PSBT (adds server signatures for boarding inputs)
+        let signed_psbt = match self
+            .signer
+            .sign_transaction(commitment_psbt_b64, false)
+            .await
+        {
+            Ok(s) => {
+                info!("ASP co-signed commitment PSBT for direct broadcast");
+                // Signer may return hex; convert to hex if not already
+                if let Ok(bytes) = hex::decode(&s) {
+                    hex::encode(bytes)
+                } else if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&s) {
+                    hex::encode(bytes)
+                } else {
+                    psbt_hex.clone()
+                }
+            }
+            Err(e) => {
+                info!(error = %e, "ASP co-signing skipped for direct broadcast");
+                psbt_hex
+            }
+        };
+
+        // 4. Wallet (BDK) signs (fee input)
+        let wallet_signed = {
+            let psbt_bytes_for_wallet = hex::decode(&signed_psbt)
+                .map_err(|e| ArkError::Internal(format!("hex decode after ASP sign: {e}")))?;
+            let b64_for_wallet =
+                base64::engine::general_purpose::STANDARD.encode(psbt_bytes_for_wallet);
+            match self.wallet.sign_transaction(&b64_for_wallet, false).await {
+                Ok(s) => {
+                    info!("Wallet signed commitment PSBT for direct broadcast");
+                    if let Ok(bytes) = hex::decode(&s) {
+                        hex::encode(bytes)
+                    } else if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&s) {
+                        hex::encode(bytes)
+                    } else {
+                        signed_psbt.clone()
+                    }
+                }
+                Err(e) => {
+                    info!(error = %e, "Wallet signing skipped for direct broadcast");
+                    signed_psbt
+                }
+            }
+        };
+
+        // 5. Finalize and extract raw transaction hex
+        let raw_tx = self.tx_builder.finalize_and_extract(&wallet_signed).await?;
+
+        // 6. Broadcast
+        let txid = self.wallet.broadcast_transaction(vec![raw_tx]).await?;
+        info!(txid = %txid, "Commitment tx broadcast via finalize_and_broadcast_commitment_psbt");
+        Ok(txid)
+    }
+
     ///
     /// The round must be in the Finalization stage with a non-empty `commitment_tx`.
     #[instrument(skip(self))]
@@ -3908,41 +3999,58 @@ impl ArkService {
 
         // Re-apply the stored fee input signature if the last input is still unsigned.
         // This handles the case where Go SDK strips tap_key_sig during PSBT round-trip.
+        // IMPORTANT: Use .clone() instead of .take() so the signature persists across
+        // multiple calls. The first client's call returns early (not all inputs signed),
+        // and .take() would consume the signature, leaving it unavailable when the
+        // second client's call needs it to finalize and broadcast.
         {
-            let mut stored_sig = self.fee_input_signature.lock().await;
-            if let Some(sig) = stored_sig.take() {
+            let stored_sig = self.fee_input_signature.lock().await;
+            if let Some(sig) = stored_sig.as_ref() {
                 if let Some(fee_input) = merged.inputs.last_mut() {
                     if fee_input.tap_key_sig.is_none() && fee_input.final_script_witness.is_none() {
-                        fee_input.tap_key_sig = Some(sig);
+                        fee_input.tap_key_sig = Some(*sig);
                         info!("Re-applied stored fee input tap_key_sig to last input");
                     }
                 }
             }
         }
 
-        // Check if all inputs have at least one signature after merging
-        // and server signing.  Inputs without any signature still need
-        // another client's partial PSBT.
+        // Check if all inputs have sufficient signatures after merging
+        // and server signing.  For boarding inputs (script-path with
+        // collaborative leaf), we need at least 2 tap_script_sigs: the
+        // user's and the ASP's.  The ASP co-signs all boarding inputs
+        // when called above, so if a boarding input still has < 2 sigs
+        // it means the user's client hasn't submitted their partial yet.
+        // For key-path inputs (fee input), tap_key_sig suffices.
         let unsigned_count = merged
             .inputs
             .iter()
             .filter(|inp| {
-                inp.tap_key_sig.is_none()
-                    && inp.tap_script_sigs.is_empty()
-                    && inp.partial_sigs.is_empty()
-                    && inp.final_script_witness.is_none()
-                    && inp.final_script_sig.is_none()
+                // Already finalized — fully signed
+                if inp.final_script_witness.is_some() || inp.final_script_sig.is_some() {
+                    return false;
+                }
+                if !inp.tap_scripts.is_empty() {
+                    // Script-path input (boarding): needs both user + ASP sigs
+                    inp.tap_script_sigs.len() < 2
+                } else {
+                    // Key-path input (fee / other): needs tap_key_sig or partial_sigs
+                    inp.tap_key_sig.is_none() && inp.partial_sigs.is_empty()
+                }
             })
             .count();
 
         if unsigned_count > 0 {
             // Debug: log what each input has to help diagnose why some are unsigned
             for (i, input) in merged.inputs.iter().enumerate() {
-                let is_unsigned = input.tap_key_sig.is_none()
-                    && input.tap_script_sigs.is_empty()
-                    && input.partial_sigs.is_empty()
-                    && input.final_script_witness.is_none()
-                    && input.final_script_sig.is_none();
+                let is_unsigned =
+                    if input.final_script_witness.is_some() || input.final_script_sig.is_some() {
+                        false
+                    } else if !input.tap_scripts.is_empty() {
+                        input.tap_script_sigs.len() < 2
+                    } else {
+                        input.tap_key_sig.is_none() && input.partial_sigs.is_empty()
+                    };
                 let internal_key_hex = input
                     .tap_internal_key
                     .map(|k| hex::encode(k.serialize()))
@@ -4007,10 +4115,11 @@ impl ArkService {
         info!(raw_tx_hex = %raw_tx, "About to broadcast finalized commitment tx");
         let txid = self.wallet.broadcast_transaction(vec![raw_tx]).await?;
 
-        // Clear partials only after successful broadcast.
+        // Clear partials and stored fee signature only after successful broadcast.
         // If broadcast failed, partials remains intact so the next client
         // submission can still use the server's original PSBT as the merge base.
         self.partial_commitment_psbts.lock().await.clear();
+        *self.fee_input_signature.lock().await = None;
 
         info!(txid = %txid, "Merged commitment tx broadcast successfully");
 
