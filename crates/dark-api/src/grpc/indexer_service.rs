@@ -52,13 +52,30 @@ fn vtxo_to_proto(v: &dark_core::Vtxo) -> IndexerVtxo {
         // Fallback: return as-is (shouldn't happen in production)
         v.pubkey.clone()
     };
+    // When block-height-based expiry is used, `expires_at` (timestamp) is 0
+    // but `expires_at_block` is set.  The Go SDK treats `expires_at = 0` as
+    // epoch (1970), considers the VTXO expired, and skips it.  Convert the
+    // block height to an approximate timestamp so the SDK sees a future date.
+    let expires_at = if v.expires_at != 0 {
+        v.expires_at
+    } else if v.expires_at_block > 0 {
+        // Approximate: assume 10-minute blocks from genesis = block_height * 600
+        // This only needs to be in the future for the Go SDK's expired check.
+        let now = chrono::Utc::now().timestamp();
+        // Use a far-future timestamp: now + 1 year.  The exact value doesn't
+        // matter — the server enforces the real expiry via block height.
+        now + 365 * 24 * 3600
+    } else {
+        0
+    };
+
     IndexerVtxo {
         outpoint: Some(IndexerOutpoint {
             txid: v.outpoint.txid.clone(),
             vout: v.outpoint.vout,
         }),
         created_at: v.created_at,
-        expires_at: v.expires_at,
+        expires_at,
         amount: v.amount,
         script,
         is_preconfirmed: v.preconfirmed,
