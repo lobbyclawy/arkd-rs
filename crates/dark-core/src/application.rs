@@ -1371,17 +1371,18 @@ impl ArkService {
             })
             .await?;
 
-        // For rounds without boarding inputs, emit RoundBroadcast immediately
-        // so clients see BatchFinalized without waiting for a broadcast.
-        if !has_boarding {
-            self.events
-                .publish_event(ArkEvent::RoundBroadcast {
-                    round_id: round.id.clone(),
-                    commitment_txid: commitment_txid.clone(),
-                    timestamp: chrono::Utc::now().timestamp(),
-                })
-                .await?;
-        }
+        // Emit RoundBroadcast so the event bridge sends BatchFinalized to clients.
+        // For rounds without boarding inputs this is immediate.  For rounds WITH
+        // boarding inputs, ideally we'd wait until the commitment tx is confirmed
+        // on-chain, but our server currently completes the round synchronously —
+        // so emit immediately to unblock waiting Go SDK clients.
+        self.events
+            .publish_event(ArkEvent::RoundBroadcast {
+                round_id: round.id.clone(),
+                commitment_txid: commitment_txid.clone(),
+                timestamp: chrono::Utc::now().timestamp(),
+            })
+            .await?;
 
         Ok(round.clone())
     }
