@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Lobby <lobby.clawy@gmail.com>", "Andrea Carotti <ac.carotti@gmail.com>"]
 description = "Rust implementation of dark - Ark protocol server for Bitcoin Layer 2 scaling"
 license = "MIT"
-repository = "https://github.com/lobbyclawy/arkd-rs"
+repository = "https://github.com/lobbyclawy/dark"
 
 [features]
 default = []
