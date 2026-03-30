@@ -344,18 +344,23 @@ impl AdminServiceTrait for AdminGrpcService {
 
         let scheduled_sweeps: Vec<crate::proto::ark_v1::ScheduledSweep> = by_expiry
             .into_iter()
-            .map(|(ts, (count, amount))| crate::proto::ark_v1::ScheduledSweep {
-                scheduled_at: ts,
-                vtxo_count: count,
-                total_amount: amount,
-            })
+            .map(
+                |(ts, (count, amount))| crate::proto::ark_v1::ScheduledSweep {
+                    scheduled_at: ts,
+                    vtxo_count: count,
+                    total_amount: amount,
+                },
+            )
             .collect();
 
         // Populate deprecated top-level fields with aggregates for
         // backward compatibility.
         let total_vtxo_count: u32 = scheduled_sweeps.iter().map(|s| s.vtxo_count).sum();
         let total_amount: u64 = scheduled_sweeps.iter().map(|s| s.total_amount).sum();
-        let earliest = scheduled_sweeps.first().map(|s| s.scheduled_at).unwrap_or(0);
+        let earliest = scheduled_sweeps
+            .first()
+            .map(|s| s.scheduled_at)
+            .unwrap_or(0);
 
         Ok(Response::new(GetScheduledSweepResponse {
             scheduled_at: earliest,
