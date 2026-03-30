@@ -675,7 +675,7 @@ impl ArkClient {
         // the BatchStarted event that includes our intent.
         let mut grpc_client = self.require_client()?.clone();
         let stream = grpc_client
-            .get_event_stream(dark_api::proto::ark_v1::GetEventStreamRequest {})
+            .get_event_stream(dark_api::proto::ark_v1::GetEventStreamRequest { topics: vec![] })
             .await
             .map_err(|e| ClientError::Rpc(format!("GetEventStream failed: {}", e)))?
             .into_inner();
@@ -722,7 +722,7 @@ impl ArkClient {
     ) -> ClientResult<BatchTxRes> {
         let mut grpc_client = self.require_client()?.clone();
         let stream = grpc_client
-            .get_event_stream(dark_api::proto::ark_v1::GetEventStreamRequest {})
+            .get_event_stream(dark_api::proto::ark_v1::GetEventStreamRequest { topics: vec![] })
             .await
             .map_err(|e| ClientError::Rpc(format!("GetEventStream failed: {}", e)))?
             .into_inner();
@@ -1388,7 +1388,7 @@ impl ArkClient {
         let client = self.require_client()?;
 
         let mut stream = client
-            .get_event_stream(GetEventStreamRequest {})
+            .get_event_stream(GetEventStreamRequest { topics: vec![] })
             .await
             .map_err(|e| ClientError::Rpc(format!("GetEventStream failed: {}", e)))?
             .into_inner();
@@ -1484,7 +1484,7 @@ impl ArkClient {
         // never miss the BatchStarted event that includes our intent.
         let mut grpc_client = self.require_client()?.clone();
         let stream = grpc_client
-            .get_event_stream(GetEventStreamRequest {})
+            .get_event_stream(GetEventStreamRequest { topics: vec![] })
             .await
             .map_err(|e| ClientError::Rpc(format!("GetEventStream failed: {}", e)))?
             .into_inner();

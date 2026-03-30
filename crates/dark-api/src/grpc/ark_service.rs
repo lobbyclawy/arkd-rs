@@ -75,6 +75,7 @@ use std::collections::HashSet;
 use super::broker::{SharedEventBroker, SharedTransactionEventBroker};
 use super::convert;
 use super::middleware::get_authenticated_user;
+use super::stream_registry::SharedStreamRegistry;
 
 /// ArkService gRPC handler backed by the core application service.
 pub struct ArkGrpcService {
@@ -87,6 +88,8 @@ pub struct ArkGrpcService {
     offchain_tx_repo: Arc<dyn OffchainTxRepository>,
     /// Shared note store for `RedeemNotes`.
     note_store: Arc<crate::notes::NoteStore>,
+    /// Per-stream topic registry for topic-filtered event delivery.
+    stream_registry: SharedStreamRegistry,
 }
 
 impl ArkGrpcService {
@@ -105,6 +108,7 @@ impl ArkGrpcService {
             tx_broker,
             offchain_tx_repo,
             note_store: Arc::new(crate::notes::NoteStore::new()),
+            stream_registry: Arc::new(super::stream_registry::StreamRegistry::new()),
         }
     }
 
@@ -124,6 +128,7 @@ impl ArkGrpcService {
             tx_broker,
             offchain_tx_repo,
             note_store,
+            stream_registry: Arc::new(super::stream_registry::StreamRegistry::new()),
         }
     }
 
@@ -514,23 +519,61 @@ impl ArkServiceTrait for ArkGrpcService {
 
     async fn get_event_stream(
         &self,
-        _request: Request<GetEventStreamRequest>,
+        request: Request<GetEventStreamRequest>,
     ) -> Result<Response<Self::GetEventStreamStream>, Status> {
-        info!("GetEventStream called");
+        let req = request.into_inner();
+        let initial_topics = req.topics;
+        info!(topics = ?initial_topics, "GetEventStream called");
+
+        let stream_id = uuid::Uuid::new_v4().to_string();
         let mut rx = self.broker.subscribe();
+        let registry = Arc::clone(&self.stream_registry);
+
+        // Register with initial topics
+        registry.register(&stream_id, initial_topics).await;
+        let stream_id_clone = stream_id.clone();
+        let registry_cleanup = Arc::clone(&registry);
 
         let output = stream! {
-            // Yield an initial heartbeat so the client knows the stream is alive
+            // Yield StreamStarted so the client can use the stream_id for UpdateStreamTopics
             yield Ok(RoundEvent {
-                event: Some(crate::proto::ark_v1::round_event::Event::Heartbeat(
-                    crate::proto::ark_v1::Heartbeat {},
+                event: Some(crate::proto::ark_v1::round_event::Event::StreamStarted(
+                    crate::proto::ark_v1::StreamStartedEvent {
+                        id: stream_id_clone.clone(),
+                    },
                 )),
             });
 
-            // Forward events from the broker
+            // Forward events from the broker, filtering by topics
             loop {
                 match rx.recv().await {
-                    Ok(event) => yield Ok(event),
+                    Ok(event) => {
+                        // Extract topic list from topic-bearing events
+                        let event_topics: Vec<String> = match &event.event {
+                            Some(crate::proto::ark_v1::round_event::Event::TreeNonces(e)) => {
+                                e.topic.clone()
+                            }
+                            Some(crate::proto::ark_v1::round_event::Event::TreeTx(e)) => {
+                                e.topic.clone()
+                            }
+                            Some(crate::proto::ark_v1::round_event::Event::TreeSignature(e)) => {
+                                e.topic.clone()
+                            }
+                            Some(crate::proto::ark_v1::round_event::Event::BatchFailed(_)) => {
+                                // BatchFailed is always broadcast to all subscribers.
+                                vec![]
+                            }
+                            // All other events (BatchStarted, BatchFinalization,
+                            // BatchFinalized, TreeSigningStarted, Heartbeat,
+                            // StreamStarted) are broadcast to all subscribers.
+                            _ => vec![],
+                        };
+
+                        // Check if this stream should receive this event
+                        if registry.includes_any(&stream_id_clone, &event_topics).await {
+                            yield Ok(event);
+                        }
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         warn!(skipped = n, "Event stream client lagged, skipped events");
                         // Continue receiving — don't break
@@ -540,6 +583,9 @@ impl ArkServiceTrait for ArkGrpcService {
                     }
                 }
             }
+
+            // Clean up when stream ends
+            registry_cleanup.unregister(&stream_id_clone).await;
         };
 
         Ok(Response::new(Box::pin(output)))
@@ -550,12 +596,73 @@ impl ArkServiceTrait for ArkGrpcService {
         request: Request<UpdateStreamTopicsRequest>,
     ) -> Result<Response<UpdateStreamTopicsResponse>, Status> {
         let req = request.into_inner();
-        info!(topics = ?req.topics, "UpdateStreamTopics called");
-        // Topic filtering is a future enhancement; accept and acknowledge
-        // Return the topics the client subscribed to
-        Ok(Response::new(UpdateStreamTopicsResponse {
-            topics: req.topics,
-        }))
+        let stream_id = &req.stream_id;
+        info!(stream_id = %stream_id, "UpdateStreamTopics called");
+
+        if stream_id.is_empty() {
+            return Err(Status::invalid_argument("stream_id is required"));
+        }
+
+        use crate::proto::ark_v1::update_stream_topics_request::TopicsChange;
+        match req.topics_change {
+            Some(TopicsChange::Overwrite(overwrite)) => {
+                let all_topics = self
+                    .stream_registry
+                    .overwrite_topics(stream_id, &overwrite.topics)
+                    .await
+                    .ok_or_else(|| {
+                        Status::not_found(format!("stream {stream_id} not found"))
+                    })?;
+                Ok(Response::new(UpdateStreamTopicsResponse {
+                    topics_added: vec![],
+                    topics_removed: vec![],
+                    all_topics,
+                }))
+            }
+            Some(TopicsChange::Modify(modify)) => {
+                let mut added = Vec::new();
+                let mut removed = Vec::new();
+
+                if !modify.add_topics.is_empty() {
+                    self.stream_registry
+                        .add_topics(stream_id, &modify.add_topics)
+                        .await
+                        .ok_or_else(|| {
+                            Status::not_found(format!("stream {stream_id} not found"))
+                        })?;
+                    added = modify.add_topics;
+                }
+                if !modify.remove_topics.is_empty() {
+                    self.stream_registry
+                        .remove_topics(stream_id, &modify.remove_topics)
+                        .await
+                        .ok_or_else(|| {
+                            Status::not_found(format!("stream {stream_id} not found"))
+                        })?;
+                    removed = modify.remove_topics;
+                }
+
+                let all_topics = self
+                    .stream_registry
+                    .get_topics(stream_id)
+                    .await
+                    .unwrap_or_default();
+
+                Ok(Response::new(UpdateStreamTopicsResponse {
+                    topics_added: added,
+                    topics_removed: removed,
+                    all_topics,
+                }))
+            }
+            None => {
+                // Legacy path: if `topics` field was provided in the old format,
+                // treat it as an overwrite for backwards compatibility.
+                // Note: proto oneof `topics_change` is separate from the old `topics` field.
+                // Since the new proto removed the old `topics` field and uses `stream_id` at
+                // field 1, this path handles the case where no topics_change is set.
+                Err(Status::invalid_argument("topics_change is required (use modify or overwrite)"))
+            }
+        }
     }
 
     async fn estimate_intent_fee(
