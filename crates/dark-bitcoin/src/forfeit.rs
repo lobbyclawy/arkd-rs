@@ -12,6 +12,7 @@
 //! - Output 0: pays the combined value (minus fees) to the ASP's pubkey
 
 use bitcoin::hashes::Hash;
+use bitcoin::key::TweakedPublicKey;
 use bitcoin::secp256k1::{self, schnorr::Signature, Message, Secp256k1};
 use bitcoin::sighash::{Prevouts, SighashCache};
 use bitcoin::TapSighashType;
@@ -50,8 +51,8 @@ pub struct ForfeitTx {
     pub connector_input: OutPoint,
     /// Amount going to ASP (vtxo_amount + connector_amount - fees)
     pub asp_output_amount: Amount,
-    /// ASP's pubkey (recipient of forfeited funds)
-    pub asp_pubkey: XOnlyPublicKey,
+    /// ASP's tweaked public key (recipient of forfeited funds)
+    pub asp_pubkey: TweakedPublicKey,
     /// The unsigned transaction
     pub tx: Transaction,
 }
@@ -70,7 +71,7 @@ impl ForfeitTx {
         vtxo_amount: Amount,
         connector_outpoint: OutPoint,
         connector_amount: Amount,
-        asp_pubkey: XOnlyPublicKey,
+        asp_pubkey: TweakedPublicKey,
         fee_rate_sats_per_vb: u64,
     ) -> Result<Self, ForfeitError> {
         let total_in = vtxo_amount
@@ -88,15 +89,8 @@ impl ForfeitTx {
 
         let asp_output_amount = Amount::from_sat(total_in - fee);
 
-        // Taproot output script: OP_1 <asp_pubkey>
-        // SAFETY: dangerous_assume_tweaked is correct here because the ASP output
-        // is a key-path-only P2TR with no script path. The caller is responsible
-        // for ensuring asp_pubkey is already the final tweaked key.
-        // TODO: accept a TweakedPublicKey parameter directly once the round
-        // signing flow provides it (Issue #42 follow-up).
-        let asp_script = ScriptBuf::new_p2tr_tweaked(
-            bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(asp_pubkey),
-        );
+        // Taproot output script: OP_1 <tweaked_asp_pubkey>
+        let asp_script = ScriptBuf::new_p2tr_tweaked(asp_pubkey);
 
         let tx = Transaction {
             version: transaction::Version::TWO,
@@ -144,9 +138,7 @@ impl ForfeitTx {
         let vtxo_script = ScriptBuf::new_p2tr_tweaked(
             bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(*vtxo_pubkey),
         );
-        let connector_script = ScriptBuf::new_p2tr_tweaked(
-            bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(self.asp_pubkey),
-        );
+        let connector_script = ScriptBuf::new_p2tr_tweaked(self.asp_pubkey);
 
         let prevouts = vec![
             TxOut {
@@ -193,14 +185,16 @@ pub struct SignedForfeitTx {
 mod tests {
     use super::*;
     use bitcoin::hashes::Hash;
+    use bitcoin::key::TapTweak;
     use bitcoin::secp256k1::{Keypair, Secp256k1};
     use bitcoin::Txid;
 
-    fn test_keypair() -> (Keypair, XOnlyPublicKey) {
+    fn test_keypair() -> (Keypair, XOnlyPublicKey, TweakedPublicKey) {
         let secp = Secp256k1::new();
         let kp = Keypair::new(&secp, &mut secp256k1::rand::thread_rng());
         let (xonly, _parity) = kp.x_only_public_key();
-        (kp, xonly)
+        let (tweaked, _parity) = xonly.tap_tweak(&secp, None);
+        (kp, xonly, tweaked)
     }
 
     fn dummy_outpoint(index: u32) -> OutPoint {
@@ -212,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_build_forfeit_tx_correct_inputs() {
-        let (_kp, asp_pk) = test_keypair();
+        let (_kp, _asp_pk, asp_tweaked) = test_keypair();
         let vtxo_out = dummy_outpoint(1);
         let conn_out = dummy_outpoint(2);
 
@@ -221,7 +215,7 @@ mod tests {
             Amount::from_sat(100_000),
             conn_out,
             Amount::from_sat(1_000),
-            asp_pk,
+            asp_tweaked,
             2,
         )
         .unwrap();
@@ -239,13 +233,13 @@ mod tests {
 
     #[test]
     fn test_build_forfeit_tx_fee_exceeds_amount() {
-        let (_kp, asp_pk) = test_keypair();
+        let (_kp, _asp_pk, asp_tweaked) = test_keypair();
         let result = ForfeitTx::build(
             dummy_outpoint(1),
             Amount::from_sat(100),
             dummy_outpoint(2),
             Amount::from_sat(50),
-            asp_pk,
+            asp_tweaked,
             10, // 10 * 170 = 1700 > 150
         );
         assert!(result.is_err());
@@ -257,13 +251,13 @@ mod tests {
 
     #[test]
     fn test_forfeit_txid_is_deterministic() {
-        let (_kp, asp_pk) = test_keypair();
+        let (_kp, _asp_pk, asp_tweaked) = test_keypair();
         let f1 = ForfeitTx::build(
             dummy_outpoint(1),
             Amount::from_sat(100_000),
             dummy_outpoint(2),
             Amount::from_sat(1_000),
-            asp_pk,
+            asp_tweaked,
             1,
         )
         .unwrap();
@@ -272,7 +266,7 @@ mod tests {
             Amount::from_sat(100_000),
             dummy_outpoint(2),
             Amount::from_sat(1_000),
-            asp_pk,
+            asp_tweaked,
             1,
         )
         .unwrap();
@@ -282,8 +276,8 @@ mod tests {
     #[test]
     fn test_verify_valid_signature() {
         let secp = Secp256k1::new();
-        let (vtxo_kp, vtxo_pk) = test_keypair();
-        let (_asp_kp, asp_pk) = test_keypair();
+        let (vtxo_kp, vtxo_pk, _vtxo_tweaked) = test_keypair();
+        let (_asp_kp, _asp_pk, asp_tweaked) = test_keypair();
 
         let vtxo_amount = Amount::from_sat(100_000);
         let connector_amount = Amount::from_sat(1_000);
@@ -293,18 +287,18 @@ mod tests {
             vtxo_amount,
             dummy_outpoint(2),
             connector_amount,
-            asp_pk,
+            asp_tweaked,
             1,
         )
         .unwrap();
 
-        // Compute sighash and sign
+        // Compute sighash and sign.
+        // Use dangerous_assume_tweaked to match what verify_vtxo_signature uses internally —
+        // the VTXO key is stored and verified as a raw x-only key treated as-if-tweaked.
         let vtxo_script = ScriptBuf::new_p2tr_tweaked(
             bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(vtxo_pk),
         );
-        let connector_script = ScriptBuf::new_p2tr_tweaked(
-            bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(asp_pk),
-        );
+        let connector_script = ScriptBuf::new_p2tr_tweaked(asp_tweaked);
         let prevouts = vec![
             TxOut {
                 value: vtxo_amount,
@@ -333,8 +327,8 @@ mod tests {
     #[test]
     fn test_verify_tampered_signature() {
         let secp = Secp256k1::new();
-        let (vtxo_kp, vtxo_pk) = test_keypair();
-        let (_asp_kp, asp_pk) = test_keypair();
+        let (vtxo_kp, vtxo_pk, _vtxo_tweaked) = test_keypair();
+        let (_asp_kp, _asp_pk, asp_tweaked) = test_keypair();
 
         let vtxo_amount = Amount::from_sat(100_000);
         let connector_amount = Amount::from_sat(1_000);
@@ -344,7 +338,7 @@ mod tests {
             vtxo_amount,
             dummy_outpoint(2),
             connector_amount,
-            asp_pk,
+            asp_tweaked,
             1,
         )
         .unwrap();
@@ -362,9 +356,9 @@ mod tests {
     #[test]
     fn test_verify_wrong_pubkey() {
         let secp = Secp256k1::new();
-        let (vtxo_kp, vtxo_pk) = test_keypair();
-        let (_asp_kp, asp_pk) = test_keypair();
-        let (_other_kp, other_pk) = test_keypair();
+        let (vtxo_kp, vtxo_pk, vtxo_tweaked) = test_keypair();
+        let (_asp_kp, _asp_pk, asp_tweaked) = test_keypair();
+        let (_other_kp, other_pk, _other_tweaked) = test_keypair();
 
         let vtxo_amount = Amount::from_sat(100_000);
         let connector_amount = Amount::from_sat(1_000);
@@ -374,18 +368,14 @@ mod tests {
             vtxo_amount,
             dummy_outpoint(2),
             connector_amount,
-            asp_pk,
+            asp_tweaked,
             1,
         )
         .unwrap();
 
         // Sign correctly but verify with wrong pubkey
-        let vtxo_script = ScriptBuf::new_p2tr_tweaked(
-            bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(vtxo_pk),
-        );
-        let connector_script = ScriptBuf::new_p2tr_tweaked(
-            bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(asp_pk),
-        );
+        let vtxo_script = ScriptBuf::new_p2tr_tweaked(vtxo_tweaked);
+        let connector_script = ScriptBuf::new_p2tr_tweaked(asp_tweaked);
         let prevouts = vec![
             TxOut {
                 value: vtxo_amount,
@@ -413,15 +403,15 @@ mod tests {
     #[test]
     fn test_signed_forfeit_tx() {
         let secp = Secp256k1::new();
-        let (vtxo_kp, _vtxo_pk) = test_keypair();
-        let (_asp_kp, asp_pk) = test_keypair();
+        let (vtxo_kp, _vtxo_pk, _vtxo_tweaked) = test_keypair();
+        let (_asp_kp, _asp_pk, asp_tweaked) = test_keypair();
 
         let forfeit = ForfeitTx::build(
             dummy_outpoint(1),
             Amount::from_sat(100_000),
             dummy_outpoint(2),
             Amount::from_sat(1_000),
-            asp_pk,
+            asp_tweaked,
             1,
         )
         .unwrap();
