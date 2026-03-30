@@ -226,8 +226,7 @@ fn parse_xonly(hex_str: &str) -> Result<XOnlyPublicKey, String> {
 /// Accepts both 32-byte x-only keys (prepends 0x02) and 33-byte compressed keys
 /// (preserves the original 02/03 prefix so that MuSig2 parity is maintained).
 fn parse_compressed(hex_str: &str) -> Result<[u8; 33], String> {
-    let bytes =
-        hex::decode(hex_str).map_err(|e| format!("Invalid pubkey hex '{hex_str}': {e}"))?;
+    let bytes = hex::decode(hex_str).map_err(|e| format!("Invalid pubkey hex '{hex_str}': {e}"))?;
     match bytes.len() {
         33 => {
             // Validate it's a real compressed key
@@ -274,9 +273,7 @@ fn add_cosigner_field(psbt: &mut Psbt, input_idx: usize, index: u32, key: &[u8; 
         type_value: field_key[0],
         key: field_key[1..].to_vec(),
     };
-    psbt.inputs[input_idx]
-        .unknown
-        .insert(raw_key, key.to_vec());
+    psbt.inputs[input_idx].unknown.insert(raw_key, key.to_vec());
 }
 
 /// Add a vtxo tree expiry PSBT unknown field to `psbt.inputs[input_idx]`.
@@ -590,7 +587,7 @@ impl LocalTxBuilder {
         // Convert compressed keys to x-only for script computation
         let xonly_keys: Vec<XOnlyPublicKey> = cosigners
             .iter()
-            .map(|k| compressed_to_xonly(k))
+            .map(compressed_to_xonly)
             .collect::<Result<Vec<_>, _>>()?;
 
         if xonly_keys.len() == 1 {

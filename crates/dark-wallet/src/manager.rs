@@ -639,8 +639,11 @@ impl WalletManager {
         let mut wallet = self.wallet.write().await;
 
         // Debug: verify the UTXO is in BDK's UTXO set
-        let bdk_has_utxo = wallet.list_unspent().any(|u| u.outpoint == selected_utxo.outpoint);
-        let bdk_utxo_info = wallet.list_unspent()
+        let bdk_has_utxo = wallet
+            .list_unspent()
+            .any(|u| u.outpoint == selected_utxo.outpoint);
+        let bdk_utxo_info = wallet
+            .list_unspent()
             .find(|u| u.outpoint == selected_utxo.outpoint)
             .map(|u| format!("keychain={:?} is_spent={}", u.keychain, u.is_spent));
         info!(
