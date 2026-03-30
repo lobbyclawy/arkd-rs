@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn test_verify_valid_signature() {
         let secp = Secp256k1::new();
-        let (vtxo_kp, vtxo_pk, vtxo_tweaked) = test_keypair();
+        let (vtxo_kp, vtxo_pk, _vtxo_tweaked) = test_keypair();
         let (_asp_kp, _asp_pk, asp_tweaked) = test_keypair();
 
         let vtxo_amount = Amount::from_sat(100_000);
@@ -292,8 +292,12 @@ mod tests {
         )
         .unwrap();
 
-        // Compute sighash and sign
-        let vtxo_script = ScriptBuf::new_p2tr_tweaked(vtxo_tweaked);
+        // Compute sighash and sign.
+        // Use dangerous_assume_tweaked to match what verify_vtxo_signature uses internally —
+        // the VTXO key is stored and verified as a raw x-only key treated as-if-tweaked.
+        let vtxo_script = ScriptBuf::new_p2tr_tweaked(
+            bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(vtxo_pk),
+        );
         let connector_script = ScriptBuf::new_p2tr_tweaked(asp_tweaked);
         let prevouts = vec![
             TxOut {
