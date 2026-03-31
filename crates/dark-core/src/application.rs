@@ -959,7 +959,7 @@ impl ArkService {
                     let batch_output_amount = ct_psbt
                         .unsigned_tx
                         .output
-                        .get(0)
+                        .first()
                         .map(|o| o.value.to_sat())
                         .unwrap_or(0);
                     let ct_output_count = ct_psbt.unsigned_tx.output.len();
@@ -998,13 +998,13 @@ impl ArkService {
                                 let root_input_txid = root_psbt
                                     .unsigned_tx
                                     .input
-                                    .get(0)
+                                    .first()
                                     .map(|i| i.previous_output.txid.to_string())
                                     .unwrap_or_default();
                                 let root_input_vout = root_psbt
                                     .unsigned_tx
                                     .input
-                                    .get(0)
+                                    .first()
                                     .map(|i| i.previous_output.vout)
                                     .unwrap_or(0);
                                 let amounts_match = root_output_sum == batch_output_amount;
