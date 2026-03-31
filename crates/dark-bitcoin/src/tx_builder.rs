@@ -1168,4 +1168,137 @@ mod tests {
             }
         }
     }
+
+    // ── Test: two separate intents (E2E scenario) ───────────────────────
+
+    /// Mimics the Go E2E test: two clients each boarding with one receiver.
+    /// Validates the same invariant the Go client checks:
+    /// sum of root tx outputs == batch output amount at index 0.
+    #[test]
+    fn test_two_intents_root_sum_matches_batch() {
+        let builder = LocalTxBuilder::new("regtest");
+        let asp = xonly_key(10);
+
+        // Two separate intents (like Alice and Bob in Go e2e)
+        let intent_a = make_intent("alice", vec![make_receiver(1, 21_000)]);
+        let intent_b = make_intent("bob", vec![make_receiver(2, 21_000)]);
+        let boarding = vec![make_boarding(100_000)];
+
+        let result = builder
+            .build(&asp, &[intent_a, intent_b], &boarding)
+            .unwrap();
+
+        let commitment_psbt_bytes = psbt_b64_decode(&result.commitment_tx);
+        let commitment_psbt = Psbt::deserialize(&commitment_psbt_bytes).unwrap();
+        let batch_amount = commitment_psbt.unsigned_tx.output[0].value.to_sat();
+
+        // Find root: node not in any children map
+        let child_txids: std::collections::HashSet<String> = result
+            .vtxo_tree
+            .iter()
+            .flat_map(|n| n.children.values())
+            .cloned()
+            .collect();
+        let root_node = result
+            .vtxo_tree
+            .iter()
+            .find(|n| !child_txids.contains(&n.txid))
+            .expect("tree must have a root");
+
+        let root_psbt_bytes = psbt_b64_decode(&root_node.tx);
+        let root_psbt = Psbt::deserialize(&root_psbt_bytes).unwrap();
+        let root_output_sum: u64 = root_psbt
+            .unsigned_tx
+            .output
+            .iter()
+            .map(|o| o.value.to_sat())
+            .sum();
+
+        // Also verify all intermediate nodes
+        for node in &result.vtxo_tree {
+            if node.children.is_empty() {
+                continue; // leaf
+            }
+            let node_psbt_bytes = psbt_b64_decode(&node.tx);
+            let node_psbt = Psbt::deserialize(&node_psbt_bytes).unwrap();
+
+            for (&child_idx, child_txid) in &node.children {
+                let child_node = result
+                    .vtxo_tree
+                    .iter()
+                    .find(|n| &n.txid == child_txid)
+                    .expect("child must exist");
+                let child_psbt_bytes = psbt_b64_decode(&child_node.tx);
+                let child_psbt = Psbt::deserialize(&child_psbt_bytes).unwrap();
+                let child_output_sum: u64 = child_psbt
+                    .unsigned_tx
+                    .output
+                    .iter()
+                    .map(|o| o.value.to_sat())
+                    .sum();
+                let parent_output_value = node_psbt.unsigned_tx.output[child_idx as usize]
+                    .value
+                    .to_sat();
+
+                assert_eq!(
+                    child_output_sum, parent_output_value,
+                    "child {} output sum {} != parent output[{}] {} (Go Validate check)",
+                    child_txid, child_output_sum, child_idx, parent_output_value
+                );
+            }
+        }
+
+        assert_eq!(
+            root_output_sum, batch_amount,
+            "root output sum {} != batch amount {} (Go ValidateVtxoTree check)",
+            root_output_sum, batch_amount
+        );
+    }
+
+    /// Test with 3 intents (odd number, tests remainder handling)
+    #[test]
+    fn test_three_intents_root_sum_matches_batch() {
+        let builder = LocalTxBuilder::new("regtest");
+        let asp = xonly_key(10);
+
+        let intent_a = make_intent("a", vec![make_receiver(1, 10_000)]);
+        let intent_b = make_intent("b", vec![make_receiver(2, 20_000)]);
+        let intent_c = make_intent("c", vec![make_receiver(3, 15_000)]);
+        let boarding = vec![make_boarding(200_000)];
+
+        let result = builder
+            .build(&asp, &[intent_a, intent_b, intent_c], &boarding)
+            .unwrap();
+
+        let commitment_psbt_bytes = psbt_b64_decode(&result.commitment_tx);
+        let commitment_psbt = Psbt::deserialize(&commitment_psbt_bytes).unwrap();
+        let batch_amount = commitment_psbt.unsigned_tx.output[0].value.to_sat();
+
+        let child_txids: std::collections::HashSet<String> = result
+            .vtxo_tree
+            .iter()
+            .flat_map(|n| n.children.values())
+            .cloned()
+            .collect();
+        let root_node = result
+            .vtxo_tree
+            .iter()
+            .find(|n| !child_txids.contains(&n.txid))
+            .expect("tree must have a root");
+
+        let root_psbt_bytes = psbt_b64_decode(&root_node.tx);
+        let root_psbt = Psbt::deserialize(&root_psbt_bytes).unwrap();
+        let root_output_sum: u64 = root_psbt
+            .unsigned_tx
+            .output
+            .iter()
+            .map(|o| o.value.to_sat())
+            .sum();
+
+        assert_eq!(
+            root_output_sum, batch_amount,
+            "3-intent: root output sum {} != batch amount {}",
+            root_output_sum, batch_amount
+        );
+    }
 }
