@@ -379,3 +379,94 @@ index d17000b..d4f9d61 100644
  		return event.Data.NewVtxos, nil
  	}
  }
+diff --git a/pkg/client-lib/send.go b/pkg/client-lib/send.go
+index 36552d2..a4e8f61 100644
+--- a/pkg/client-lib/send.go
++++ b/pkg/client-lib/send.go
+@@ -396,10 +396,13 @@ func (a *service) createOffchainTx(
+ func (a *service) finalizePendingTxs(
+ 	ctx context.Context, createdAfter *time.Time,
+ ) ([]string, error) {
++	fmt.Println("DEBUG: [finalizePendingTxs] calling fetchPendingSpentVtxos...")
+ 	vtxos, err := a.fetchPendingSpentVtxos(ctx)
+ 	if err != nil {
++		fmt.Printf("DEBUG: [finalizePendingTxs] fetchPendingSpentVtxos error: %v\n", err)
+ 		return nil, err
+ 	}
++	fmt.Printf("DEBUG: [finalizePendingTxs] fetchPendingSpentVtxos returned %d vtxos\n", len(vtxos))
+ 
+ 	filtered := make([]types.Vtxo, 0, len(vtxos))
+ 	for _, vtxo := range vtxos {
+diff --git a/pkg/client-lib/service.go b/pkg/client-lib/service.go
+index c8a8bb8..49864fb 100644
+--- a/pkg/client-lib/service.go
++++ b/pkg/client-lib/service.go
+@@ -215,9 +215,11 @@ func (a *service) GetConfigData(_ context.Context) (*types.Config, error) {
+ }
+ 
+ func (a *service) Unlock(ctx context.Context, password string) error {
++	fmt.Println("DEBUG: [Unlock] wallet.Unlock starting...")
+ 	if _, err := a.wallet.Unlock(ctx, password); err != nil {
+ 		return err
+ 	}
++	fmt.Println("DEBUG: [Unlock] wallet.Unlock done")
+ 
+ 	log.SetLevel(log.DebugLevel)
+ 	if !a.verbose {
+@@ -225,10 +227,13 @@ func (a *service) Unlock(ctx context.Context, password string) error {
+ 	}
+ 
+ 	if a.withFinalizePendingTxs {
++		fmt.Println("DEBUG: [Unlock] calling finalizePendingTxs...")
+ 		txids, err := a.finalizePendingTxs(ctx, nil)
+ 		if err != nil {
++			fmt.Printf("DEBUG: [Unlock] finalizePendingTxs error: %v\n", err)
+ 			return err
+ 		}
++		fmt.Printf("DEBUG: [Unlock] finalizePendingTxs returned %d txids\n", len(txids))
+ 		switch len(txids) {
+ 		case 0:
+ 			log.Debug("no pending txs to finalize")
+@@ -239,6 +244,7 @@ func (a *service) Unlock(ctx context.Context, password string) error {
+ 		}
+ 	}
+ 
++	fmt.Println("DEBUG: [Unlock] done")
+ 	return nil
+ }
+ 
+@@ -421,6 +427,7 @@ func (a *service) getSpendableVtxos(
+ }
+ 
+ func (a *service) fetchPendingSpentVtxos(ctx context.Context) ([]types.Vtxo, error) {
++	fmt.Println("DEBUG: [fetchPendingSpentVtxos] starting...")
+ 	if a.wallet == nil {
+ 		return nil, ErrNotInitialized
+ 	}
+@@ -429,6 +436,7 @@ func (a *service) fetchPendingSpentVtxos(ctx context.Context) ([]types.Vtxo, err
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	fmt.Printf("DEBUG: [fetchPendingSpentVtxos] got %d offchain addrs\n", len(offchainAddrs))
+ 
+ 	scripts := make([]string, 0, len(offchainAddrs))
+ 	for _, addr := range offchainAddrs {
+@@ -442,6 +450,7 @@ func (a *service) fetchPendingSpentVtxos(ctx context.Context) ([]types.Vtxo, err
+ 		}
+ 		scripts = append(scripts, hex.EncodeToString(vtxoScript))
+ 	}
++	fmt.Printf("DEBUG: [fetchPendingSpentVtxos] calling indexer.GetVtxos with %d scripts (pendingOnly)...\n", len(scripts))
+ 	opt := indexer.GetVtxosRequestOption{}
+ 	opt.WithPendingOnly()
+ 	if err = opt.WithScripts(scripts); err != nil {
+@@ -449,8 +458,10 @@ func (a *service) fetchPendingSpentVtxos(ctx context.Context) ([]types.Vtxo, err
+ 	}
+ 	resp, err := a.indexer.GetVtxos(ctx, opt)
+ 	if err != nil {
++		fmt.Printf("DEBUG: [fetchPendingSpentVtxos] indexer.GetVtxos error: %v\n", err)
+ 		return nil, err
+ 	}
++	fmt.Printf("DEBUG: [fetchPendingSpentVtxos] indexer.GetVtxos returned %d vtxos\n", len(resp.Vtxos))
+ 	return resp.Vtxos, nil
+ }
+ 
