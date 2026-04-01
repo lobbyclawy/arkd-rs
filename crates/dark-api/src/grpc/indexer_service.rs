@@ -766,6 +766,7 @@ impl IndexerServiceTrait for IndexerGrpcService {
         // without waiting for the (potentially unreliable) Esplora outspend
         // detection in check_unrolled_vtxos.
         let mut unroll_commitment_txids: Vec<String> = Vec::new();
+        let mut matched_offchain_tx_ids: Vec<String> = Vec::new();
 
         if !target_txids.is_empty() {
             // Scan all rounds (paginated in batches of 100)
@@ -818,10 +819,6 @@ impl IndexerServiceTrait for IndexerGrpcService {
                 })
                 .copied()
                 .collect();
-
-            // Track offchain tx IDs (ark_txids) whose PSBTs were requested,
-            // so we can mark preconfirmed VTXOs as unrolled.
-            let mut matched_offchain_tx_ids: Vec<String> = Vec::new();
 
             if !remaining.is_empty() {
                 // Search all finalized offchain txs for matching PSBTs
