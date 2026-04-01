@@ -1,6 +1,7 @@
 //! Application services — aligned with Go dark's `application.Service`
 
 use std::collections::HashMap as StdHashMap;
+use std::collections::HashSet as StdHashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, instrument, warn};
@@ -236,6 +237,10 @@ pub struct ArkService {
     watched_scripts: RwLock<StdHashMap<String, Vec<VtxoOutpoint>>>,
     /// ASP MuSig2 tree cosigning state (per-round nonces and sweep root).
     asp_musig2_state: tokio::sync::Mutex<Option<AspMusig2State>>,
+    /// In-process guard: batch IDs whose nonces have already been processed.
+    /// Prevents concurrent `submit_tree_nonces` calls from both creating ASP
+    /// partial signatures (which would double-consume single-use SecNonces).
+    nonces_processed_guard: tokio::sync::Mutex<StdHashSet<String>>,
 }
 
 /// ASP's per-round MuSig2 state for tree cosigning.
@@ -312,6 +317,7 @@ impl ArkService {
             fee_input_signature: tokio::sync::Mutex::new(None),
             watched_scripts: RwLock::new(StdHashMap::new()),
             asp_musig2_state: tokio::sync::Mutex::new(None),
+            nonces_processed_guard: tokio::sync::Mutex::new(StdHashSet::new()),
         }
     }
 
@@ -1148,6 +1154,9 @@ impl ArkService {
         self.signing_session_store
             .init_session(&round.id, psbt_participant_count)
             .await?;
+
+        // Clear the in-process nonces-processed guard for the new round.
+        self.nonces_processed_guard.lock().await.clear();
 
         // Emit BatchStarted FIRST so Go SDK clients transition from step 0
         // ("start") to step 1 ("batchStarted").  The Go SDK's state machine
@@ -3810,24 +3819,35 @@ impl ArkService {
 
         info!(batch_id, pubkey, "Tree nonces submitted");
 
-        // Atomically check if all nonces collected AND mark as processed.
-        // This prevents the race condition where two concurrent SubmitTreeNonces
-        // calls both see "all nonces collected" and both try to create ASP partial
-        // signatures, consuming single-use MuSig2 SecNonces.
-        //
-        // Only the first caller to successfully mark nonces as processed will
-        // proceed with ASP partial sig creation and event emission.
+        // Check if all nonces are collected, then use an in-process mutex
+        // guard to ensure only one concurrent caller proceeds with ASP
+        // partial sig creation.  The previous SQL-only CAS
+        // (try_mark_nonces_processed) was unreliable under SQLite WAL with
+        // pooled connections, allowing both callers through and
+        // double-consuming single-use MuSig2 SecNonces.
         if !self
             .signing_session_store
-            .try_mark_nonces_processed(batch_id)
+            .all_nonces_collected(batch_id)
             .await?
         {
-            // Another concurrent call already processed nonces, or not all nonces collected yet
             info!(
                 batch_id,
-                pubkey, "Nonces not yet complete or already processed by another call"
+                pubkey, "Not all nonces collected yet — waiting for remaining cosigners"
             );
             return Ok(());
+        }
+
+        // In-process compare-and-swap: only the first caller to insert
+        // this batch_id proceeds; all others return early.
+        {
+            let mut processed = self.nonces_processed_guard.lock().await;
+            if !processed.insert(batch_id.to_string()) {
+                info!(
+                    batch_id,
+                    pubkey, "Nonces already processed by another concurrent call — skipping"
+                );
+                return Ok(());
+            }
         }
 
         // We are the first (and only) call to process nonces for this session.
