@@ -11,13 +11,16 @@ use std::collections::HashMap;
 
 use sha2::{Digest, Sha256};
 
+use base64::Engine;
 use bitcoin::consensus::Encodable;
 use bitcoin::hashes::Hash;
 use bitcoin::key::TapTweak;
+use bitcoin::opcodes::all::{OP_CHECKSIG, OP_CSV, OP_DROP};
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
 use bitcoin::sighash::{Prevouts, SighashCache};
+use bitcoin::taproot::{LeafVersion, TapLeafHash, TapNodeHash};
 use bitcoin::{
-    Amount, OutPoint, ScriptBuf, TapLeafHash, TapSighashType, TxOut, Txid, XOnlyPublicKey,
+    Amount, OutPoint, ScriptBuf, TapSighashType, TxOut, Txid, XOnlyPublicKey,
 };
 
 use musig2::{BinaryEncoding, KeyAggContext, PubNonce, SecNonce};
@@ -66,6 +69,8 @@ struct SignerState {
     sec_nonces: HashMap<String, SecNonce>,
     pub_nonces: HashMap<String, PubNonce>,
     agg_nonces: HashMap<String, musig2::AggNonce>,
+    /// Sweep script merkle root for taproot tweak (set in init_for_signing).
+    sweep_merkle_root: Option<[u8; 32]>,
 }
 
 impl SignerState {
@@ -79,7 +84,23 @@ impl SignerState {
             sec_nonces: HashMap::new(),
             pub_nonces: HashMap::new(),
             agg_nonces: HashMap::new(),
+            sweep_merkle_root: None,
         }
+    }
+
+    /// Initialize signing state with sweep merkle root computed from ASP pubkey + exit delay.
+    fn init_for_signing(&mut self, asp_pubkey: &XOnlyPublicKey, exit_delay: u32) {
+        // Build sweep script: <exit_delay> OP_CSV OP_DROP <asp_pubkey> OP_CHECKSIG
+        let sweep_script = bitcoin::script::Builder::new()
+            .push_int(exit_delay as i64)
+            .push_opcode(OP_CSV)
+            .push_opcode(OP_DROP)
+            .push_x_only_key(asp_pubkey)
+            .push_opcode(OP_CHECKSIG)
+            .into_script();
+        let leaf_hash = TapLeafHash::from_script(&sweep_script, LeafVersion::TapScript);
+        let merkle_root = TapNodeHash::from_byte_array(leaf_hash.to_byte_array());
+        self.sweep_merkle_root = Some(merkle_root.to_byte_array());
     }
 
     fn generate_nonces(&mut self, tree_txids: &[String]) {
@@ -132,54 +153,161 @@ impl SignerState {
         Ok(self.agg_nonces.len() >= total_tree_txs)
     }
 
+    /// Sign tree transactions with proper BIP-341 sighash and taproot-tweaked MuSig2.
     fn sign_tree(
         &mut self,
-        tree_txids: &[String],
+        tree_nodes: &[TreeTxNode],
         cosigner_pubkeys: &[String],
     ) -> ClientResult<HashMap<String, Vec<u8>>> {
-        let mut sigs = HashMap::new();
+        let sweep_merkle_root = self.sweep_merkle_root.ok_or_else(|| {
+            ClientError::Rpc("Signing state not initialized (missing sweep_merkle_root)".into())
+        })?;
 
+        // Build KeyAggContext with even-parity normalized pubkeys
         let mut musig_pubkeys: Vec<musig2::secp256k1::PublicKey> = Vec::new();
         for pk_hex in cosigner_pubkeys {
             let pk_bytes = hex::decode(pk_hex)
                 .map_err(|e| ClientError::Rpc(format!("Invalid cosigner pubkey hex: {}", e)))?;
             let pk = musig2::secp256k1::PublicKey::from_slice(&pk_bytes)
                 .map_err(|e| ClientError::Rpc(format!("Invalid cosigner pubkey: {}", e)))?;
-            musig_pubkeys.push(pk);
+            // Normalize to even parity (0x02 prefix) to match server
+            let mut even_bytes = [0u8; 33];
+            even_bytes[0] = 0x02;
+            even_bytes[1..].copy_from_slice(&pk.serialize()[1..]);
+            let even_pk = musig2::secp256k1::PublicKey::from_slice(&even_bytes)
+                .map_err(|e| ClientError::Rpc(format!("Even-parity pubkey failed: {}", e)))?;
+            musig_pubkeys.push(even_pk);
         }
         musig_pubkeys.sort();
 
+        // Build KeyAggContext with taproot tweak
         let key_agg_ctx = KeyAggContext::new(musig_pubkeys)
-            .map_err(|e| ClientError::Rpc(format!("MuSig2 key aggregation failed: {}", e)))?;
+            .map_err(|e| ClientError::Rpc(format!("MuSig2 key aggregation failed: {}", e)))?
+            .with_taproot_tweak(&sweep_merkle_root)
+            .map_err(|e| ClientError::Rpc(format!("Taproot tweak failed: {}", e)))?;
 
-        for txid in tree_txids {
-            let agg_nonce = self.agg_nonces.get(txid).ok_or_else(|| {
-                ClientError::Rpc(format!("Missing aggregated nonce for txid {}", txid))
-            })?;
+        // Build output map for prevout fetching
+        let output_map = Self::build_tree_output_map(tree_nodes)?;
 
-            let sec_nonce = self.sec_nonces.remove(txid).ok_or_else(|| {
-                ClientError::Rpc(format!(
-                    "Missing secret nonce for txid {} (already consumed?)",
-                    txid
-                ))
-            })?;
+        // Normalize our secret key to even parity (same as server does for ASP key)
+        let secp_ctx = musig2::secp256k1::Secp256k1::new();
+        let our_pk = musig2::secp256k1::PublicKey::from_secret_key(&secp_ctx, &self.secret_key);
+        let signing_key = if our_pk.serialize()[0] == 0x03 {
+            self.secret_key.negate()
+        } else {
+            self.secret_key
+        };
 
-            let mut msg = [0u8; 32];
-            let hash = Sha256::digest(txid.as_bytes());
-            msg.copy_from_slice(&hash);
+        let mut sigs = HashMap::new();
+
+        for node in tree_nodes {
+            if node.tx.is_empty() {
+                continue;
+            }
+
+            let agg_nonce = match self.agg_nonces.get(&node.txid) {
+                Some(n) => n,
+                None => continue, // Not our txid
+            };
+
+            let sec_nonce = match self.sec_nonces.remove(&node.txid) {
+                Some(n) => n,
+                None => {
+                    return Err(ClientError::Rpc(format!(
+                        "Missing secret nonce for txid {} (already consumed?)",
+                        node.txid
+                    )));
+                }
+            };
+
+            // Compute real BIP-341 sighash from PSBT
+            let sighash = Self::compute_tree_psbt_sighash(&node.tx, &output_map)?;
+
+            // Create partial signature
             let partial_sig = dark_bitcoin::create_partial_sig(
                 &key_agg_ctx,
-                &self.secret_key,
+                &signing_key,
                 sec_nonce,
                 agg_nonce,
-                &msg,
+                &sighash,
             )
             .map_err(|e| ClientError::Rpc(format!("MuSig2 partial signing failed: {}", e)))?;
 
-            sigs.insert(txid.clone(), partial_sig.serialize().to_vec());
+            sigs.insert(node.txid.clone(), partial_sig.serialize().to_vec());
         }
 
         Ok(sigs)
+    }
+
+    /// Build txid -> TxOut vec map from tree nodes for prevout fetching.
+    fn build_tree_output_map(tree_nodes: &[TreeTxNode]) -> ClientResult<HashMap<String, Vec<TxOut>>> {
+        let mut map = HashMap::new();
+        for node in tree_nodes {
+            if node.tx.is_empty() {
+                continue;
+            }
+            let psbt_bytes = base64::engine::general_purpose::STANDARD
+                .decode(&node.tx)
+                .map_err(|e| ClientError::Rpc(format!("Invalid base64 PSBT: {}", e)))?;
+            let psbt = bitcoin::psbt::Psbt::deserialize(&psbt_bytes)
+                .map_err(|e| ClientError::Rpc(format!("Invalid PSBT: {}", e)))?;
+            map.insert(node.txid.clone(), psbt.unsigned_tx.output.clone());
+        }
+        Ok(map)
+    }
+
+    /// Compute BIP-341 taproot key-spend sighash for input 0 of a tree PSBT.
+    fn compute_tree_psbt_sighash(
+        psbt_b64: &str,
+        output_map: &HashMap<String, Vec<TxOut>>,
+    ) -> ClientResult<[u8; 32]> {
+        use bitcoin::hashes::Hash;
+        use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
+
+        let psbt_bytes = base64::engine::general_purpose::STANDARD
+            .decode(psbt_b64)
+            .map_err(|e| ClientError::Rpc(format!("Invalid base64 PSBT: {}", e)))?;
+        let mut psbt = bitcoin::psbt::Psbt::deserialize(&psbt_bytes)
+            .map_err(|e| ClientError::Rpc(format!("Invalid PSBT: {}", e)))?;
+
+        // Ensure witness_utxo is set for each input
+        for (idx, input_tx) in psbt.unsigned_tx.input.iter().enumerate() {
+            if psbt.inputs[idx].witness_utxo.is_some() {
+                continue;
+            }
+            let parent_txid = input_tx.previous_output.txid.to_string();
+            let parent_vout = input_tx.previous_output.vout as usize;
+            if let Some(outputs) = output_map.get(&parent_txid) {
+                if parent_vout < outputs.len() {
+                    psbt.inputs[idx].witness_utxo = Some(outputs[parent_vout].clone());
+                }
+            }
+        }
+
+        // Collect prevouts for sighash computation
+        let prevouts: Vec<TxOut> = psbt
+            .inputs
+            .iter()
+            .filter_map(|input| input.witness_utxo.clone())
+            .collect();
+
+        if prevouts.len() != psbt.unsigned_tx.input.len() {
+            return Err(ClientError::Rpc(
+                "Missing witness_utxo for some inputs".into(),
+            ));
+        }
+
+        // Compute BIP-341 taproot key-spend sighash for input 0
+        let mut cache = SighashCache::new(&psbt.unsigned_tx);
+        let sighash = cache
+            .taproot_key_spend_signature_hash(
+                0,
+                &Prevouts::All(&prevouts),
+                TapSighashType::Default,
+            )
+            .map_err(|e| ClientError::Rpc(format!("Sighash computation failed: {}", e)))?;
+
+        Ok(sighash.to_byte_array())
     }
 }
 
@@ -418,6 +546,11 @@ pub(crate) async fn run_batch_protocol_with_stream_impl(
                     });
                 }
                 batch_session_id = e.id.clone();
+                // Capture batch_expiry for sweep script construction
+                let batch_expiry_secs = e.batch_expiry as u32;
+                if let Some(asp_pk) = asp_forfeit_pubkey {
+                    signer.init_for_signing(&asp_pk, batch_expiry_secs);
+                }
                 step = BatchStep::BatchStarted;
             }
 
@@ -478,7 +611,7 @@ pub(crate) async fn run_batch_protocol_with_stream_impl(
                     vtxo_tree_txids.len(),
                 )?;
                 if all_aggregated {
-                    let sigs = signer.sign_tree(&vtxo_tree_txids, &cosigner_pubkeys)?;
+                    let sigs = signer.sign_tree(&flat_vtxo_tree, &cosigner_pubkeys)?;
                     client
                         .submit_tree_signatures(SubmitTreeSignaturesRequest {
                             batch_id: e.id.clone(),
