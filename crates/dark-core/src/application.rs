@@ -5459,6 +5459,7 @@ impl ArkService {
                 let sig_hex = txid_sigs
                     .get(&format!("02{xonly_hex}"))
                     .or_else(|| txid_sigs.get(&format!("03{xonly_hex}")))
+                    .or_else(|| txid_sigs.get(&xonly_hex))
                     .ok_or_else(|| {
                         ArkError::Internal(format!(
                             "Missing partial sig from {xonly_hex} for txid {}",

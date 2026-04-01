@@ -75,11 +75,22 @@ impl SignerState {
     fn new(secret_key: musig2::secp256k1::SecretKey) -> Self {
         let secp = musig2::secp256k1::Secp256k1::new();
         let pubkey = musig2::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
-        // Store original pubkey_hex for identification (matching what server stores).
-        // Normalization to even parity happens during KeyAggContext creation in sign_tree.
+
+        // Store original pubkey_hex for identification (matching what server stores
+        // from RegisterForRound). The server looks up participants by this key.
         let pubkey_hex = hex::encode(pubkey.serialize());
+
+        // Normalize secret key to even parity for MuSig2 nonce generation and signing.
+        // The same normalized key must be used for BOTH operations so the SecNonce's
+        // embedded pubkey matches what's used during signing.
+        let normalized_secret = if pubkey.serialize()[0] == 0x03 {
+            secret_key.negate()
+        } else {
+            secret_key
+        };
+
         Self {
-            secret_key,
+            secret_key: normalized_secret,
             pubkey_hex,
             sec_nonces: HashMap::new(),
             pub_nonces: HashMap::new(),
@@ -131,10 +142,8 @@ impl SignerState {
 
         let mut all_pub_nonces = Vec::new();
 
-        if let Some(our_nonce) = self.pub_nonces.get(txid) {
-            all_pub_nonces.push(our_nonce.clone());
-        }
-
+        // Note: cosigner_nonces already includes ALL participants' nonces
+        // (including our own), so we must NOT add our own nonce separately.
         for nonce_hex in cosigner_nonces.values() {
             let nonce_bytes = hex::decode(nonce_hex)
                 .map_err(|e| ClientError::InvalidResponse(format!("Invalid nonce hex: {}", e)))?;
