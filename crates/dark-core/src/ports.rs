@@ -1484,6 +1484,16 @@ pub trait SigningSessionStore: Send + Sync {
     ) -> ArkResult<()>;
     /// Check whether all nonces have been collected.
     async fn all_nonces_collected(&self, session_id: &str) -> ArkResult<bool>;
+    /// Atomically check if all nonces are collected AND mark them as processed.
+    ///
+    /// Returns `true` if this call was the first to mark nonces as processed
+    /// (i.e., the caller should proceed with ASP partial sig creation).
+    /// Returns `false` if another concurrent call already marked them processed.
+    ///
+    /// This method prevents the race condition where two concurrent
+    /// `SubmitTreeNonces` calls both see "all nonces collected" and both
+    /// try to create ASP partial signatures, consuming single-use SecNonces.
+    async fn try_mark_nonces_processed(&self, session_id: &str) -> ArkResult<bool>;
     /// Add a partial signature from a participant.
     async fn add_signature(
         &self,
@@ -1557,6 +1567,9 @@ impl SigningSessionStore for NoopSigningSessionStore {
         Ok(())
     }
     async fn all_nonces_collected(&self, _session_id: &str) -> ArkResult<bool> {
+        Ok(true)
+    }
+    async fn try_mark_nonces_processed(&self, _session_id: &str) -> ArkResult<bool> {
         Ok(true)
     }
     async fn add_signature(

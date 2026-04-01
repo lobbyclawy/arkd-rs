@@ -185,6 +185,36 @@ impl SigningSessionStore for SqliteSigningSessionStore {
         Ok(actual.0 >= expected as i64)
     }
 
+    async fn try_mark_nonces_processed(&self, session_id: &str) -> ArkResult<bool> {
+        // Atomically check if all nonces are collected AND mark as processed.
+        // Uses a single SQL UPDATE with a WHERE clause to ensure only one
+        // concurrent caller succeeds (compare-and-swap pattern).
+        //
+        // The nonces_processed column defaults to FALSE. We only update it to
+        // TRUE if:
+        // 1. It's currently FALSE (not yet processed)
+        // 2. All nonces have been collected (COUNT >= participant_count)
+        //
+        // Returns true if this call was the one that successfully marked it.
+        let result = sqlx::query(
+            r#"
+            UPDATE signing_sessions
+            SET nonces_processed = TRUE
+            WHERE session_id = ?1
+              AND nonces_processed = FALSE
+              AND (SELECT COUNT(*) FROM signing_nonces WHERE session_id = ?1)
+                  >= participant_count
+            "#,
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ArkError::DatabaseError(e.to_string()))?;
+
+        // rows_affected() == 1 means we were the first to mark it processed
+        Ok(result.rows_affected() == 1)
+    }
+
     async fn add_signature(
         &self,
         session_id: &str,

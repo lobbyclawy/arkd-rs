@@ -3810,103 +3810,115 @@ impl ArkService {
 
         info!(batch_id, pubkey, "Tree nonces submitted");
 
-        // Check if all nonces collected — if so, emit TreeNoncesForwarded events.
-        // Go clients send map<txid, nonce_hex> and need one TreeNoncesEvent per txid
-        // with all participants' nonces for that txid.
-        if self
+        // Atomically check if all nonces collected AND mark as processed.
+        // This prevents the race condition where two concurrent SubmitTreeNonces
+        // calls both see "all nonces collected" and both try to create ASP partial
+        // signatures, consuming single-use MuSig2 SecNonces.
+        //
+        // Only the first caller to successfully mark nonces as processed will
+        // proceed with ASP partial sig creation and event emission.
+        if !self
             .signing_session_store
-            .all_nonces_collected(batch_id)
+            .try_mark_nonces_processed(batch_id)
             .await?
         {
+            // Another concurrent call already processed nonces, or not all nonces collected yet
             info!(
                 batch_id,
-                "All tree nonces collected — emitting per-txid nonces events"
+                pubkey, "Nonces not yet complete or already processed by another call"
             );
+            return Ok(());
+        }
 
-            // Fetch the real nonces from the signing session store.
-            // Each participant's nonce blob is a JSON-serialized map<txid, nonce_hex>.
-            // Build map<txid, map<x_only_pubkey, nonce_hex>> to emit one event per txid.
-            let session = self.signing_session_store.get_session(batch_id).await?;
+        // We are the first (and only) call to process nonces for this session.
+        info!(
+            batch_id,
+            "All tree nonces collected — emitting per-txid nonces events (first processor)"
+        );
 
-            // nonces_by_txid: txid -> { x_only_pubkey -> nonce_hex }
-            let mut nonces_by_txid: std::collections::HashMap<
-                String,
-                std::collections::HashMap<String, String>,
-            > = std::collections::HashMap::new();
+        // Fetch the real nonces from the signing session store.
+        // Each participant's nonce blob is a JSON-serialized map<txid, nonce_hex>.
+        // Build map<txid, map<x_only_pubkey, nonce_hex>> to emit one event per txid.
+        let session = self.signing_session_store.get_session(batch_id).await?;
 
-            // cosigners_by_txid: txid -> Vec<compressed_pubkey>
-            // Used as topic for event filtering so clients only receive
-            // TreeNonces events for tree nodes they cosign.
-            let mut cosigners_by_txid: std::collections::HashMap<String, Vec<String>> =
-                std::collections::HashMap::new();
+        // nonces_by_txid: txid -> { x_only_pubkey -> nonce_hex }
+        let mut nonces_by_txid: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, String>,
+        > = std::collections::HashMap::new();
 
-            if let Some(session) = session {
-                for (participant_pubkey_compressed, nonce_blob) in &session.tree_nonces {
-                    // Convert compressed pubkey hex (66 chars) to x-only pubkey hex (64 chars)
-                    let x_only_pubkey_hex = if participant_pubkey_compressed.len() == 66 {
-                        participant_pubkey_compressed[2..].to_string()
-                    } else {
-                        participant_pubkey_compressed.clone()
+        // cosigners_by_txid: txid -> Vec<compressed_pubkey>
+        // Used as topic for event filtering so clients only receive
+        // TreeNonces events for tree nodes they cosign.
+        let mut cosigners_by_txid: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+
+        if let Some(session) = session {
+            for (participant_pubkey_compressed, nonce_blob) in &session.tree_nonces {
+                // Convert compressed pubkey hex (66 chars) to x-only pubkey hex (64 chars)
+                let x_only_pubkey_hex = if participant_pubkey_compressed.len() == 66 {
+                    participant_pubkey_compressed[2..].to_string()
+                } else {
+                    participant_pubkey_compressed.clone()
+                };
+
+                // nonce_blob is JSON-serialized map<txid, nonce_hex>
+                let participant_nonces: std::collections::HashMap<String, String> =
+                    match serde_json::from_slice(nonce_blob) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            tracing::warn!(
+                                pubkey = %participant_pubkey_compressed,
+                                error = %e,
+                                "Failed to deserialize participant nonces — skipping"
+                            );
+                            continue;
+                        }
                     };
 
-                    // nonce_blob is JSON-serialized map<txid, nonce_hex>
-                    let participant_nonces: std::collections::HashMap<String, String> =
-                        match serde_json::from_slice(nonce_blob) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                tracing::warn!(
-                                    pubkey = %participant_pubkey_compressed,
-                                    error = %e,
-                                    "Failed to deserialize participant nonces — skipping"
-                                );
-                                continue;
-                            }
-                        };
-
-                    // Add this participant's nonces to the per-txid map
-                    for (txid, nonce_hex) in participant_nonces {
-                        nonces_by_txid
-                            .entry(txid.clone())
-                            .or_default()
-                            .insert(x_only_pubkey_hex.clone(), nonce_hex);
-                        cosigners_by_txid
-                            .entry(txid)
-                            .or_default()
-                            .push(participant_pubkey_compressed.clone());
-                    }
+                // Add this participant's nonces to the per-txid map
+                for (txid, nonce_hex) in participant_nonces {
+                    nonces_by_txid
+                        .entry(txid.clone())
+                        .or_default()
+                        .insert(x_only_pubkey_hex.clone(), nonce_hex);
+                    cosigners_by_txid
+                        .entry(txid)
+                        .or_default()
+                        .push(participant_pubkey_compressed.clone());
                 }
             }
+        }
 
-            // Emit one TreeNoncesForwarded event per txid
-            for (txid, nonces_by_pubkey) in &nonces_by_txid {
-                let cosigners_compressed = cosigners_by_txid.get(txid).cloned().unwrap_or_default();
-                self.events
-                    .publish_event(ArkEvent::TreeNoncesForwarded {
-                        round_id: round_id.clone(),
-                        txid: txid.clone(),
-                        nonces_by_pubkey: nonces_by_pubkey.clone(),
-                        cosigners_compressed,
-                    })
-                    .await?;
-            }
-
+        // Emit one TreeNoncesForwarded event per txid
+        for (txid, nonces_by_pubkey) in &nonces_by_txid {
+            let cosigners_compressed = cosigners_by_txid.get(txid).cloned().unwrap_or_default();
             self.events
-                .publish_event(ArkEvent::TreeNoncesCollected {
-                    round_id: batch_id.to_string(),
+                .publish_event(ArkEvent::TreeNoncesForwarded {
+                    round_id: round_id.clone(),
+                    txid: txid.clone(),
+                    nonces_by_pubkey: nonces_by_pubkey.clone(),
+                    cosigners_compressed,
                 })
                 .await?;
+        }
 
-            // ── ASP partial signature creation ──────────────────────────────
-            // Now that all nonces are collected, the ASP creates its partial
-            // MuSig2 signatures for each tree tx and submits them to the
-            // signing session.
-            if let Err(e) = self
-                .asp_create_and_submit_partial_sigs(batch_id, &nonces_by_txid)
-                .await
-            {
-                error!(error = %e, "Failed to create ASP partial signatures");
-                return Err(e);
-            }
+        self.events
+            .publish_event(ArkEvent::TreeNoncesCollected {
+                round_id: batch_id.to_string(),
+            })
+            .await?;
+
+        // ── ASP partial signature creation ──────────────────────────────
+        // Now that all nonces are collected, the ASP creates its partial
+        // MuSig2 signatures for each tree tx and submits them to the
+        // signing session.
+        if let Err(e) = self
+            .asp_create_and_submit_partial_sigs(batch_id, &nonces_by_txid)
+            .await
+        {
+            error!(error = %e, "Failed to create ASP partial signatures");
+            return Err(e);
         }
 
         Ok(())

@@ -325,6 +325,8 @@ struct SigningSession {
     signatures: HashMap<String, Vec<u8>>,
     combined_sig: Option<Vec<u8>>,
     status: SigningSessionStatus,
+    /// Flag to prevent double-processing of nonces in concurrent SubmitTreeNonces calls.
+    nonces_processed: bool,
 }
 
 /// In-memory MuSig2 signing session store.
@@ -350,6 +352,7 @@ impl SigningSessionStore for InMemorySigningSessionStore {
                 signatures: HashMap::new(),
                 combined_sig: None,
                 status: SigningSessionStatus::CollectingNonces,
+                nonces_processed: false,
             },
         );
         Ok(())
@@ -396,6 +399,22 @@ impl SigningSessionStore for InMemorySigningSessionStore {
         let sessions = self.sessions.lock().await;
         match sessions.get(session_id) {
             Some(s) => Ok(s.nonces.len() >= s.participant_count),
+            None => Ok(false),
+        }
+    }
+
+    async fn try_mark_nonces_processed(&self, session_id: &str) -> ArkResult<bool> {
+        let mut sessions = self.sessions.lock().await;
+        match sessions.get_mut(session_id) {
+            Some(s) => {
+                // Only mark as processed if all nonces collected AND not already processed
+                if s.nonces.len() >= s.participant_count && !s.nonces_processed {
+                    s.nonces_processed = true;
+                    Ok(true) // This call was the first to mark it
+                } else {
+                    Ok(false) // Either not enough nonces or already processed
+                }
+            }
             None => Ok(false),
         }
     }
