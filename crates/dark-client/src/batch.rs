@@ -114,12 +114,43 @@ impl SignerState {
         self.sweep_merkle_root = Some(merkle_root.to_byte_array());
     }
 
-    fn generate_nonces(&mut self, tree_txids: &[String]) {
-        for txid in tree_txids {
-            let msg = txid.as_bytes();
+    /// Generate nonces only for tree nodes where this signer is a cosigner.
+    ///
+    /// Mirrors the Go reference (`generateNonces`) which skips nonce generation
+    /// for tree nodes where the signer's key is not in the PSBT cosigner list.
+    /// This is essential in multi-participant rounds where branch nodes may
+    /// include only a subset of participants.
+    fn generate_nonces(&mut self, tree_nodes: &[TreeTxNode]) {
+        let our_xonly_hex = if self.pubkey_hex.len() == 66 {
+            self.pubkey_hex[2..].to_string()
+        } else {
+            self.pubkey_hex.clone()
+        };
+
+        for node in tree_nodes {
+            if node.tx.is_empty() {
+                continue;
+            }
+
+            // Check if our key is in this node's cosigner list (by x-only comparison)
+            if let Some(cosigner_hexes) = Self::extract_cosigners_from_psbt_b64(&node.tx) {
+                let is_cosigner = cosigner_hexes.iter().any(|pk_hex| {
+                    let xonly = if pk_hex.len() == 66 {
+                        &pk_hex[2..]
+                    } else {
+                        pk_hex.as_str()
+                    };
+                    xonly == our_xonly_hex
+                });
+                if !is_cosigner {
+                    continue; // Skip: we're not a cosigner for this node
+                }
+            }
+
+            let msg = node.txid.as_bytes();
             let (sec_nonce, pub_nonce) = dark_bitcoin::generate_nonce(&self.secret_key, msg);
-            self.sec_nonces.insert(txid.clone(), sec_nonce);
-            self.pub_nonces.insert(txid.clone(), pub_nonce);
+            self.sec_nonces.insert(node.txid.clone(), sec_nonce);
+            self.pub_nonces.insert(node.txid.clone(), pub_nonce);
         }
     }
 
@@ -134,11 +165,17 @@ impl SignerState {
         &mut self,
         txid: &str,
         cosigner_nonces: &HashMap<String, String>,
-        total_tree_txs: usize,
+        _total_tree_txs: usize,
         tree_nodes: &[TreeTxNode],
     ) -> ClientResult<bool> {
+        // Only aggregate nonces for txids where we generated nonces (are a cosigner)
+        if !self.pub_nonces.contains_key(txid) {
+            // We're not a cosigner for this node — check if all our nodes are done
+            return Ok(self.agg_nonces.len() >= self.pub_nonces.len());
+        }
+
         if self.agg_nonces.contains_key(txid) {
-            return Ok(self.agg_nonces.len() >= total_tree_txs);
+            return Ok(self.agg_nonces.len() >= self.pub_nonces.len());
         }
 
         // Find this tree node's PSBT to extract the correct cosigner key order
@@ -199,7 +236,7 @@ impl SignerState {
         let agg_nonce = dark_bitcoin::aggregate_nonces(&all_pub_nonces);
         self.agg_nonces.insert(txid.to_string(), agg_nonce);
 
-        Ok(self.agg_nonces.len() >= total_tree_txs)
+        Ok(self.agg_nonces.len() >= self.pub_nonces.len())
     }
 
     /// Sign tree transactions with proper BIP-341 sighash and taproot-tweaked MuSig2.
@@ -232,12 +269,7 @@ impl SignerState {
 
             let sec_nonce = match self.sec_nonces.remove(&node.txid) {
                 Some(n) => n,
-                None => {
-                    return Err(ClientError::Rpc(format!(
-                        "Missing secret nonce for txid {} (already consumed?)",
-                        node.txid
-                    )));
-                }
+                None => continue, // Not our node (no nonce was generated for it)
             };
 
             // Extract cosigner keys from this node's PSBT (like Go does).
@@ -249,6 +281,26 @@ impl SignerState {
                         node.txid
                     ))
                 })?;
+
+            // Skip tree nodes where we're not a cosigner. The client receives
+            // ALL tree nodes (empty topic subscription) but should only sign
+            // nodes whose PSBT cosigners include our key.
+            let our_xonly = if self.pubkey_hex.len() == 66 {
+                &self.pubkey_hex[2..]
+            } else {
+                &self.pubkey_hex
+            };
+            let is_our_node = psbt_cosigner_hexes.iter().any(|pk_hex| {
+                let xonly = if pk_hex.len() == 66 {
+                    &pk_hex[2..]
+                } else {
+                    pk_hex.as_str()
+                };
+                xonly == our_xonly
+            });
+            if !is_our_node {
+                continue;
+            }
 
             // Build KeyAggContext with even-parity normalized pubkeys (per-node)
             let mut musig_pubkeys: Vec<musig2::secp256k1::PublicKey> = Vec::new();
@@ -268,7 +320,7 @@ impl SignerState {
             musig_pubkeys.sort();
 
             // Build KeyAggContext with taproot tweak
-            let key_agg_ctx = KeyAggContext::new(musig_pubkeys.clone())
+            let key_agg_ctx = KeyAggContext::new(musig_pubkeys)
                 .map_err(|e| ClientError::Rpc(format!("MuSig2 key aggregation failed: {}", e)))?
                 .with_taproot_tweak(&sweep_merkle_root)
                 .map_err(|e| ClientError::Rpc(format!("Taproot tweak failed: {}", e)))?;
@@ -277,14 +329,6 @@ impl SignerState {
             let sighash = Self::compute_tree_psbt_sighash(&node.tx, &output_map)?;
 
             // Create partial signature
-            //
-            // Derive the signing pubkey the same way sign_partial does internally:
-            // Scalar::from(seckey).base_point_mul(). We compare this against the
-            // keys in the KeyAggContext to diagnose "key not a member" errors.
-            let signing_pk = musig2::secp256k1::PublicKey::from_secret_key(
-                &musig2::secp256k1::Secp256k1::new(),
-                &self.secret_key,
-            );
             let partial_sig = dark_bitcoin::create_partial_sig(
                 &key_agg_ctx,
                 &self.secret_key,
@@ -292,19 +336,7 @@ impl SignerState {
                 agg_nonce,
                 &sighash,
             )
-            .map_err(|e| {
-                let ctx_keys: Vec<String> = musig_pubkeys
-                    .iter()
-                    .map(|k| hex::encode(k.serialize()))
-                    .collect();
-                ClientError::Rpc(format!(
-                    "MuSig2 partial signing failed: {}. signing_key={}, key_agg_keys={:?}, psbt_cosigners={:?}",
-                    e,
-                    hex::encode(signing_pk.serialize()),
-                    ctx_keys,
-                    psbt_cosigner_hexes,
-                ))
-            })?;
+            .map_err(|e| ClientError::Rpc(format!("MuSig2 partial signing failed: {}", e)))?;
 
             sigs.insert(node.txid.clone(), partial_sig.serialize().to_vec());
         }
@@ -700,7 +732,7 @@ pub(crate) async fn run_batch_protocol_with_stream_impl(
                 }
                 cosigner_pubkeys = e.cosigners_pubkeys.clone();
                 vtxo_tree_txids = flat_vtxo_tree.iter().map(|n| n.txid.clone()).collect();
-                signer.generate_nonces(&vtxo_tree_txids);
+                signer.generate_nonces(&flat_vtxo_tree);
                 let tree_nonces: HashMap<String, String> = signer.tree_nonces_hex();
                 client
                     .submit_tree_nonces(SubmitTreeNoncesRequest {
