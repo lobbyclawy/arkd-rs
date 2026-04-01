@@ -819,15 +819,26 @@ impl IndexerServiceTrait for IndexerGrpcService {
                 .copied()
                 .collect();
 
+            // Track offchain tx IDs (ark_txids) whose PSBTs were requested,
+            // so we can mark preconfirmed VTXOs as unrolled.
+            let mut matched_offchain_tx_ids: Vec<String> = Vec::new();
+
             if !remaining.is_empty() {
                 // Search all finalized offchain txs for matching PSBTs
                 if let Ok(pending) = self.core.get_offchain_tx_repo().get_all_finalized().await {
+                    info!(
+                        finalized_count = pending.len(),
+                        remaining_txids = ?remaining.iter().collect::<Vec<_>>(),
+                        "GetVirtualTxs: searching offchain txs"
+                    );
                     for otx in &pending {
+                        let mut matched_this_otx = false;
                         // Check checkpoint txs
                         for ckpt in &otx.checkpoint_txs {
                             if let Some(txid) = psbt_to_bitcoin_txid(ckpt) {
                                 if remaining.contains(txid.as_str()) {
                                     txs.push(ckpt.clone());
+                                    matched_this_otx = true;
                                 }
                             }
                         }
@@ -836,8 +847,12 @@ impl IndexerServiceTrait for IndexerGrpcService {
                             if let Some(txid) = psbt_to_bitcoin_txid(&otx.signed_ark_tx) {
                                 if remaining.contains(txid.as_str()) {
                                     txs.push(otx.signed_ark_tx.clone());
+                                    matched_this_otx = true;
                                 }
                             }
+                        }
+                        if matched_this_otx {
+                            matched_offchain_tx_ids.push(otx.id.clone());
                         }
                     }
                 }
@@ -845,6 +860,7 @@ impl IndexerServiceTrait for IndexerGrpcService {
                 info!(
                     remaining = remaining.len(),
                     total_found = txs.len(),
+                    matched_offchain_txs = matched_offchain_tx_ids.len(),
                     "GetVirtualTxs: searched offchain txs for preconfirmed VTXO PSBTs"
                 );
             }
@@ -878,6 +894,39 @@ impl IndexerServiceTrait for IndexerGrpcService {
                             error = %e,
                             "Failed to mark VTXO as unrolled in GetVirtualTxs"
                         );
+                    }
+                }
+            }
+        }
+
+        // Also mark preconfirmed VTXOs as unrolled when their offchain tx
+        // PSBTs were requested (the client is about to broadcast them).
+        if !matched_offchain_tx_ids.is_empty() {
+            let (spendable, _) = self.core.vtxo_repo().list_all().await.unwrap_or_default();
+            for ark_txid in &matched_offchain_tx_ids {
+                let to_mark: Vec<_> = spendable
+                    .iter()
+                    .filter(|v| v.preconfirmed && v.ark_txid == *ark_txid)
+                    .collect();
+                if !to_mark.is_empty() {
+                    info!(
+                        ark_txid = %ark_txid,
+                        vtxo_count = to_mark.len(),
+                        "GetVirtualTxs: marking preconfirmed VTXOs as unrolled (offchain tx PSBTs requested)"
+                    );
+                    for vtxo in &to_mark {
+                        if let Err(e) = self
+                            .core
+                            .vtxo_repo()
+                            .mark_vtxos_unrolled(std::slice::from_ref(vtxo))
+                            .await
+                        {
+                            warn!(
+                                outpoint = %vtxo.outpoint,
+                                error = %e,
+                                "Failed to mark preconfirmed VTXO as unrolled in GetVirtualTxs"
+                            );
+                        }
                     }
                 }
             }

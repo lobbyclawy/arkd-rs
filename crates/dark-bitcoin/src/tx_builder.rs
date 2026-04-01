@@ -498,6 +498,13 @@ impl LocalTxBuilder {
         // The server wallet adds change + fee input later.
         let mut outputs: Vec<TxOut> = Vec::new();
 
+        tracing::info!(
+            onchain_output_count = onchain_outputs.len(),
+            offchain_leaf_count = leaves.len(),
+            batch_output_sats = batch_output.as_ref().map(|o| o.value.to_sat()).unwrap_or(0),
+            "build_commitment_tx: output summary"
+        );
+
         // Index 0: batch output (if any offchain receivers)
         if let Some(bo) = &batch_output {
             outputs.push(bo.clone());

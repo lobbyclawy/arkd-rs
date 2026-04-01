@@ -1310,6 +1310,11 @@ impl ArkServiceTrait for ArkGrpcService {
         }
 
         // Build receivers from PSBT outputs (P2TR → offchain VTXO, otherwise onchain)
+        info!(
+            onchain_output_indexes = ?onchain_output_indexes,
+            output_count = unsigned_tx.output.len(),
+            "RegisterIntent: building receivers from PSBT outputs"
+        );
         let mut receivers: Vec<dark_core::domain::Receiver> = Vec::new();
         for (i, tx_out) in unsigned_tx.output.iter().enumerate() {
             let amount = tx_out.value.to_sat();
@@ -1321,6 +1326,12 @@ impl ArkServiceTrait for ArkGrpcService {
                     bitcoin::Address::from_script(&tx_out.script_pubkey, bitcoin::Network::Regtest)
                         .map(|a| a.to_string())
                         .unwrap_or_default();
+                info!(
+                    index = i,
+                    amount = amount,
+                    addr = %addr,
+                    "RegisterIntent: on-chain receiver"
+                );
                 receivers.push(dark_core::domain::Receiver::onchain(amount, addr));
             } else if tx_out.script_pubkey.is_p2tr() {
                 // Extract x-only pubkey from P2TR script: OP_1 OP_PUSH32 <32-byte-key>
@@ -1330,6 +1341,12 @@ impl ArkServiceTrait for ArkGrpcService {
                 } else {
                     String::new()
                 };
+                info!(
+                    index = i,
+                    amount = amount,
+                    pubkey = %pubkey_hex,
+                    "RegisterIntent: off-chain receiver"
+                );
                 receivers.push(dark_core::domain::Receiver::offchain(amount, pubkey_hex));
             }
         }
