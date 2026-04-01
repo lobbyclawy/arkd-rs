@@ -1129,12 +1129,24 @@ impl ArkService {
         );
 
         // Initialize the signing session with the correct participant count.
-        // Include the ASP in the count since it also submits nonces and sigs
-        // via the signing session store. This prevents a race where
-        // all_nonces_collected / all_signatures_collected trigger too early
-        // (ASP nonce + first client = old threshold) before all clients submit.
+        // Count unique cosigners from the actual PSBT fields (not from
+        // intent.cosigners_public_keys which may be empty — the tree builder
+        // falls back to receiver pubkeys). The ASP is included since it also
+        // submits nonces and sigs via the signing session store.
+        let psbt_participant_count = {
+            let mut unique_cosigners: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for node in &round.vtxo_tree {
+                if let Some(keys) = Self::extract_cosigners_from_psbt_b64(&node.tx) {
+                    for k in keys {
+                        unique_cosigners.insert(k);
+                    }
+                }
+            }
+            unique_cosigners.len()
+        };
         self.signing_session_store
-            .init_session(&round.id, all_cosigners_pubkeys.len())
+            .init_session(&round.id, psbt_participant_count)
             .await?;
 
         // Emit BatchStarted FIRST so Go SDK clients transition from step 0

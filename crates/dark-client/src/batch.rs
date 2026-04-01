@@ -268,7 +268,7 @@ impl SignerState {
             musig_pubkeys.sort();
 
             // Build KeyAggContext with taproot tweak
-            let key_agg_ctx = KeyAggContext::new(musig_pubkeys)
+            let key_agg_ctx = KeyAggContext::new(musig_pubkeys.clone())
                 .map_err(|e| ClientError::Rpc(format!("MuSig2 key aggregation failed: {}", e)))?
                 .with_taproot_tweak(&sweep_merkle_root)
                 .map_err(|e| ClientError::Rpc(format!("Taproot tweak failed: {}", e)))?;
@@ -277,6 +277,14 @@ impl SignerState {
             let sighash = Self::compute_tree_psbt_sighash(&node.tx, &output_map)?;
 
             // Create partial signature
+            //
+            // Derive the signing pubkey the same way sign_partial does internally:
+            // Scalar::from(seckey).base_point_mul(). We compare this against the
+            // keys in the KeyAggContext to diagnose "key not a member" errors.
+            let signing_pk = musig2::secp256k1::PublicKey::from_secret_key(
+                &musig2::secp256k1::Secp256k1::new(),
+                &self.secret_key,
+            );
             let partial_sig = dark_bitcoin::create_partial_sig(
                 &key_agg_ctx,
                 &self.secret_key,
@@ -284,7 +292,19 @@ impl SignerState {
                 agg_nonce,
                 &sighash,
             )
-            .map_err(|e| ClientError::Rpc(format!("MuSig2 partial signing failed: {}", e)))?;
+            .map_err(|e| {
+                let ctx_keys: Vec<String> = musig_pubkeys
+                    .iter()
+                    .map(|k| hex::encode(k.serialize()))
+                    .collect();
+                ClientError::Rpc(format!(
+                    "MuSig2 partial signing failed: {}. signing_key={}, key_agg_keys={:?}, psbt_cosigners={:?}",
+                    e,
+                    hex::encode(signing_pk.serialize()),
+                    ctx_keys,
+                    psbt_cosigner_hexes,
+                ))
+            })?;
 
             sigs.insert(node.txid.clone(), partial_sig.serialize().to_vec());
         }
