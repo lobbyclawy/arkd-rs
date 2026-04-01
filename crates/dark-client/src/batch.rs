@@ -75,9 +75,17 @@ impl SignerState {
     fn new(secret_key: musig2::secp256k1::SecretKey) -> Self {
         let secp = musig2::secp256k1::Secp256k1::new();
         let pubkey = musig2::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
-        let pubkey_hex = hex::encode(pubkey.serialize());
+        // Normalize to even parity (0x02 prefix) to match tree builder's aggregate_keys.
+        // Nonce generation and signing must use the same normalized key.
+        let normalized_key = if pubkey.serialize()[0] == 0x03 {
+            secret_key.negate()
+        } else {
+            secret_key
+        };
+        let norm_pk = musig2::secp256k1::PublicKey::from_secret_key(&secp, &normalized_key);
+        let pubkey_hex = hex::encode(norm_pk.serialize());
         Self {
-            secret_key,
+            secret_key: normalized_key,
             pubkey_hex,
             sec_nonces: HashMap::new(),
             pub_nonces: HashMap::new(),
@@ -187,15 +195,6 @@ impl SignerState {
         // Build output map for prevout fetching
         let output_map = Self::build_tree_output_map(tree_nodes)?;
 
-        // Normalize our secret key to even parity (same as server does for ASP key)
-        let secp_ctx = musig2::secp256k1::Secp256k1::new();
-        let our_pk = musig2::secp256k1::PublicKey::from_secret_key(&secp_ctx, &self.secret_key);
-        let signing_key = if our_pk.serialize()[0] == 0x03 {
-            self.secret_key.negate()
-        } else {
-            self.secret_key
-        };
-
         let mut sigs = HashMap::new();
 
         for node in tree_nodes {
@@ -224,7 +223,7 @@ impl SignerState {
             // Create partial signature
             let partial_sig = dark_bitcoin::create_partial_sig(
                 &key_agg_ctx,
-                &signing_key,
+                &self.secret_key,
                 sec_nonce,
                 agg_nonce,
                 &sighash,
