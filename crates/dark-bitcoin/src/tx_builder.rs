@@ -591,19 +591,18 @@ impl LocalTxBuilder {
             return Err("No cosigner keys for tree node".to_string());
         }
 
-        // Convert compressed keys to x-only for script computation
-        let xonly_keys: Vec<XOnlyPublicKey> = cosigners
-            .iter()
-            .map(compressed_to_xonly)
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if xonly_keys.len() == 1 {
+        if cosigners.len() == 1 {
             // Single cosigner: classic P2TR with sweep tapscript tweak
-            Ok(p2tr_with_merkle_root(&xonly_keys[0], sweep_root))
+            let xonly = compressed_to_xonly(&cosigners[0])?;
+            Ok(p2tr_with_merkle_root(&xonly, sweep_root))
         } else {
             // Multiple cosigners: MuSig2 aggregate + sweep tweak
-            use crate::tree::aggregate_keys;
-            let agg = aggregate_keys(&xonly_keys)
+            // Use aggregate_keys_compressed to preserve original parity (02/03 prefix).
+            // This is critical for protocol compatibility: the Go SDK's btcd musig2
+            // library performs full-point equality checks during signing, so both
+            // tree building and signing must use keys with identical serialization.
+            use crate::tree::aggregate_keys_compressed;
+            let agg = aggregate_keys_compressed(cosigners)
                 .map_err(|e| format!("MuSig2 key aggregation failed: {e}"))?;
             Ok(p2tr_with_merkle_root(&agg, sweep_root))
         }
