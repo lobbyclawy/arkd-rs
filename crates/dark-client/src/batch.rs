@@ -135,21 +135,61 @@ impl SignerState {
         txid: &str,
         cosigner_nonces: &HashMap<String, String>,
         total_tree_txs: usize,
+        tree_nodes: &[TreeTxNode],
     ) -> ClientResult<bool> {
         if self.agg_nonces.contains_key(txid) {
             return Ok(self.agg_nonces.len() >= total_tree_txs);
         }
 
-        let mut all_pub_nonces = Vec::new();
+        // Find this tree node's PSBT to extract the correct cosigner key order
+        let node = tree_nodes.iter().find(|n| n.txid == txid);
+        let cosigner_keys_from_psbt =
+            node.and_then(|n| Self::extract_cosigners_from_psbt_b64(&n.tx));
 
-        // Note: cosigner_nonces already includes ALL participants' nonces
-        // (including our own), so we must NOT add our own nonce separately.
-        for nonce_hex in cosigner_nonces.values() {
-            let nonce_bytes = hex::decode(nonce_hex)
-                .map_err(|e| ClientError::InvalidResponse(format!("Invalid nonce hex: {}", e)))?;
-            let pub_nonce = PubNonce::from_bytes(&nonce_bytes)
-                .map_err(|e| ClientError::InvalidResponse(format!("Invalid PubNonce: {}", e)))?;
-            all_pub_nonces.push(pub_nonce);
+        // Ensure our own nonce hasn't been tampered with by the server (like Go does)
+        let mut nonces = cosigner_nonces.clone();
+        let our_xonly_hex = if self.pubkey_hex.len() == 66 {
+            self.pubkey_hex[2..].to_string()
+        } else {
+            self.pubkey_hex.clone()
+        };
+        if let Some(our_pub_nonce) = self.pub_nonces.get(txid) {
+            nonces.insert(our_xonly_hex.clone(), hex::encode(our_pub_nonce.to_bytes()));
+        }
+
+        // Aggregate nonces in cosigner key order (matching PSBT fields, like Go does)
+        let mut all_pub_nonces = Vec::new();
+        if let Some(ref keys) = cosigner_keys_from_psbt {
+            for pk_hex in keys {
+                // PSBT stores compressed keys (33 bytes); extract x-only (strip prefix)
+                let xonly_hex = if pk_hex.len() == 66 {
+                    pk_hex[2..].to_string()
+                } else {
+                    pk_hex.clone()
+                };
+                let nonce_hex = match nonces.get(&xonly_hex) {
+                    Some(h) => h,
+                    None => continue, // missing nonce for this cosigner
+                };
+                let nonce_bytes = hex::decode(nonce_hex).map_err(|e| {
+                    ClientError::InvalidResponse(format!("Invalid nonce hex: {}", e))
+                })?;
+                let pub_nonce = PubNonce::from_bytes(&nonce_bytes).map_err(|e| {
+                    ClientError::InvalidResponse(format!("Invalid PubNonce: {}", e))
+                })?;
+                all_pub_nonces.push(pub_nonce);
+            }
+        } else {
+            // Fallback: iterate all nonces (shouldn't happen with well-formed PSBTs)
+            for nonce_hex in nonces.values() {
+                let nonce_bytes = hex::decode(nonce_hex).map_err(|e| {
+                    ClientError::InvalidResponse(format!("Invalid nonce hex: {}", e))
+                })?;
+                let pub_nonce = PubNonce::from_bytes(&nonce_bytes).map_err(|e| {
+                    ClientError::InvalidResponse(format!("Invalid PubNonce: {}", e))
+                })?;
+                all_pub_nonces.push(pub_nonce);
+            }
         }
 
         if all_pub_nonces.len() < 2 {
@@ -163,37 +203,17 @@ impl SignerState {
     }
 
     /// Sign tree transactions with proper BIP-341 sighash and taproot-tweaked MuSig2.
+    ///
+    /// Extracts cosigner keys from each tree node's PSBT (matching the Go
+    /// reference), so the `KeyAggContext` includes ALL cosigners (including ASP).
     fn sign_tree(
         &mut self,
         tree_nodes: &[TreeTxNode],
-        cosigner_pubkeys: &[String],
+        _cosigner_pubkeys: &[String],
     ) -> ClientResult<HashMap<String, Vec<u8>>> {
         let sweep_merkle_root = self.sweep_merkle_root.ok_or_else(|| {
             ClientError::Rpc("Signing state not initialized (missing sweep_merkle_root)".into())
         })?;
-
-        // Build KeyAggContext with even-parity normalized pubkeys
-        let mut musig_pubkeys: Vec<musig2::secp256k1::PublicKey> = Vec::new();
-        for pk_hex in cosigner_pubkeys {
-            let pk_bytes = hex::decode(pk_hex)
-                .map_err(|e| ClientError::Rpc(format!("Invalid cosigner pubkey hex: {}", e)))?;
-            let pk = musig2::secp256k1::PublicKey::from_slice(&pk_bytes)
-                .map_err(|e| ClientError::Rpc(format!("Invalid cosigner pubkey: {}", e)))?;
-            // Normalize to even parity (0x02 prefix) to match server
-            let mut even_bytes = [0u8; 33];
-            even_bytes[0] = 0x02;
-            even_bytes[1..].copy_from_slice(&pk.serialize()[1..]);
-            let even_pk = musig2::secp256k1::PublicKey::from_slice(&even_bytes)
-                .map_err(|e| ClientError::Rpc(format!("Even-parity pubkey failed: {}", e)))?;
-            musig_pubkeys.push(even_pk);
-        }
-        musig_pubkeys.sort();
-
-        // Build KeyAggContext with taproot tweak
-        let key_agg_ctx = KeyAggContext::new(musig_pubkeys)
-            .map_err(|e| ClientError::Rpc(format!("MuSig2 key aggregation failed: {}", e)))?
-            .with_taproot_tweak(&sweep_merkle_root)
-            .map_err(|e| ClientError::Rpc(format!("Taproot tweak failed: {}", e)))?;
 
         // Build output map for prevout fetching
         let output_map = Self::build_tree_output_map(tree_nodes)?;
@@ -220,6 +240,39 @@ impl SignerState {
                 }
             };
 
+            // Extract cosigner keys from this node's PSBT (like Go does).
+            // The PSBT's 0xDE cosigner fields include ALL cosigners (ASP + users).
+            let psbt_cosigner_hexes =
+                Self::extract_cosigners_from_psbt_b64(&node.tx).ok_or_else(|| {
+                    ClientError::Rpc(format!(
+                        "Failed to extract cosigner keys from PSBT for txid {}",
+                        node.txid
+                    ))
+                })?;
+
+            // Build KeyAggContext with even-parity normalized pubkeys (per-node)
+            let mut musig_pubkeys: Vec<musig2::secp256k1::PublicKey> = Vec::new();
+            for pk_hex in &psbt_cosigner_hexes {
+                let pk_bytes = hex::decode(pk_hex)
+                    .map_err(|e| ClientError::Rpc(format!("Invalid cosigner pubkey hex: {}", e)))?;
+                let pk = musig2::secp256k1::PublicKey::from_slice(&pk_bytes)
+                    .map_err(|e| ClientError::Rpc(format!("Invalid cosigner pubkey: {}", e)))?;
+                // Normalize to even parity (0x02 prefix) to match tree builder
+                let mut even_bytes = [0u8; 33];
+                even_bytes[0] = 0x02;
+                even_bytes[1..].copy_from_slice(&pk.serialize()[1..]);
+                let even_pk = musig2::secp256k1::PublicKey::from_slice(&even_bytes)
+                    .map_err(|e| ClientError::Rpc(format!("Even-parity pubkey failed: {}", e)))?;
+                musig_pubkeys.push(even_pk);
+            }
+            musig_pubkeys.sort();
+
+            // Build KeyAggContext with taproot tweak
+            let key_agg_ctx = KeyAggContext::new(musig_pubkeys)
+                .map_err(|e| ClientError::Rpc(format!("MuSig2 key aggregation failed: {}", e)))?
+                .with_taproot_tweak(&sweep_merkle_root)
+                .map_err(|e| ClientError::Rpc(format!("Taproot tweak failed: {}", e)))?;
+
             // Compute real BIP-341 sighash from PSBT
             let sighash = Self::compute_tree_psbt_sighash(&node.tx, &output_map)?;
 
@@ -237,6 +290,52 @@ impl SignerState {
         }
 
         Ok(sigs)
+    }
+
+    /// Extract cosigner compressed pubkey hex strings from a base64-encoded PSBT.
+    ///
+    /// Reads the custom 0xDE "cosigner" fields from input[0], matching the
+    /// format used by the tree builder and the Go SDK's
+    /// `ParseCosignerKeysFromArkPsbt`. Returns `None` if the PSBT cannot be
+    /// parsed or has no cosigner fields.
+    fn extract_cosigners_from_psbt_b64(psbt_b64: &str) -> Option<Vec<String>> {
+        use base64::Engine;
+        let psbt_bytes = base64::engine::general_purpose::STANDARD
+            .decode(psbt_b64)
+            .ok()?;
+        let psbt = bitcoin::psbt::Psbt::deserialize(&psbt_bytes).ok()?;
+        if psbt.inputs.is_empty() {
+            return None;
+        }
+        let mut cosigners: Vec<(u32, String)> = Vec::new();
+        for (raw_key, value) in &psbt.inputs[0].unknown {
+            if raw_key.type_value != 0xDE {
+                continue;
+            }
+            // key layout: "cosigner" (8 bytes) + index (4 bytes BE)
+            if raw_key.key.len() != 12 {
+                continue;
+            }
+            if &raw_key.key[..8] != b"cosigner" {
+                continue;
+            }
+            if value.len() != 33 {
+                continue;
+            }
+            let idx = u32::from_be_bytes([
+                raw_key.key[8],
+                raw_key.key[9],
+                raw_key.key[10],
+                raw_key.key[11],
+            ]);
+            cosigners.push((idx, hex::encode(value)));
+        }
+        if cosigners.is_empty() {
+            return None;
+        }
+        // Sort by index to preserve insertion order
+        cosigners.sort_by_key(|(idx, _)| *idx);
+        Some(cosigners.into_iter().map(|(_, hex)| hex).collect())
     }
 
     /// Build txid -> TxOut vec map from tree nodes for prevout fetching.
@@ -607,6 +706,7 @@ pub(crate) async fn run_batch_protocol_with_stream_impl(
                     &e.txid,
                     &cosigner_nonces,
                     vtxo_tree_txids.len(),
+                    &flat_vtxo_tree,
                 )?;
                 if all_aggregated {
                     let sigs = signer.sign_tree(&flat_vtxo_tree, &cosigner_pubkeys)?;
