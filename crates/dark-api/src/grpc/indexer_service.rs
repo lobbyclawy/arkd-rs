@@ -603,33 +603,27 @@ impl IndexerServiceTrait for IndexerGrpcService {
         // Chain order: [commitment_tx, tree_node_1, ..., leaf_vtxo_tx]
         let chain: Vec<crate::proto::ark_v1::IndexerChain> = match vtxo {
             Some(ref v) if v.preconfirmed && !v.ark_txid.is_empty() => {
-                // Preconfirmed VTXO — built from offchain tx checkpoint + ark PSBTs,
-                // PLUS the tree branch that the checkpoint depends on.
+                // Preconfirmed VTXO — chain contains only the ark tx and checkpoint txs.
                 //
-                // A preconfirmed VTXO's checkpoint tx spends a tree node output from
-                // a round's VTXO tree. That tree node is virtual (not yet broadcast).
-                // The full unroll chain must include:
-                //   [ark_tx, checkpoint_tx, tree_leaf, ..., tree_root, commitment_tx]
+                // The Go reference server's GetVtxoChain follows checkpoint inputs as
+                // VTXO outpoints, but those inputs reference tree nodes (not VTXOs in
+                // the database), so the loop terminates without adding tree branches.
+                // The resulting chain is: [ark_tx, checkpoint_1, ..., checkpoint_n].
                 //
-                // The Go client walks backwards (commitment → root → ... → leaf →
-                // checkpoint → ark_tx), broadcasting the first unconfirmed tx each time.
+                // The Go client's Unroll walks backwards:
+                //   1st Unroll: broadcasts the first unconfirmed checkpoint
+                //   2nd Unroll: broadcasts the ark tx (after checkpoint confirms)
+                //
+                // Tree branches are NOT included — they are handled separately by the
+                // Go client via GetVirtualTxs when broadcasting checkpoints.
                 let mut entries = Vec::new();
 
                 if let Ok(Some(offchain_tx)) = self.core.get_offchain_tx(&v.ark_txid).await {
-                    // Collect checkpoint txids, entries, and their input outpoints
                     let mut checkpoint_txids = Vec::new();
                     let mut checkpoint_entries = Vec::new();
-                    // Track all txids that checkpoints spend (tree node outputs)
-                    let mut checkpoint_input_txids: Vec<String> = Vec::new();
                     for ckpt_b64 in &offchain_tx.checkpoint_txs {
                         if let Some(txid) = psbt_to_bitcoin_txid(ckpt_b64) {
                             let spends = psbt_extract_input_outpoints(ckpt_b64);
-                            // Extract just the txids from "txid:vout" format
-                            for s in &spends {
-                                if let Some(input_txid) = s.split(':').next() {
-                                    checkpoint_input_txids.push(input_txid.to_string());
-                                }
-                            }
                             checkpoint_txids.push(txid.clone());
                             checkpoint_entries.push(crate::proto::ark_v1::IndexerChain {
                                 txid,
@@ -654,98 +648,6 @@ impl IndexerServiceTrait for IndexerGrpcService {
 
                     // Then add checkpoint entries
                     entries.extend(checkpoint_entries);
-
-                    // Now find and append the tree branch(es) that checkpoints depend on.
-                    // Each checkpoint input txid is a tree node in some round. Walk from
-                    // that tree node up to the root, then add the commitment tx.
-                    for input_txid in &checkpoint_input_txids {
-                        // Find which round contains this tree node
-                        let mut found_round = None;
-                        let mut offset = 0u32;
-                        'round_search: loop {
-                            let rounds =
-                                self.core.list_rounds(offset, 100).await.unwrap_or_default();
-                            if rounds.is_empty() {
-                                break;
-                            }
-                            for round in &rounds {
-                                for node in &round.vtxo_tree {
-                                    if node.txid == *input_txid {
-                                        found_round = Some(round.clone());
-                                        break 'round_search;
-                                    }
-                                }
-                            }
-                            offset += 100;
-                            if rounds.len() < 100 {
-                                break;
-                            }
-                        }
-
-                        if let Some(round) = found_round {
-                            // Build parent map for this round's tree
-                            let mut parent_map: std::collections::HashMap<String, String> =
-                                std::collections::HashMap::new();
-                            for node in &round.vtxo_tree {
-                                if node.tx.is_empty() {
-                                    continue;
-                                }
-                                if let Some(parent_txid) = psbt_extract_first_input_txid(&node.tx) {
-                                    parent_map.insert(node.txid.clone(), parent_txid);
-                                }
-                            }
-
-                            // Walk from input_txid up to the root
-                            let mut path = Vec::new();
-                            let mut current = input_txid.clone();
-                            let mut visited = std::collections::HashSet::new();
-                            loop {
-                                if !visited.insert(current.clone()) {
-                                    break;
-                                }
-                                if let Some(node) = round
-                                    .vtxo_tree
-                                    .iter()
-                                    .find(|n| n.txid == current && !n.tx.is_empty())
-                                {
-                                    let parent = parent_map.get(&current).cloned();
-                                    path.push((node.txid.clone(), parent.clone()));
-                                    match parent {
-                                        Some(p) => current = p,
-                                        None => break,
-                                    }
-                                } else {
-                                    break;
-                                }
-                            }
-
-                            // Add tree nodes (leaf → root order)
-                            let commitment_txid = round.commitment_txid.clone();
-                            for (i, (txid, _parent)) in path.iter().enumerate() {
-                                let spends = if i == path.len() - 1 {
-                                    vec![commitment_txid.clone()]
-                                } else {
-                                    vec![path[i + 1].0.clone()]
-                                };
-                                entries.push(crate::proto::ark_v1::IndexerChain {
-                                    txid: txid.clone(),
-                                    expires_at: v.expires_at,
-                                    r#type: 3, // INDEXER_CHAINED_TX_TYPE_TREE
-                                    spends,
-                                });
-                            }
-
-                            // Add commitment tx at the end
-                            if !commitment_txid.is_empty() {
-                                entries.push(crate::proto::ark_v1::IndexerChain {
-                                    txid: commitment_txid,
-                                    expires_at: v.expires_at,
-                                    r#type: 1, // INDEXER_CHAINED_TX_TYPE_COMMITMENT
-                                    spends: vec![],
-                                });
-                            }
-                        }
-                    }
                 }
 
                 entries

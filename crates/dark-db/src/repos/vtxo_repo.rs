@@ -231,7 +231,16 @@ impl VtxoRepository for SqliteVtxoRepository {
             .rows_affected();
 
             if rows_affected == 0 {
-                return Err(ArkError::VtxoNotFound(outpoint.to_string()));
+                // Skip inputs that don't correspond to VTXOs in the database.
+                // Offchain tx PSBTs may reference non-VTXO inputs (e.g. connector
+                // outputs or ASP co-signer inputs) that are not tracked in the
+                // VTXO store. Skipping them allows the remaining real VTXOs to be
+                // marked as spent correctly.
+                debug!(
+                    outpoint = %outpoint,
+                    ark_txid = %ark_txid,
+                    "spend_vtxos: skipping non-existent VTXO input"
+                );
             }
         }
 
