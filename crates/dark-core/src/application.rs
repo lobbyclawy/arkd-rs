@@ -5598,7 +5598,7 @@ impl ArkService {
                     txid = %node.txid,
                     agg_key = %hex::encode(agg_xonly.serialize()),
                     sighash_hex = %hex::encode(sighash),
-                    sig_hex = %hex::encode(&final_sig),
+                    sig_hex = %hex::encode(final_sig),
                     cosigner_count = musig_pubkeys.len(),
                     "MuSig2 aggregate signature FAILED verification — tree tx will be invalid on-chain"
                 );
