@@ -2639,11 +2639,15 @@ impl ArkService {
 
         let mut count = 0u32;
 
-        // Check preconfirmed VTXOs: mark as unrolled if either:
-        // 1. The ark tx itself is confirmed on-chain, OR
-        // 2. Any checkpoint tx of the offchain tx is confirmed on-chain
-        //    (meaning the unroll process has started and the VTXO is no
-        //     longer spendable offchain)
+        // Check preconfirmed VTXOs: mark as unrolled only when the ark tx
+        // itself is confirmed on-chain. This means the full unroll is complete.
+        //
+        // We do NOT mark as unrolled when only a checkpoint tx is confirmed,
+        // because the Go client's multi-step Unroll flow needs the VTXO to
+        // remain "spendable" (visible) across multiple Unroll() calls:
+        //   1st Unroll: broadcasts checkpoint tx
+        //   2nd Unroll: broadcasts ark tx (needs VTXO still visible)
+        // Only after the ark tx confirms is the unroll truly done.
         for vtxo in &preconfirmed_vtxos {
             let ark_txid = &vtxo.outpoint.txid;
             let mut should_mark = false;
@@ -2656,26 +2660,6 @@ impl ArkService {
                     "Preconfirmed VTXO ark tx confirmed on-chain — marking as unrolled"
                 );
                 should_mark = true;
-            }
-
-            // If ark tx not confirmed, check checkpoint txs
-            if !should_mark {
-                if let Ok(Some(offchain_tx)) = self.offchain_tx_repo.get(ark_txid).await {
-                    for ckpt_b64 in &offchain_tx.checkpoint_txs {
-                        // Extract txid from checkpoint PSBT
-                        if let Some(ckpt_txid) = Self::psbt_to_txid(ckpt_b64) {
-                            if let Ok(true) = self.scanner.is_tx_confirmed(&ckpt_txid).await {
-                                info!(
-                                    outpoint = %vtxo.outpoint,
-                                    checkpoint_txid = %ckpt_txid,
-                                    "Preconfirmed VTXO checkpoint confirmed on-chain — marking as unrolled"
-                                );
-                                should_mark = true;
-                                break;
-                            }
-                        }
-                    }
-                }
             }
 
             if should_mark {
