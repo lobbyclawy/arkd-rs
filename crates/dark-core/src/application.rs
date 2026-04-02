@@ -2639,20 +2639,18 @@ impl ArkService {
 
         let mut count = 0u32;
 
-        // Check preconfirmed VTXOs: mark as unrolled only when the ark tx
-        // itself is confirmed on-chain. This means the full unroll is complete.
-        //
-        // We do NOT mark as unrolled when only a checkpoint tx is confirmed,
-        // because the Go client's multi-step Unroll flow needs the VTXO to
-        // remain "spendable" (visible) across multiple Unroll() calls:
-        //   1st Unroll: broadcasts checkpoint tx
-        //   2nd Unroll: broadcasts ark tx (needs VTXO still visible)
-        // Only after the ark tx confirms is the unroll truly done.
+        // Check preconfirmed VTXOs: mark as unrolled ONLY when the ark tx
+        // itself is confirmed on-chain.  We must NOT mark on checkpoint
+        // confirmation alone because the unroll is a two-step process:
+        //   1. First Unroll() broadcasts checkpoint txs (awaits confirmation)
+        //   2. Second Unroll() broadcasts the ark tx
+        // Marking after step 1 would remove the VTXO from the spendable set,
+        // preventing step 2 from finding it.
         for vtxo in &preconfirmed_vtxos {
             let ark_txid = &vtxo.outpoint.txid;
-            let mut should_mark = false;
+            let should_mark;
 
-            // Check if ark tx is confirmed
+            // Only check if the ark tx is confirmed on-chain.
             if let Ok(true) = self.scanner.is_tx_confirmed(ark_txid).await {
                 info!(
                     outpoint = %vtxo.outpoint,
@@ -2660,6 +2658,8 @@ impl ArkService {
                     "Preconfirmed VTXO ark tx confirmed on-chain — marking as unrolled"
                 );
                 should_mark = true;
+            } else {
+                should_mark = false;
             }
 
             if should_mark {

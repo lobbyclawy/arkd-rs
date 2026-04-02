@@ -29,6 +29,12 @@ use crate::proto::ark_v1::{
 /// In-memory store mapping subscription_id → set of subscribed scripts (hex pubkeys).
 pub type SubscriptionStore = Arc<RwLock<HashMap<String, Vec<String>>>>;
 
+/// Store for pre-created event bus receivers, keyed by subscription_id.
+/// Created at `subscribe_for_scripts` time so no events are lost between
+/// subscribe and `get_subscription`.
+pub type EventReceiverStore =
+    Arc<RwLock<HashMap<String, tokio::sync::broadcast::Receiver<dark_core::domain::ArkEvent>>>>;
+
 /// Server-streaming response type for GetSubscription.
 type GetSubscriptionStream =
     tokio_stream::wrappers::ReceiverStream<Result<GetSubscriptionResponse, Status>>;
@@ -199,6 +205,9 @@ fn psbt_extract_input_outpoints(b64: &str) -> Vec<String> {
 pub struct IndexerGrpcService {
     core: Arc<dark_core::ArkService>,
     subscriptions: SubscriptionStore,
+    /// Pre-created broadcast receivers so events between subscribe_for_scripts
+    /// and get_subscription are not lost.
+    event_receivers: EventReceiverStore,
 }
 
 impl IndexerGrpcService {
@@ -207,6 +216,7 @@ impl IndexerGrpcService {
         Self {
             core,
             subscriptions,
+            event_receivers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -905,7 +915,7 @@ impl IndexerServiceTrait for IndexerGrpcService {
         // Note: preconfirmed VTXOs are NOT marked as unrolled here — the
         // client needs them to remain "spendable" across multiple Unroll()
         // calls. The check_unrolled_vtxos maintenance loop handles marking
-        // them once checkpoint txs are confirmed on-chain.
+        // them once the ark tx is confirmed on-chain.
 
         let (page_size, page_index) = req
             .page
@@ -1022,6 +1032,18 @@ impl IndexerServiceTrait for IndexerGrpcService {
             }
         }
 
+        // Pre-create a broadcast receiver NOW so events published between this
+        // call and the subsequent `get_subscription` call are buffered and not lost.
+        {
+            let event_rx = self
+                .core
+                .subscribe_events()
+                .await
+                .map_err(|e| Status::internal(format!("Failed to subscribe to events: {e}")))?;
+            let mut receivers = self.event_receivers.write().await;
+            receivers.insert(subscription_id.clone(), event_rx);
+        }
+
         Ok(Response::new(SubscribeForScriptsResponse {
             subscription_id,
         }))
@@ -1050,6 +1072,11 @@ impl IndexerServiceTrait for IndexerGrpcService {
                 }
             }
         }
+        // Clean up any pre-created event receiver
+        {
+            let mut receivers = self.event_receivers.write().await;
+            receivers.remove(&req.subscription_id);
+        }
 
         Ok(Response::new(UnsubscribeForScriptsResponse {}))
     }
@@ -1077,12 +1104,20 @@ impl IndexerServiceTrait for IndexerGrpcService {
             );
         }
 
-        // Subscribe to the domain event bus
-        let mut event_rx = self
-            .core
-            .subscribe_events()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to subscribe to events: {e}")))?;
+        // Use the pre-created event bus receiver from subscribe_for_scripts
+        // (so events between subscribe and get_subscription are not lost).
+        // Fall back to creating a new one if none was stored.
+        let mut event_rx = {
+            let mut receivers = self.event_receivers.write().await;
+            if let Some(rx) = receivers.remove(&req.subscription_id) {
+                rx
+            } else {
+                self.core
+                    .subscribe_events()
+                    .await
+                    .map_err(|e| Status::internal(format!("Failed to subscribe to events: {e}")))?
+            }
+        };
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
         let subscriptions = Arc::clone(&self.subscriptions);
