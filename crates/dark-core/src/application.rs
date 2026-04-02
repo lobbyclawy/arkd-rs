@@ -1679,33 +1679,27 @@ impl ArkService {
         // We do NOT broadcast here because we only have the server's signatures —
         // the boarding inputs also need client signatures to be valid.
         //
-        // For non-boarding rounds (VTXO-only refresh), emit RoundBroadcast
-        // immediately so the event bridge can send BatchFinalized to clients.
-        // For boarding rounds, RoundBroadcast is deferred until
-        // broadcast_signed_commitment_tx() succeeds.
-        //
-        // HOWEVER: if any intent has on-chain receivers (collaborative exit),
-        // the commitment tx MUST be broadcast for those outputs to appear on-chain.
-        let has_onchain_outputs = intents
-            .iter()
-            .any(|i| i.receivers.iter().any(|r| r.is_onchain()));
-
+        // For non-boarding rounds (VTXO-only refresh OR collaborative exit), always
+        // broadcast the commitment tx immediately. This is required because:
+        // - Collaborative exit: on-chain outputs must appear on-chain.
+        // - VTXO-only refresh: the vtxo tree transactions spend from the commitment tx,
+        //   so the commitment tx MUST be on-chain before clients can unroll (unilateral exit).
+        //   Without broadcasting here, TestUnilateralExit fails because tree txs can never
+        //   be confirmed (their parent — the commitment tx — is never on-chain).
         if !has_boarding {
-            if has_onchain_outputs {
-                info!(
-                    round_id = %round.id,
-                    "Broadcasting commitment tx for collaborative exit (on-chain outputs)"
-                );
-                match self
-                    .finalize_and_broadcast_commitment_psbt(&round.commitment_tx)
-                    .await
-                {
-                    Ok(txid) => {
-                        info!(txid = %txid, "Commitment tx broadcast for collaborative exit");
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Failed to broadcast commitment tx for collaborative exit — emitting RoundBroadcast anyway");
-                    }
+            info!(
+                round_id = %round.id,
+                "Broadcasting commitment tx for non-boarding round"
+            );
+            match self
+                .finalize_and_broadcast_commitment_psbt(&round.commitment_tx)
+                .await
+            {
+                Ok(txid) => {
+                    info!(txid = %txid, "Commitment tx broadcast successfully");
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to broadcast commitment tx — emitting RoundBroadcast anyway");
                 }
             }
 
@@ -1990,8 +1984,18 @@ impl ArkService {
                 ));
             }
 
+            // Accept gracefully if the round was already auto-completed (e.g.
+            // empty vtxo tree / collaborative exit without change fast-path).
+            // The client calls ConfirmRegistration after receiving BatchStarted,
+            // but the auto-complete path may have already ended the round by
+            // then. This is not an error — the round succeeded.
             if round.is_ended() {
-                return Err(ArkError::Internal("Round already ended".to_string()));
+                info!(
+                    intent_id,
+                    round_id = %round.id,
+                    "confirm_registration: round already ended (auto-completed) — accepting gracefully"
+                );
+                return Ok(());
             }
 
             round.id.clone()
