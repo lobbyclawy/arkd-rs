@@ -1234,18 +1234,20 @@ impl ArkService {
                 .await?;
         }
 
-        // Auto-complete when tree is empty (nothing to sign) OR no cosigners.
-        // collaborative exit without change has cosigners but empty tree.
-        if tree_is_empty || no_cosigners {
-            // Give clients a moment to subscribe to the event stream before
-            // auto-completing. Without this delay, clients may miss the
-            // BatchFinalized event emitted immediately after BatchStarted.
-            // This fixes the TestCollaborativeExit/valid/without_change timeout.
-            if tree_is_empty {
-                info!(round_id = %round.id, "Waiting 500ms for clients to subscribe before auto-completing empty tree round...");
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            }
+        // Auto-complete only when there are no cosigners AND tree is empty.
+        // 
+        // For collaborative exit without change:
+        // - tree_is_empty = true (all on-chain outputs)
+        // - cosigners exist (the participants)
+        // We must NOT auto-complete because the Go SDK expects to go through
+        // the full signing ceremony even when there's nothing to sign. The SDK
+        // calls ConfirmRegistration after subscribing to events, and expects
+        // BatchFinalization to arrive after it confirms (not immediately).
+        //
+        // Only auto-complete when truly no cosigners (e.g., ASP-only operations).
+        let should_auto_complete = no_cosigners && tree_is_empty;
 
+        if should_auto_complete {
             // No user cosigners — ASP is the sole cosigner. Sign tree PSBTs
             // directly with a key-path spend (no MuSig2 needed).
             let signed_vtxo_tree = self
@@ -1442,6 +1444,92 @@ impl ArkService {
                 })
                 .await?;
 
+            return Ok(round.clone());
+        }
+
+        // For collaborative exit without change (empty tree with cosigners),
+        // wait for participants to confirm then finalize immediately.
+        // This gives clients time to subscribe to the event stream before
+        // we emit BatchFinalization/BatchFinalized.
+        if tree_is_empty {
+            info!(round_id = %round.id, "Empty tree round — waiting for confirmations before finalizing");
+            
+            // Wait up to 5 seconds for all participants to confirm
+            let max_wait = tokio::time::Duration::from_secs(5);
+            let start = tokio::time::Instant::now();
+            
+            loop {
+                // Check if round is still active
+                let all_confirmed = {
+                    let guard = self.current_round.read().await;
+                    if let Some(r) = guard.as_ref() {
+                        if r.is_ended() {
+                            break; // Round already finalized
+                        }
+                        // Check if all intents are confirmed
+                        r.intents.values().all(|intent| intent.is_confirmed())
+                    } else {
+                        break; // Round gone
+                    }
+                };
+                
+                if all_confirmed {
+                    info!(round_id = %round.id, "All participants confirmed — finalizing empty tree round");
+                    break;
+                }
+                
+                if start.elapsed() >= max_wait {
+                    info!(round_id = %round.id, "Timeout waiting for confirmations — proceeding with finalization");
+                    break;
+                }
+                
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+            
+            // Now finalize the round (similar to auto-complete but with proper event timing)
+            let signed_vtxo_tree = self
+                .asp_sign_vtxo_tree(&round.vtxo_tree.clone(), &round.commitment_tx)
+                .await;
+            round.vtxo_tree = signed_vtxo_tree;
+            
+            round.end_successfully();
+            
+            if let Err(e) = self.round_repo.add_or_update_round(round).await {
+                warn!(error = %e, "Failed to persist round (non-fatal, empty-tree finalize)");
+            }
+            
+            let has_boarding = !boarding_inputs.is_empty();
+            self.events
+                .publish_event(ArkEvent::RoundFinalized {
+                    round_id: round.id.clone(),
+                    commitment_tx: round.commitment_tx.clone(),
+                    timestamp: round.ending_timestamp,
+                    vtxo_count: 0,
+                    has_boarding_inputs: has_boarding,
+                })
+                .await?;
+            
+            // Broadcast commitment tx
+            match self
+                .finalize_and_broadcast_commitment_psbt(&round.commitment_tx)
+                .await
+            {
+                Ok(txid) => {
+                    info!(txid = %txid, "Commitment tx broadcast (empty-tree finalize)");
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to broadcast commitment tx (empty-tree finalize)");
+                }
+            }
+            
+            self.events
+                .publish_event(ArkEvent::RoundBroadcast {
+                    round_id: round.id.clone(),
+                    commitment_txid: commitment_txid.clone(),
+                    timestamp: chrono::Utc::now().timestamp(),
+                })
+                .await?;
+            
             return Ok(round.clone());
         }
 
