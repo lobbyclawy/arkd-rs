@@ -1297,6 +1297,9 @@ impl ArkService {
                 })
                 .await?;
 
+            // Clear the current round so the next test/round can start
+            *guard = None;
+
             return Ok(round.clone());
         }
 
@@ -1510,6 +1513,9 @@ impl ArkService {
                     timestamp: chrono::Utc::now().timestamp(),
                 })
                 .await?;
+
+            // Clear the current round so the next test/round can start
+            *guard = None;
 
             return Ok(round.clone());
         }
@@ -2649,6 +2655,7 @@ impl ArkService {
     ///
     /// Returns the script pubkey bytes (34 bytes: OP_1 <32-byte-key>).
     /// Extract the Bitcoin txid from a base64-encoded PSBT.
+    #[allow(dead_code)]
     fn psbt_to_txid(b64: &str) -> Option<String> {
         use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;

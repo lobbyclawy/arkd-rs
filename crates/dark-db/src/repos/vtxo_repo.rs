@@ -571,6 +571,8 @@ mod tests {
     async fn test_spend_vtxo_not_found() {
         let (_db, repo) = setup().await;
 
+        // spend_vtxos now skips non-existent VTXOs instead of returning an error
+        // (to match Go reference server behavior for connector outputs)
         let result = repo
             .spend_vtxos(
                 &[(
@@ -580,7 +582,7 @@ mod tests {
                 "ark",
             )
             .await;
-        assert!(result.is_err());
+        assert!(result.is_ok()); // Should succeed (silently skips non-existent)
     }
 
     #[tokio::test]
