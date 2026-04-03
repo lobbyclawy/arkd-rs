@@ -426,6 +426,12 @@ impl Server {
                                     // Round succeeded without boarding — confirm pending notes.
                                     note_store.confirm_pending(round_id).await;
 
+                                    // Yield to ensure clients have time to process
+                                    // BatchFinalization before BatchFinalized is published.
+                                    // This prevents race conditions where rapid back-to-back
+                                    // events cause clients to lag and miss BatchFinalized.
+                                    tokio::task::yield_now().await;
+
                                     let txid = {
                                         use base64::Engine;
                                         base64::engine::general_purpose::STANDARD
