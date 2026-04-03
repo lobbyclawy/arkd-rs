@@ -1208,7 +1208,7 @@ impl ArkService {
         let no_cosigners = cosigners_pubkeys.is_empty();
 
         // When tree is empty (all on-chain outputs like collaborative exit without
-        // change), skip the tree signing phase entirely and go straight to completion.
+        // change), auto-complete immediately regardless of cosigners.
         //
         // The Go SDK's OnTreeSigningStarted handler expects to find its signer
         // sessions in the cosigners list. When tree is empty, there are no signers,
@@ -1216,27 +1216,59 @@ impl ArkService {
         //
         // For collaborative exit without change:
         // - tree_is_empty = true (all on-chain outputs)
-        // - SDK receives BatchStarted, subscribes to events
-        // - We skip TreeSigningPhaseStarted and go straight to completion
-        // - complete_round() emits RoundFinalized → BatchFinalized
+        // - cosigners exist (the participants)
+        // - We auto-complete immediately, skipping the signing phase
         // - SDK receives BatchFinalized and proceeds
         //
         // This is the proper production-grade fix (no delays, no workarounds).
         if tree_is_empty {
-            // Skip tree signing for empty tree - go straight to completion.
-            // complete_round() will be called by the SDK after ConfirmRegistration.
-            info!(round_id = %round.id, "Empty tree - skipping tree signing phase");
-            
-            // Release lock before returning so SDK can confirm
-            drop(round);
-            
-            return Ok(self
-                .current_round
-                .read()
+            // Auto-complete for empty tree - nothing to sign, skip signing phase entirely.
+            info!(round_id = %round.id, "Empty tree - auto-completing round immediately");
+
+            // For empty tree, signing is not needed - skip to completion
+
+            // Mark round as successfully ended
+            round.end_successfully();
+
+            // Persist round state (non-fatal if fails)
+            if let Err(e) = self.round_repo.add_or_update_round(round).await {
+                warn!(error = %e, "Failed to persist round (non-fatal, empty-tree auto-complete)");
+            }
+
+            // Emit RoundFinalized → triggers BatchFinalization → BatchFinalized
+            let has_boarding = !boarding_inputs.is_empty();
+            self.events
+                .publish_event(ArkEvent::RoundFinalized {
+                    round_id: round.id.clone(),
+                    commitment_tx: round.commitment_tx.clone(),
+                    timestamp: round.ending_timestamp,
+                    vtxo_count: 0,
+                    has_boarding_inputs: has_boarding,
+                })
+                .await?;
+
+            // Broadcast commitment tx
+            match self
+                .finalize_and_broadcast_commitment_psbt(&round.commitment_tx)
                 .await
-                .as_ref()
-                .ok_or_else(|| ArkError::Internal("Round disappeared".to_string()))?
-                .clone());
+            {
+                Ok(txid) => {
+                    info!(txid = %txid, "Commitment tx broadcast (empty-tree auto-complete)");
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to broadcast commitment tx (empty-tree auto-complete)");
+                }
+            }
+
+            self.events
+                .publish_event(ArkEvent::RoundBroadcast {
+                    round_id: round.id.clone(),
+                    commitment_txid: commitment_txid.clone(),
+                    timestamp: chrono::Utc::now().timestamp(),
+                })
+                .await?;
+
+            return Ok(round.clone());
         }
 
         // Normal path: emit TreeSigningPhaseStarted with cosigners.
@@ -1249,9 +1281,9 @@ impl ArkService {
             })
             .await?;
 
-        // Auto-complete only when there are no cosigners AND tree is empty.
-        // (This shouldn't happen now since we handle empty trees above)
-        let should_auto_complete = no_cosigners && tree_is_empty;
+        // Auto-complete only when there are no cosigners.
+        // (Empty tree case is handled above)
+        let should_auto_complete = no_cosigners;
 
         if should_auto_complete {
             // No user cosigners — ASP is the sole cosigner. Sign tree PSBTs
