@@ -536,7 +536,7 @@ impl IndexerServiceTrait for IndexerGrpcService {
                     return v.spent;
                 }
                 if req.pending_only {
-                    return v.preconfirmed;
+                    return v.preconfirmed && !v.spent;
                 }
                 if req.recoverable_only {
                     // Recoverable VTXOs: unrolled (published on-chain) but not yet swept.
