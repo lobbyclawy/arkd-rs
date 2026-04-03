@@ -1802,7 +1802,12 @@ impl ArkService {
             warn!(error = %e, "Failed to release wallet reservations after round (non-fatal)");
         }
 
-        Ok(round.clone())
+        // Clear current_round so next round can start immediately
+        let completed_round = round.clone();
+        *guard = None;
+        info!(round_id = %completed_round.id, "Cleared current_round after successful completion");
+
+        Ok(completed_round)
     }
 
     /// Abort the current round due to timeout or other failure.
@@ -2614,6 +2619,7 @@ impl ArkService {
     pub async fn check_unrolled_vtxos(&self) -> ArkResult<u32> {
         // Get all spendable VTXOs (not spent, not swept, not unrolled)
         let (spendable, _) = self.vtxo_repo.list_all().await?;
+        info!(count = spendable.len(), "check_unrolled_vtxos: checking spendable VTXOs");
 
         // Group VTXOs by their root commitment txid so we query Esplora
         // once per commitment transaction instead of once per VTXO.
