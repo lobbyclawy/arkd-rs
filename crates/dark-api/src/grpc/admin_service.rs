@@ -591,7 +591,25 @@ impl AdminServiceTrait for AdminGrpcService {
             return Err(Status::invalid_argument("pubkey is required"));
         }
 
-        Ok(Response::new(BanParticipantResponse { success: true }))
+        // Convert proto reason to BanReason
+        let ban_reason = match req.reason.as_str() {
+            "double_spend" => dark_core::BanReason::DoubleSpend,
+            "failed_to_confirm" => dark_core::BanReason::FailedToConfirm,
+            "invalid_proof" => dark_core::BanReason::InvalidProof,
+            other => dark_core::BanReason::Other(other.to_string()),
+        };
+
+        // Actually ban the participant using the core service
+        match self.core.ban_participant(&req.pubkey, ban_reason, "admin").await {
+            Ok(()) => {
+                info!(pubkey = %req.pubkey, "Participant banned successfully");
+                Ok(Response::new(BanParticipantResponse { success: true }))
+            }
+            Err(e) => {
+                warn!(pubkey = %req.pubkey, error = %e, "Failed to ban participant");
+                Err(Status::internal(format!("Failed to ban: {e}")))
+            }
+        }
     }
 
     // --- New conviction RPCs (Go admin.proto aligned, #162) ---
