@@ -1205,7 +1205,7 @@ impl ArkService {
         // the SDK hadn't registered intent yet. Now we emit TreeSigningPhaseStarted
         // and let the normal flow proceed. The completion happens in
         // confirm_registration() when all participants have confirmed and tree is empty.
-        let tree_is_empty = round.vtxo_tree.iter().all(|n| n.tx.is_empty());
+        let _tree_is_empty = round.vtxo_tree.iter().all(|n| n.tx.is_empty());
         let no_cosigners = cosigners_pubkeys.is_empty();
 
         // Normal path: emit TreeSigningPhaseStarted with cosigners.
@@ -1862,14 +1862,21 @@ impl ArkService {
         // failed to submit their tree nonces. This prevents malicious or
         // unresponsive cosigners from blocking rounds indefinitely.
         //
-        // The expected cosigners are derived from intents' cosigners_public_keys
-        // which is set during intent registration.
+        // The expected cosigners are derived from the actual PSBTs in the vtxo
+        // tree — the same source used to initialize the signing session. This is
+        // the authoritative set of keys that were required to sign. Using
+        // intent.cosigners_public_keys instead is incorrect: in delegate flows,
+        // the delegate's pubkey appears there but the vtxo tree may be empty
+        // (stub/invalid input), so nobody should be banned.
         if reason == "signing timeout" {
-            // Get all participants who were expected to sign (from intents)
+            // Get all expected signers from PSBT cosigner fields in the tree
             let expected_pubkeys: std::collections::HashSet<String> = failed_round
-                .intents
-                .values()
-                .flat_map(|i| i.cosigners_public_keys.iter().cloned())
+                .vtxo_tree
+                .iter()
+                .filter(|n| !n.tx.is_empty())
+                .flat_map(|n| {
+                    Self::extract_cosigners_from_psbt_b64(&n.tx).unwrap_or_default()
+                })
                 .filter(|pk| !pk.is_empty())
                 .collect();
 
@@ -1881,7 +1888,7 @@ impl ArkService {
                         .get_session(&failed_round.id)
                         .await
                     {
-                        session.tree_nonces.keys().cloned().collect()
+                        session.tree_nonces.iter().map(|(k, _)| k.clone()).collect()
                     } else {
                         std::collections::HashSet::new()
                     };
@@ -2123,14 +2130,64 @@ impl ArkService {
             round.id.clone()
         };
 
-        // Mark confirmed in the domain model
-        {
+        // Mark confirmed in the domain model, and check whether this confirmation
+        // completes the round (empty vtxo_tree — collaborative exit without change).
+        struct EmptyTreeAutoComplete {
+            round_id: String,
+            commitment_txid: String,
+            commitment_tx: String,
+            intents: Vec<Intent>,
+            boarding_tx_ids: Vec<String>,
+            round_clone: Round,
+        }
+        let auto_complete: Option<EmptyTreeAutoComplete> = {
             let mut guard = self.current_round.write().await;
-            let round = guard.as_mut().unwrap();
+            let round = match guard.as_mut() {
+                Some(r) => r,
+                None => {
+                    // Round was cleared by a concurrent complete_round() between
+                    // the earlier read-lock check and now. Accept gracefully.
+                    info!(
+                        intent_id,
+                        "confirm_registration: round cleared between read/write lock — accepting gracefully"
+                    );
+                    return Ok(());
+                }
+            };
+
+            // Re-check inside the write lock (round may have been ended by a
+            // concurrent call between the earlier read-lock check and now).
+            if round.is_ended() {
+                return Ok(());
+            }
+
             round
                 .confirm_intent(intent_id)
                 .map_err(|e| ArkError::Internal(e.to_string()))?;
-        }
+
+            // Check if this was the last confirmation needed for an empty-tree round.
+            // Empty vtxo_tree means all receivers are onchain (collaborative exit without
+            // a VTXO change output). In that case nobody will ever call submit_tree_nonces
+            // / submit_tree_signatures, so we must complete the round here.
+            let tree_is_empty = round.vtxo_tree.iter().all(|n| n.tx.is_empty());
+            if tree_is_empty && round.all_confirmed() {
+                // Mark as ended immediately (inside the write lock) to prevent a
+                // concurrent ConfirmRegistration call from triggering a second
+                // auto-complete for the same round.
+                round.end_successfully();
+                let ac = EmptyTreeAutoComplete {
+                    round_id: round.id.clone(),
+                    commitment_txid: round.commitment_txid.clone(),
+                    commitment_tx: round.commitment_tx.clone(),
+                    intents: round.intents.values().cloned().collect(),
+                    boarding_tx_ids: round.boarding_tx_ids.clone(),
+                    round_clone: round.clone(),
+                };
+                Some(ac)
+            } else {
+                None
+            }
+        };
 
         // Mark confirmed in the store
         self.confirmation_store
@@ -2143,11 +2200,110 @@ impl ArkService {
 
         self.events
             .publish_event(ArkEvent::IntentConfirmed {
-                round_id,
+                round_id: round_id.clone(),
                 intent_id: intent_id.to_string(),
                 timestamp,
             })
             .await?;
+
+        // ── Empty-tree auto-complete (collaborative exit without VTXO change) ──
+        if let Some(ac) = auto_complete {
+            info!(
+                round_id = %ac.round_id,
+                "All intents confirmed, vtxo_tree is empty — auto-completing round \
+                 (collaborative exit without change)"
+            );
+
+            // Mark input VTXOs as spent.
+            let spend_list: Vec<(VtxoOutpoint, String)> = ac
+                .intents
+                .iter()
+                .flat_map(|intent| {
+                    intent.inputs.iter().filter_map(|inp| {
+                        if inp.outpoint.txid.is_empty() {
+                            None
+                        } else {
+                            Some((inp.outpoint.clone(), ac.commitment_txid.clone()))
+                        }
+                    })
+                })
+                .collect();
+            if !spend_list.is_empty() {
+                if let Err(e) = self
+                    .vtxo_repo
+                    .spend_vtxos(&spend_list, &ac.commitment_txid)
+                    .await
+                {
+                    warn!(
+                        error = %e,
+                        "Failed to mark input VTXOs as spent (non-fatal, empty-tree auto-complete)"
+                    );
+                } else {
+                    info!(
+                        count = spend_list.len(),
+                        "Marked input VTXOs as spent (empty-tree auto-complete)"
+                    );
+                }
+            }
+
+            // Mark boarding transactions as claimed.
+            for boarding_id in &ac.boarding_tx_ids {
+                if let Err(e) = self.boarding_repo.mark_claimed(boarding_id).await {
+                    warn!(
+                        boarding_id = %boarding_id,
+                        error = %e,
+                        "Failed to mark boarding tx as claimed (non-fatal, empty-tree auto-complete)"
+                    );
+                }
+            }
+
+            // Persist the round (with ended state).
+            if let Err(e) = self.round_repo.add_or_update_round(&ac.round_clone).await {
+                warn!(
+                    error = %e,
+                    "Failed to persist round (non-fatal, empty-tree auto-complete)"
+                );
+            }
+
+            let has_boarding = !ac.boarding_tx_ids.is_empty();
+            let ending_timestamp = ac.round_clone.ending_timestamp;
+            self.events
+                .publish_event(ArkEvent::RoundFinalized {
+                    round_id: ac.round_id.clone(),
+                    commitment_tx: ac.commitment_tx.clone(),
+                    timestamp: ending_timestamp,
+                    vtxo_count: 0, // all receivers were onchain — no VTXOs created
+                    has_boarding_inputs: has_boarding,
+                })
+                .await?;
+
+            // Broadcast the commitment tx.
+            match self
+                .finalize_and_broadcast_commitment_psbt(&ac.commitment_tx)
+                .await
+            {
+                Ok(txid) => {
+                    info!(txid = %txid, "Commitment tx broadcast (empty-tree auto-complete)");
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "Failed to broadcast commitment tx (empty-tree auto-complete) \
+                         — emitting RoundBroadcast anyway"
+                    );
+                }
+            }
+
+            self.events
+                .publish_event(ArkEvent::RoundBroadcast {
+                    round_id: ac.round_id.clone(),
+                    commitment_txid: ac.commitment_txid.clone(),
+                    timestamp: chrono::Utc::now().timestamp(),
+                })
+                .await?;
+
+            info!(round_id = %ac.round_id, "Empty-tree round auto-complete finished");
+        }
 
         Ok(())
     }
@@ -2685,6 +2841,12 @@ impl ArkService {
         }
 
         let mut count = 0u32;
+
+        info!(
+            preconfirmed_count = preconfirmed_vtxos.len(),
+            commitment_groups = by_commitment.len(),
+            "check_unrolled_vtxos: categorised VTXOs"
+        );
 
         // Check preconfirmed VTXOs: mark as unrolled ONLY when the ark tx
         // itself is confirmed on-chain.  We must NOT mark on checkpoint
@@ -3832,6 +3994,16 @@ impl ArkService {
                     vtxo
                 })
                 .collect();
+
+            for vtxo in &output_vtxos {
+                info!(
+                    tx_id = %tx_id,
+                    outpoint = %vtxo.outpoint,
+                    pubkey = %vtxo.pubkey,
+                    amount = vtxo.amount,
+                    "finalize_offchain_tx: creating output VTXO"
+                );
+            }
 
             if let Err(e) = self.vtxo_repo.add_vtxos(&output_vtxos).await {
                 tracing::warn!(tx_id = %tx_id, error = %e, "Failed to create output VTXOs (non-fatal in test mode)");
@@ -5624,11 +5796,42 @@ impl ArkService {
             }
         }
 
-        // Get tree and commitment tx from round
+        // Get tree and commitment tx from round.
+        // Guard against a concurrent submit_tree_signatures call that already
+        // completed the round (TOCTOU: both callers can see
+        // all_signatures_collected() == true when the last sig races with the
+        // all_sigs check of an earlier participant).
         let mut guard = self.current_round.write().await;
-        let round = guard
-            .as_mut()
-            .ok_or_else(|| ArkError::Internal("No active round".to_string()))?;
+        let round = match guard.as_mut() {
+            None => {
+                // Round already cleared by a concurrent completion — nothing to do.
+                info!(
+                    batch_id,
+                    "aggregate_tree_signatures: round already cleared by concurrent \
+                     completion — skipping"
+                );
+                return Ok(());
+            }
+            Some(r) if r.is_ended() => {
+                // Round ended between the all_sigs check and this write lock.
+                info!(
+                    batch_id,
+                    "aggregate_tree_signatures: round already ended by concurrent \
+                     completion — skipping"
+                );
+                return Ok(());
+            }
+            Some(r) if r.id != batch_id => {
+                // A new round replaced this one while we were waiting.
+                info!(
+                    batch_id,
+                    current_round_id = %r.id,
+                    "aggregate_tree_signatures: round rotated — skipping"
+                );
+                return Ok(());
+            }
+            Some(r) => r,
+        };
 
         let output_map = Self::build_tree_output_map(&round.vtxo_tree, &round.commitment_tx);
         let mut signed_tree: Vec<crate::domain::TxTreeNode> = Vec::new();
