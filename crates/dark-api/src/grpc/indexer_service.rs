@@ -646,8 +646,10 @@ impl IndexerServiceTrait for IndexerGrpcService {
                                     spends,
                                 });
 
-                                // Queue checkpoint inputs as next VTXOs to process
-                                // (mirrors Go: newNextVtxos populated with checkpoint inputs)
+                                // Queue checkpoint inputs as next VTXOs to process.
+                                // The checkpoint tx spends a VTXO from a parent round;
+                                // we need to include the parent round's tree nodes in
+                                // the chain so the checkpoint can be broadcast on-chain.
                                 use base64::Engine;
                                 if let Ok(bytes) =
                                     base64::engine::general_purpose::STANDARD.decode(ckpt_b64)
@@ -769,6 +771,16 @@ impl IndexerServiceTrait for IndexerGrpcService {
             .as_ref()
             .map(|p| (p.size, p.index))
             .unwrap_or((0, 0));
+
+        for (i, entry) in chain.iter().enumerate() {
+            info!(
+                i,
+                txid = %entry.txid,
+                r#type = entry.r#type,
+                spends = ?entry.spends,
+                "GetVtxoChain: chain entry"
+            );
+        }
 
         let (page_items, page_resp) = paginate(&chain, page_size, page_index);
 
