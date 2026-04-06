@@ -526,7 +526,10 @@ impl ArkServiceTrait for ArkGrpcService {
         info!(topics = ?initial_topics, "GetEventStream called");
 
         let stream_id = uuid::Uuid::new_v4().to_string();
-        let mut rx = self.broker.subscribe();
+        // Use subscribe_with_replay so late subscribers (those that connected
+        // after RegisterIntent but before the round published BatchStarted)
+        // still receive the event instead of blocking forever.
+        let (mut rx, buffered_batch_started) = self.broker.subscribe_with_replay().await;
         let registry = Arc::clone(&self.stream_registry);
 
         // Register with initial topics
@@ -543,6 +546,12 @@ impl ArkServiceTrait for ArkGrpcService {
                     },
                 )),
             });
+
+            // Replay the buffered BatchStarted event if the round is already
+            // active (prevents the register-before-subscribe race).
+            if let Some(batch_event) = buffered_batch_started {
+                yield Ok(batch_event);
+            }
 
             // Forward events from the broker, filtering by topics
             loop {
@@ -860,17 +869,32 @@ impl ArkServiceTrait for ArkGrpcService {
 
             if let Some(ref bytes) = psbt_bytes {
                 if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(bytes) {
-                    let parsed_inputs: Vec<dark_core::domain::VtxoInput> = psbt
-                        .unsigned_tx
-                        .input
+                    // Extract input VTXO outpoints from CHECKPOINT TX
+                    // inputs, not from ark tx inputs.  The tx chain is:
+                    //   user VTXO → checkpoint tx → ark tx
+                    // The checkpoint tx's first input spends the user's VTXO,
+                    // so its previous_output is the VTXO outpoint we need.
+                    // (The ark tx's inputs reference checkpoint outputs, which
+                    // are never stored as VTXOs.)
+                    let parsed_inputs: Vec<dark_core::domain::VtxoInput> = req
+                        .checkpoint_txs
                         .iter()
-                        .map(|inp| {
-                            let txid = inp.previous_output.txid.to_string();
-                            let vout = inp.previous_output.vout;
-                            dark_core::domain::VtxoInput {
+                        .filter_map(|ckpt_b64| {
+                            use base64::Engine;
+                            let ckpt_bytes = base64::engine::general_purpose::STANDARD
+                                .decode(ckpt_b64)
+                                .or_else(|_| hex::decode(ckpt_b64))
+                                .ok()?;
+                            let ckpt_psbt =
+                                bitcoin::psbt::Psbt::deserialize(&ckpt_bytes).ok()?;
+                            // The checkpoint tx's first input spends the user's VTXO
+                            let first_input = ckpt_psbt.unsigned_tx.input.first()?;
+                            let txid = first_input.previous_output.txid.to_string();
+                            let vout = first_input.previous_output.vout;
+                            Some(dark_core::domain::VtxoInput {
                                 vtxo_id: format!("{}:{}", txid, vout),
                                 signed_tx: vec![],
-                            }
+                            })
                         })
                         .collect();
 
