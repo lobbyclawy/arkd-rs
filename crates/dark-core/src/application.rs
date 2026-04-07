@@ -1930,21 +1930,14 @@ impl ArkService {
             }
         }
 
-        // Emit BatchFailed event — but NOT for signing timeouts.
-        // Signing timeouts are server-internal cleanup (unresponsive cosigners).
-        // Emitting BatchFailed for them disrupts other clients who are subscribed
-        // to the event stream (the Go SDK's OnBatchFailed always returns an error
-        // regardless of batch ID). The Go reference server avoids this by not
-        // emitting BatchFailed for timeout aborts.
-        if reason != "signing timeout" {
-            self.events
-                .publish_event(ArkEvent::RoundFailed {
-                    round_id: failed_round.id.clone(),
-                    reason: reason.to_string(),
-                    timestamp: chrono::Utc::now().timestamp(),
-                })
-                .await?;
-        }
+        // Emit BatchFailed event so connected clients know the round failed.
+        self.events
+            .publish_event(ArkEvent::RoundFailed {
+                round_id: failed_round.id.clone(),
+                reason: reason.to_string(),
+                timestamp: chrono::Utc::now().timestamp(),
+            })
+            .await?;
 
         // Release any wallet UTXO reservations so the next round can use them.
         if let Err(e) = self.wallet.release_all_reservations().await {
