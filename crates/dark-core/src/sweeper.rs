@@ -71,7 +71,7 @@ impl Sweeper {
             expired.extend(block_expired);
         }
 
-        let count = expired.len() as u32;
+        let mut swept_count = 0u32;
 
         for vtxo in &expired {
             let vtxo_id = vtxo.outpoint.to_string();
@@ -103,38 +103,58 @@ impl Sweeper {
                 pubkey: vtxo.pubkey.clone(),
             };
 
-            let (_preliminary_txid, psbt_hex) =
-                self.tx_builder.build_sweep_tx(&[sweep_input]).await?;
-            let signed = self.signer.sign_transaction(&psbt_hex, false).await?;
-            let raw_tx = self.tx_builder.finalize_and_extract(&signed).await?;
-            let txid = self.wallet.broadcast_transaction(vec![raw_tx]).await?;
-
-            tracing::info!(
-                vtxo_id = %vtxo_id,
-                sweep_txid = %txid,
-                "Broadcast sweep transaction for expired VTXO"
-            );
-
-            self.events
-                .publish_event(ArkEvent::VtxoForfeited {
-                    vtxo_id,
-                    forfeit_txid: txid,
-                })
-                .await?;
-        }
-
-        // Mark VTXOs as swept in the repository
-        if count > 0 {
-            if let Err(e) = self.vtxo_repo.mark_vtxos_swept(&expired).await {
-                tracing::warn!(
-                    error = %e,
-                    "Failed to mark VTXOs as swept in repository (continuing)"
-                );
+            let sweep_result: Result<String, _> = async {
+                let (_preliminary_txid, psbt_hex) =
+                    self.tx_builder.build_sweep_tx(&[sweep_input]).await?;
+                let signed = self.signer.sign_transaction(&psbt_hex, false).await?;
+                let raw_tx = self.tx_builder.finalize_and_extract(&signed).await?;
+                self.wallet.broadcast_transaction(vec![raw_tx]).await
             }
-            tracing::info!(swept_count = count, "Sweep complete");
+            .await;
+
+            match sweep_result {
+                Ok(txid) => {
+                    tracing::info!(
+                        vtxo_id = %vtxo_id,
+                        sweep_txid = %txid,
+                        "Broadcast sweep transaction for expired VTXO"
+                    );
+
+                    // Mark as swept immediately after successful broadcast to
+                    // prevent re-sweeping if a later VTXO fails.
+                    if let Err(e) = self.vtxo_repo.mark_vtxos_swept(&[vtxo.clone()]).await {
+                        tracing::warn!(
+                            vtxo_id = %vtxo_id,
+                            error = %e,
+                            "Failed to mark VTXO as swept after broadcast"
+                        );
+                    }
+
+                    let _ = self
+                        .events
+                        .publish_event(ArkEvent::VtxoForfeited {
+                            vtxo_id,
+                            forfeit_txid: txid,
+                        })
+                        .await;
+
+                    swept_count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        vtxo_id = %vtxo_id,
+                        error = %e,
+                        "Failed to sweep VTXO, skipping"
+                    );
+                }
+            }
         }
 
-        Ok(count)
+        if swept_count > 0 {
+            tracing::info!(swept_count, "Sweep complete");
+        }
+
+        Ok(swept_count)
     }
 
     /// Spawn a background sweeper loop triggered by block events.

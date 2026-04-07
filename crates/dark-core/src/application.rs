@@ -1,6 +1,7 @@
 //! Application services — aligned with Go dark's `application.Service`
 
 use std::collections::HashMap as StdHashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, instrument, warn};
@@ -236,6 +237,8 @@ pub struct ArkService {
     watched_scripts: RwLock<StdHashMap<String, Vec<VtxoOutpoint>>>,
     /// ASP MuSig2 tree cosigning state (per-round nonces and sweep root).
     asp_musig2_state: tokio::sync::Mutex<Option<AspMusig2State>>,
+    /// Guard to prevent overlapping maintenance sweeps.
+    maintenance_running: AtomicBool,
 }
 
 /// ASP's per-round MuSig2 state for tree cosigning.
@@ -312,6 +315,7 @@ impl ArkService {
             fee_input_signature: tokio::sync::Mutex::new(None),
             watched_scripts: RwLock::new(StdHashMap::new()),
             asp_musig2_state: tokio::sync::Mutex::new(None),
+            maintenance_running: AtomicBool::new(false),
         }
     }
 
@@ -3174,7 +3178,22 @@ impl ArkService {
     }
 
     /// Run all maintenance checks: unroll detection and expired VTXO sweeps.
+    ///
+    /// Uses an atomic flag to prevent overlapping runs — if a previous
+    /// maintenance cycle is still in progress, this call returns immediately.
     async fn run_maintenance(self: &Arc<Self>) {
+        // Prevent overlapping maintenance runs.  The maintenance loop fires
+        // every 10 s *and* on every new-block notification, so without this
+        // guard two sweeps can race and try to spend the same UTXOs.
+        if self
+            .maintenance_running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            debug!("Maintenance: previous run still in progress, skipping");
+            return;
+        }
+
         // 1. Check for unrolled VTXOs (always runs, even when wallet is locked)
         if let Err(e) = self.check_unrolled_vtxos().await {
             warn!(error = %e, "Maintenance: unroll check failed");
@@ -3186,10 +3205,12 @@ impl ArkService {
         match self.wallet.status().await {
             Ok(status) if !status.unlocked => {
                 debug!("Maintenance: wallet is locked, skipping sweeps");
+                self.maintenance_running.store(false, Ordering::SeqCst);
                 return;
             }
             Err(e) => {
                 warn!(error = %e, "Maintenance: failed to check wallet status, skipping sweeps");
+                self.maintenance_running.store(false, Ordering::SeqCst);
                 return;
             }
             _ => {}
@@ -3206,6 +3227,8 @@ impl ArkService {
         if let Err(e) = self.sweep_expired_by_height().await {
             debug!(error = %e, "Maintenance: block-height sweep failed");
         }
+
+        self.maintenance_running.store(false, Ordering::SeqCst);
     }
 
     /// Spawn a background maintenance loop that:
