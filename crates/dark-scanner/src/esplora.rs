@@ -214,6 +214,9 @@ impl EsploraScanner {
     /// Check whether a specific transaction output has been spent.
     ///
     /// Queries `GET /tx/{txid}/outspend/{vout}` and returns the `spent` flag.
+    /// Returns `Ok(false)` (not spent) when the transaction is unknown to
+    /// Esplora (HTTP 404) — this is expected for off-chain VTXO tree
+    /// transactions that have never been broadcast.
     pub async fn is_output_spent(&self, txid: &str, vout: u32) -> ArkResult<bool> {
         let url = format!("{}/tx/{}/outspend/{}", self.base_url, txid, vout);
         let resp = self
@@ -222,6 +225,12 @@ impl EsploraScanner {
             .send()
             .await
             .map_err(|e| ArkError::Internal(format!("Esplora request failed: {e}")))?;
+
+        // 404 means the transaction is not on-chain (common for virtual VTXO
+        // tree transactions). Treat as "not spent".
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
 
         if !resp.status().is_success() {
             return Err(ArkError::Internal(format!(

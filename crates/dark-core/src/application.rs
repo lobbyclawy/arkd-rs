@@ -1934,21 +1934,17 @@ impl ArkService {
             }
         }
 
-        // Emit BatchFailed event — but NOT for signing timeouts.
-        // Signing timeouts are server-internal cleanup (unresponsive cosigners).
-        // Emitting BatchFailed for them disrupts other clients who are subscribed
-        // to the event stream (the Go SDK's OnBatchFailed always returns an error
-        // regardless of batch ID). The Go reference server avoids this by not
-        // emitting BatchFailed for timeout aborts.
-        if reason != "signing timeout" {
-            self.events
-                .publish_event(ArkEvent::RoundFailed {
-                    round_id: failed_round.id.clone(),
-                    reason: reason.to_string(),
-                    timestamp: chrono::Utc::now().timestamp(),
-                })
-                .await?;
-        }
+        // Always emit BatchFailed so clients waiting for round completion
+        // (e.g. ConfirmRegistration, forfeit tx submission) learn the round
+        // was aborted.  Suppressing the event for signing timeouts caused
+        // both Rust and Go e2e tests to hang indefinitely.
+        self.events
+            .publish_event(ArkEvent::RoundFailed {
+                round_id: failed_round.id.clone(),
+                reason: reason.to_string(),
+                timestamp: chrono::Utc::now().timestamp(),
+            })
+            .await?;
 
         // Release any wallet UTXO reservations so the next round can use them.
         if let Err(e) = self.wallet.release_all_reservations().await {
@@ -2444,9 +2440,16 @@ impl ArkService {
         }
 
         // ── Double-spend detection (#334) ─────────────────────────────────
-        // Check each VTXO input against the on-chain scanner. If any input has
-        // already been spent on-chain (published VTXO tree while also being
-        // presented in a new round), this is a double-spend attempt.
+        // Check each input against the on-chain scanner to detect double-spend
+        // attempts (e.g. a VTXO tree was unilaterally exited on-chain while
+        // also being presented in a new round).
+        //
+        // IMPORTANT: Only check inputs that are NOT known off-chain VTXOs.
+        // Off-chain VTXO inputs (from the VTXO tree) reference virtual
+        // transactions that are never broadcast — Esplora won't know about
+        // them and would return 404, falsely rejecting the intent. We only
+        // need the on-chain check for boarding/on-chain UTXOs and for VTXOs
+        // whose tree has been published (unilateral exit).
         //
         // We perform this check before acquiring the write lock to avoid holding
         // it during potentially slow on-chain queries.
@@ -2460,7 +2463,35 @@ impl ArkService {
         };
         for input in &intent.inputs {
             let vtxo_id = format!("{}:{}", input.outpoint.txid, input.outpoint.vout);
-            let is_unspent = self.scanner.is_utxo_unspent(&input.outpoint).await?;
+
+            // Skip on-chain double-spend check for known off-chain VTXOs.
+            // These reference virtual tree transactions not on the blockchain.
+            let outpoint_slice = [input.outpoint.clone()];
+            let is_known_vtxo = self
+                .vtxo_repo
+                .get_vtxos(&outpoint_slice)
+                .await
+                .ok()
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+
+            if is_known_vtxo {
+                continue;
+            }
+
+            let is_unspent = match self.scanner.is_utxo_unspent(&input.outpoint).await {
+                Ok(val) => val,
+                Err(e) => {
+                    // If the scanner fails (e.g. Esplora 404 for unknown tx),
+                    // treat as unspent — the transaction is not on-chain.
+                    warn!(
+                        vtxo_id = %vtxo_id,
+                        error = %e,
+                        "Double-spend check failed (treating as unspent)"
+                    );
+                    true
+                }
+            };
             if !is_unspent {
                 warn!(
                     vtxo_id = %vtxo_id,
