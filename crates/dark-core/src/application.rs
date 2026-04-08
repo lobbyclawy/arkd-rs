@@ -1891,8 +1891,18 @@ impl ArkService {
 
         // Persist round to the database so the indexer can serve it later
         // (GetVtxoChain, GetVtxoTree, GetVirtualTxs all depend on stored rounds).
+        //
+        // Merge forfeit_txs from the DB: submit_signed_forfeit_txs stores
+        // forfeits on the DB round before complete_round runs. The in-memory
+        // round doesn't have them, so we merge to avoid losing them.
+        if let Ok(Some(db_round)) = self.round_repo.get_round_with_id(&round.id).await {
+            if !db_round.forfeit_txs.is_empty() && round.forfeit_txs.is_empty() {
+                round.forfeit_txs = db_round.forfeit_txs;
+            }
+        }
         info!(
             vtxo_tree_len = round.vtxo_tree.len(),
+            forfeit_txs = round.forfeit_txs.len(),
             "complete_round: about to save round"
         );
         if let Err(e) = self.round_repo.add_or_update_round(round).await {
@@ -3629,18 +3639,29 @@ impl ArkService {
                 .await?;
         }
 
-        // Fallback: search all recent rounds for one that has a forfeit
-        // spending this VTXO. This handles the case where the VTXO was
-        // spent via an offchain tx (spent_by = offchain tx id) and then
-        // settled in a later round.
+        // Fallback: search recent rounds for one that has a forfeit tx
+        // spending this VTXO. This handles cases where spent_by was set
+        // by an offchain tx (SubmitTx/FinalizeTx) rather than a round.
         if round.is_none() {
-            if let Ok(Some(last)) = self.last_completed_round.read().await.as_ref()
-                .map(|r| if r.forfeit_txs.iter().any(|f| {
-                    f.tx.contains(&vtxo.outpoint.txid)
-                }) { Some(r.clone()) } else { None })
-                .ok_or(ArkError::Internal("no last round".into()))
-            {
-                round = Some(last);
+            let has_matching_forfeit = |r: &Round| -> bool {
+                self.find_forfeit_tx_for_vtxo(vtxo, &r.forfeit_txs).is_ok()
+            };
+            // Check last completed round first (fast path)
+            if let Some(last) = self.last_completed_round.read().await.as_ref() {
+                if has_matching_forfeit(last) {
+                    round = Some(last.clone());
+                }
+            }
+            // If not found, scan recent rounds from the DB
+            if round.is_none() {
+                if let Ok(rounds) = self.round_repo.list_rounds(0, 20).await {
+                    for r in rounds {
+                        if has_matching_forfeit(&r) {
+                            round = Some(r);
+                            break;
+                        }
+                    }
+                }
             }
         }
 
