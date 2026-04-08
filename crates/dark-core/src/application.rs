@@ -1199,6 +1199,10 @@ impl ArkService {
         // Emit TreeTxReady for connector tree nodes (batch_index=1).
         // The Go SDK builds the connector tree from these events and passes it
         // to OnBatchFinalization so forfeit transactions can reference connectors.
+        // Use the global cosigners list as topic — connector events must reach
+        // the same clients that receive VTXO tree events. Using empty topics
+        // would broadcast to ALL streams, causing non-cosigner clients to
+        // accumulate unexpected tree nodes and break nonce counting.
         for node in &round.connectors {
             if node.tx.is_empty() {
                 continue;
@@ -1208,7 +1212,7 @@ impl ArkService {
                     round_id: round.id.clone(),
                     txid: node.txid.clone(),
                     tx: node.tx.clone(),
-                    cosigners: vec![], // Connectors don't need cosigner filtering
+                    cosigners: cosigners_pubkeys.clone(),
                     children: node.children.clone(),
                     batch_index: 1, // Connector tree
                 })
@@ -5279,12 +5283,36 @@ impl ArkService {
 
         // Validate and store each forfeit transaction.
         for (idx, tx_hex) in signed_forfeit_txs.iter().enumerate() {
-            // 1. Deserialize the signed forfeit transaction from hex.
-            let tx_bytes = hex::decode(tx_hex)
-                .map_err(|e| ArkError::Validation(format!("Forfeit tx {idx}: invalid hex: {e}")))?;
-            let tx: bitcoin::Transaction = deserialize(&tx_bytes).map_err(|e| {
-                ArkError::Validation(format!("Forfeit tx {idx}: invalid transaction: {e}"))
-            })?;
+            // 1. Deserialize the signed forfeit transaction.
+            //    Go clients send base64-encoded PSBTs; Rust clients may send raw hex.
+            //    Try base64 PSBT first, then raw hex.
+            let tx: bitcoin::Transaction = {
+                use base64::Engine;
+                if let Ok(psbt_bytes) = base64::engine::general_purpose::STANDARD.decode(tx_hex) {
+                    if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&psbt_bytes) {
+                        psbt.extract_tx().map_err(|e| {
+                            ArkError::Validation(format!(
+                                "Forfeit tx {idx}: PSBT extract failed: {e}"
+                            ))
+                        })?
+                    } else {
+                        // base64 decoded but not a valid PSBT — try as raw tx bytes
+                        deserialize(&psbt_bytes).map_err(|e| {
+                            ArkError::Validation(format!(
+                                "Forfeit tx {idx}: invalid transaction: {e}"
+                            ))
+                        })?
+                    }
+                } else {
+                    // Not base64 — try hex
+                    let tx_bytes = hex::decode(tx_hex).map_err(|e| {
+                        ArkError::Validation(format!("Forfeit tx {idx}: invalid hex: {e}"))
+                    })?;
+                    deserialize(&tx_bytes).map_err(|e| {
+                        ArkError::Validation(format!("Forfeit tx {idx}: invalid transaction: {e}"))
+                    })?
+                }
+            };
 
             // 2. Must have exactly 2 inputs (VTXO + connector).
             if tx.input.len() != 2 {
