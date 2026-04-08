@@ -4393,9 +4393,70 @@ impl ArkService {
                     .await?;
             }
 
+            // Compute aggregated nonces per txid for the TreeNoncesAggregated
+            // event. Delegate cosigners (Go SDK) need these to create partial
+            // signatures — they listen for TreeNoncesAggregated, not individual
+            // TreeNonces events.
+            let mut aggregated_nonces_map: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            {
+                use musig2::BinaryEncoding;
+                // Get tree node cosigner ordering from the round's PSBTs
+                let tree_nodes = {
+                    let guard = self.current_round.read().await;
+                    guard
+                        .as_ref()
+                        .map(|r| r.vtxo_tree.clone())
+                        .unwrap_or_default()
+                };
+                for node in &tree_nodes {
+                    if node.tx.is_empty() {
+                        continue;
+                    }
+                    if let Some(txid_nonces) = nonces_by_txid.get(&node.txid) {
+                        // Extract cosigner order from PSBT to ensure deterministic nonce ordering
+                        let cosigner_hexes =
+                            Self::extract_cosigners_from_psbt_b64(&node.tx).unwrap_or_default();
+                        let mut musig_pubkeys: Vec<musig2::secp256k1::PublicKey> = Vec::new();
+                        for hex_key in &cosigner_hexes {
+                            if let Ok(bytes) = hex::decode(hex_key) {
+                                if let Ok(pk) = musig2::secp256k1::PublicKey::from_slice(&bytes) {
+                                    musig_pubkeys.push(pk);
+                                }
+                            }
+                        }
+                        musig_pubkeys.sort();
+
+                        let mut pub_nonces: Vec<musig2::PubNonce> = Vec::new();
+                        let mut all_found = true;
+                        for pk in &musig_pubkeys {
+                            let xonly_hex = hex::encode(&pk.serialize()[1..]);
+                            if let Some(nonce_hex) = txid_nonces.get(&xonly_hex) {
+                                if let Ok(nonce_bytes) = hex::decode(nonce_hex) {
+                                    if let Ok(pub_nonce) =
+                                        musig2::PubNonce::from_bytes(&nonce_bytes)
+                                    {
+                                        pub_nonces.push(pub_nonce);
+                                        continue;
+                                    }
+                                }
+                            }
+                            all_found = false;
+                            break;
+                        }
+                        if all_found && !pub_nonces.is_empty() {
+                            let agg_nonce = dark_bitcoin::signing::aggregate_nonces(&pub_nonces);
+                            aggregated_nonces_map
+                                .insert(node.txid.clone(), hex::encode(agg_nonce.to_bytes()));
+                        }
+                    }
+                }
+            }
+
             self.events
                 .publish_event(ArkEvent::TreeNoncesCollected {
                     round_id: batch_id.to_string(),
+                    aggregated_nonces: aggregated_nonces_map,
                 })
                 .await?;
 

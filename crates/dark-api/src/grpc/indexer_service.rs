@@ -637,6 +637,8 @@ impl IndexerServiceTrait for IndexerGrpcService {
                 .map_err(|e| Status::internal(e.to_string()))?;
 
             if vtxos.is_empty() {
+                // Go reference returns error here, but we break gracefully
+                // since the chain may already have entries from previous iterations.
                 break;
             }
 
@@ -692,17 +694,16 @@ impl IndexerServiceTrait for IndexerGrpcService {
                             }
                         }
 
-                        // Add the ark tx entry first — it "spends" the checkpoint txids
-                        if !offchain_tx.signed_ark_tx.is_empty() {
-                            if let Some(txid) = psbt_to_bitcoin_txid(&offchain_tx.signed_ark_tx) {
-                                chain.push(crate::proto::ark_v1::IndexerChain {
-                                    txid,
-                                    expires_at: v.expires_at,
-                                    r#type: 2, // INDEXER_CHAINED_TX_TYPE_ARK
-                                    spends: checkpoint_txids,
-                                });
-                            }
-                        }
+                        // Add the ark tx entry first — it "spends" the checkpoint txids.
+                        // Use the VTXO's txid (the offchain tx UUID) as the chain entry's
+                        // txid, matching the Go reference server behavior. The Go server
+                        // uses vtxo.Txid (UUID) not the bitcoin txid from the PSBT.
+                        chain.push(crate::proto::ark_v1::IndexerChain {
+                            txid: v.outpoint.txid.clone(),
+                            expires_at: v.expires_at,
+                            r#type: 2, // INDEXER_CHAINED_TX_TYPE_ARK
+                            spends: checkpoint_txids,
+                        });
 
                         // Then add checkpoint entries
                         chain.extend(checkpoint_entries);

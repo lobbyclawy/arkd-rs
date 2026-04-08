@@ -27,6 +27,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free port 50000 if occupied
+        run: |
+          # Kill any process holding port 50000 (electrs default) to prevent
+          # nigiri startup failures on runners with leftover containers.
+          sudo lsof -ti:50000 | xargs -r sudo kill -9 || true
+          docker ps -q | xargs -r docker stop || true
+          docker ps -aq | xargs -r docker rm -f || true
+          docker network prune -f || true
+
       - name: Start regtest environment (nigiri)
         uses: vulpemventures/nigiri-github-action@v1
         with:
@@ -172,9 +181,11 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel"
 
-      - name: Stop dark server
+      - name: Stop dark and nigiri
         if: always()
-        run: kill $(cat /tmp/dark.pid) 2>/dev/null || true
+        run: |
+          kill $(cat /tmp/dark.pid) 2>/dev/null || true
+          nigiri stop --delete 2>/dev/null || true
 
   go-e2e:
     name: E2E tests (arkd Go)

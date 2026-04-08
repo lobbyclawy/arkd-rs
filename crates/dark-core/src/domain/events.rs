@@ -189,6 +189,9 @@ pub enum ArkEvent {
     TreeNoncesCollected {
         /// Round identifier
         round_id: String,
+        /// Aggregated nonces per txid (txid → hex-encoded aggregated nonce).
+        /// Sent as `TreeNoncesAggregatedEvent` so delegate cosigners can sign.
+        aggregated_nonces: std::collections::HashMap<String, String>,
     },
 
     /// All cosigners have submitted their partial signatures.

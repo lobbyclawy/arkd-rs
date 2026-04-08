@@ -1019,19 +1019,25 @@ impl ArkServiceTrait for ArkGrpcService {
 
         // ── CLTV locktime validation ──────────────────────────────────
         // Go reference: checks CLTV closure locktime against current block height.
-        // If a checkpoint PSBT has nLockTime set to a future block height, the
-        // closure is still locked and the tx must be rejected. We check nLockTime
-        // directly (no need to scan tapscripts for OP_CLTV — the nLockTime on the
-        // unsigned tx is authoritative and always set by the client when a CLTV
-        // closure is involved).
+        // If any PSBT (ark tx or checkpoint) has nLockTime set to a future block
+        // height, the closure is still locked and the tx must be rejected. We check
+        // nLockTime directly (no need to scan tapscripts for OP_CLTV — the nLockTime
+        // on the unsigned tx is authoritative and always set by the client when a
+        // CLTV closure is involved).
         {
             use base64::Engine;
-            for ckpt_b64 in &req.checkpoint_txs {
-                let ckpt_bytes = base64::engine::general_purpose::STANDARD
-                    .decode(ckpt_b64)
-                    .or_else(|_| hex::decode(ckpt_b64))
+            // Check both the signed_ark_tx and all checkpoint_txs for CLTV nLockTime.
+            // The nLockTime may be on the ark tx (virtual tx spending via CLTV path)
+            // or on the checkpoint tx (anchoring the CLTV spend on-chain).
+            let mut all_psbts: Vec<&str> = vec![&req.signed_ark_tx];
+            all_psbts.extend(req.checkpoint_txs.iter().map(|s| s.as_str()));
+
+            for psbt_b64 in all_psbts {
+                let psbt_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(psbt_b64)
+                    .or_else(|_| hex::decode(psbt_b64))
                     .ok();
-                if let Some(ref bytes) = ckpt_bytes {
+                if let Some(ref bytes) = psbt_bytes {
                     if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(bytes) {
                         let nlocktime = psbt.unsigned_tx.lock_time.to_consensus_u32();
                         // nLockTime in range [1, 500_000_000) is a block height.
