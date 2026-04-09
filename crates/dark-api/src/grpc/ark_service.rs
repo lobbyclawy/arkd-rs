@@ -545,15 +545,9 @@ impl ArkServiceTrait for ArkGrpcService {
         // Helper: extract topic list from topic-bearing events
         fn event_topics(event: &RoundEvent) -> Vec<String> {
             match &event.event {
-                Some(crate::proto::ark_v1::round_event::Event::TreeNonces(e)) => {
-                    e.topic.clone()
-                }
-                Some(crate::proto::ark_v1::round_event::Event::TreeTx(e)) => {
-                    e.topic.clone()
-                }
-                Some(crate::proto::ark_v1::round_event::Event::TreeSignature(e)) => {
-                    e.topic.clone()
-                }
+                Some(crate::proto::ark_v1::round_event::Event::TreeNonces(e)) => e.topic.clone(),
+                Some(crate::proto::ark_v1::round_event::Event::TreeTx(e)) => e.topic.clone(),
+                Some(crate::proto::ark_v1::round_event::Event::TreeSignature(e)) => e.topic.clone(),
                 Some(crate::proto::ark_v1::round_event::Event::BatchFailed(_)) => {
                     // BatchFailed is always broadcast to all subscribers.
                     vec![]
@@ -897,8 +891,7 @@ impl ArkServiceTrait for ArkGrpcService {
                                 .decode(ckpt_b64)
                                 .or_else(|_| hex::decode(ckpt_b64))
                                 .ok()?;
-                            let ckpt_psbt =
-                                bitcoin::psbt::Psbt::deserialize(&ckpt_bytes).ok()?;
+                            let ckpt_psbt = bitcoin::psbt::Psbt::deserialize(&ckpt_bytes).ok()?;
                             // The checkpoint tx's first input spends the user's VTXO
                             let first_input = ckpt_psbt.unsigned_tx.input.first()?;
                             let txid = first_input.previous_output.txid.to_string();
@@ -1334,9 +1327,7 @@ impl ArkServiceTrait for ArkGrpcService {
         {
             // Parse the proof PSBT to extract input outpoints
             use base64::Engine;
-            if let Ok(bytes) =
-                base64::engine::general_purpose::STANDARD.decode(&intent.proof)
-            {
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&intent.proof) {
                 if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
                     for inp in &psbt.unsigned_tx.input {
                         query_outpoints.push(format!(
@@ -1515,10 +1506,11 @@ impl ArkServiceTrait for ArkGrpcService {
                 inputs.iter().map(|inp| inp.outpoint.clone()).collect();
             match self.core.get_vtxos(&outpoints).await {
                 Ok(db_vtxos) => {
-                    let db_map: std::collections::HashMap<String, &dark_core::domain::Vtxo> = db_vtxos
-                        .iter()
-                        .map(|v| (format!("{}:{}", v.outpoint.txid, v.outpoint.vout), v))
-                        .collect();
+                    let db_map: std::collections::HashMap<String, &dark_core::domain::Vtxo> =
+                        db_vtxos
+                            .iter()
+                            .map(|v| (format!("{}:{}", v.outpoint.txid, v.outpoint.vout), v))
+                            .collect();
                     for inp in &mut inputs {
                         let key = format!("{}:{}", inp.outpoint.txid, inp.outpoint.vout);
                         if let Some(db_vtxo) = db_map.get(&key) {
@@ -2633,4 +2625,3 @@ mod tests {
         }
     }
 }
-

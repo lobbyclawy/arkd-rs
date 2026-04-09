@@ -189,6 +189,8 @@ pub enum ArkEvent {
     TreeNoncesCollected {
         /// Round identifier
         round_id: String,
+        /// Aggregated nonces per txid (txid → hex-encoded AggNonce).
+        aggregated_nonces: std::collections::HashMap<String, String>,
     },
 
     /// All cosigners have submitted their partial signatures.
@@ -209,6 +211,8 @@ pub enum ArkEvent {
         cosigners: Vec<String>,
         /// Maps output index → child txid (for tree structure)
         children: std::collections::HashMap<u32, String>,
+        /// 0 = vtxo tree, 1 = connector tree (Go arkd parity)
+        batch_index: i32,
     },
 
     /// Tree signing phase has started — cosigners should submit nonces.

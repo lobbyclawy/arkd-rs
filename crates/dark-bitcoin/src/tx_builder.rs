@@ -468,10 +468,7 @@ impl LocalTxBuilder {
             .map_err(|e| format!("Failed to derive connector address: {e}"))?
             .to_string();
 
-        let num_connectors: usize = intents
-            .iter()
-            .map(|i| i.num_forfeitable_inputs)
-            .sum();
+        let num_connectors: usize = intents.iter().map(|i| i.num_forfeitable_inputs).sum();
 
         // In Go, connector amount comes from `BuildConnectorOutput` which uses
         // the connector tree leaf amounts summed up. For simplicity, we use
@@ -920,7 +917,10 @@ mod tests {
     }
 
     fn make_intent(id: &str, receivers: Vec<ReceiverInput>) -> IntentInput {
-        let num_offchain = receivers.iter().filter(|r| r.onchain_address.is_empty()).count();
+        let num_offchain = receivers
+            .iter()
+            .filter(|r| r.onchain_address.is_empty())
+            .count();
         IntentInput {
             id: id.to_string(),
             receivers: receivers.clone(),

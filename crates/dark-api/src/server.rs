@@ -495,11 +495,12 @@ impl Server {
                                 tx,
                                 cosigners,
                                 children,
+                                batch_index,
                             } => Some(RoundEvent {
                                 event: Some(round_event::Event::TreeTx(TreeTxEvent {
                                     id: round_id.clone(),
                                     topic: cosigners.clone(),
-                                    batch_index: 0, // vtxo tree
+                                    batch_index: *batch_index,
                                     txid: txid.clone(),
                                     tx: tx.clone(),
                                     children: children
@@ -540,6 +541,17 @@ impl Server {
                                     })),
                                 })
                             }
+                            dark_core::domain::ArkEvent::TreeNoncesCollected {
+                                round_id,
+                                aggregated_nonces,
+                            } => Some(RoundEvent {
+                                event: Some(round_event::Event::TreeNoncesAggregated(
+                                    TreeNoncesAggregatedEvent {
+                                        id: round_id.clone(),
+                                        tree_nonces: aggregated_nonces.clone(),
+                                    },
+                                )),
+                            }),
                             _ => None,
                         };
 
@@ -556,6 +568,9 @@ impl Server {
                                     "TreeSigningStarted"
                                 }
                                 Some(round_event::Event::TreeNonces(_)) => "TreeNonces",
+                                Some(round_event::Event::TreeNoncesAggregated(_)) => {
+                                    "TreeNoncesAggregated"
+                                }
                                 _ => "Other",
                             };
                             let subs = broker.publish(event);

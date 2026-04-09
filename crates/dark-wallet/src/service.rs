@@ -157,6 +157,36 @@ impl WalletService for WalletServiceImpl {
     }
 
     async fn broadcast_transaction(&self, txs: Vec<String>) -> ArkResult<String> {
+        if txs.len() > 1 {
+            // Package broadcast: use Esplora/Chopsticks /txs/package endpoint.
+            // This handles TRUC v3 parent+child packages where the child is 0-fee.
+            let esplora_url = self.manager.config().esplora_url();
+            let url = format!("{}/txs/package", esplora_url.trim_end_matches('/'));
+            let resp = reqwest::Client::new()
+                .post(&url)
+                .json(&txs)
+                .send()
+                .await
+                .map_err(|e| map_wallet_err(format!("Package broadcast HTTP error: {e}")))?;
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(map_wallet_err(format!("Package broadcast failed: {body}")));
+            }
+            let last_hex = txs.last().unwrap();
+            let tx_bytes =
+                hex::decode(last_hex).map_err(|e| map_wallet_err(format!("Invalid hex: {e}")))?;
+            let tx: bitcoin::Transaction = bitcoin::consensus::deserialize(&tx_bytes)
+                .map_err(|e| map_wallet_err(format!("Invalid tx: {e}")))?;
+            let txid = tx.compute_txid().to_string();
+            info!(%txid, tx_count = txs.len(), "Broadcast transaction package");
+            // Mine a regtest block so the package txs are confirmed and
+            // Esplora indexes the spent outputs.
+            if self.manager.config().network == bitcoin::Network::Regtest {
+                self.manager.mine_regtest_block_public().await;
+            }
+            return Ok(txid);
+        }
+
         let mut last_txid = String::new();
         for raw_hex in &txs {
             let tx_bytes = hex::decode(raw_hex)

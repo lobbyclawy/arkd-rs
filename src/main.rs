@@ -155,7 +155,13 @@ async fn main() -> Result<()> {
     let scanner: Arc<dyn dark_core::ports::BlockchainScanner> =
         if let Some(ref esplora_url) = config.esplora_url {
             info!(url = %esplora_url, "Starting EsploraScanner for on-chain monitoring");
-            let scanner = Arc::new(dark_scanner::EsploraScanner::new(esplora_url, 30));
+            // Use a short poll interval on regtest for faster fraud detection
+            let poll_secs = if file_config.bitcoin.network.as_deref() == Some("regtest") {
+                1
+            } else {
+                30
+            };
+            let scanner = Arc::new(dark_scanner::EsploraScanner::new(esplora_url, poll_secs));
             Arc::clone(&scanner).start_polling();
             scanner
         } else {
@@ -186,9 +192,7 @@ async fn main() -> Result<()> {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| {
                     std::env::var("HOME")
-                        .map(|h| {
-                            std::path::PathBuf::from(h).join(".local/share/dark/wallet.db")
-                        })
+                        .map(|h| std::path::PathBuf::from(h).join(".local/share/dark/wallet.db"))
                         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/dark-wallet.db"))
                 });
 
@@ -305,6 +309,10 @@ async fn main() -> Result<()> {
             .vtxo_expiry_secs
             .unwrap_or(exit_delay as i64),
         vtxo_expiry_blocks: file_config.ark.vtxo_expiry_blocks,
+        explorer_url: config
+            .esplora_url
+            .clone()
+            .unwrap_or_else(|| "http://localhost:3000".to_string()),
         ..Default::default()
     };
 

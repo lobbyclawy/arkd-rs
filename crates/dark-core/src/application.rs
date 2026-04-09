@@ -473,7 +473,11 @@ impl ArkService {
                 Some(c) if !c.is_empty() => c,
                 _ => continue,
             };
-            let round = match self.round_repo.get_round_by_commitment_txid(commit_txid).await {
+            let round = match self
+                .round_repo
+                .get_round_by_commitment_txid(commit_txid)
+                .await
+            {
                 Ok(Some(r)) => r,
                 _ => continue,
             };
@@ -498,7 +502,11 @@ impl ArkService {
 
                 // Find P2A anchor output
                 let p2a_script = bitcoin::ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73]);
-                let anchor_vout = match raw_tx.output.iter().position(|o| o.script_pubkey == p2a_script) {
+                let anchor_vout = match raw_tx
+                    .output
+                    .iter()
+                    .position(|o| o.script_pubkey == p2a_script)
+                {
                     Some(v) => v,
                     None => continue,
                 };
@@ -518,7 +526,7 @@ impl ArkService {
                     }],
                     output: vec![bitcoin::TxOut {
                         value: bitcoin::Amount::ZERO,
-                        script_pubkey: bitcoin::ScriptBuf::new_op_return(&[]),
+                        script_pubkey: bitcoin::ScriptBuf::new_op_return([]),
                     }],
                 };
                 let child_hex = bitcoin::consensus::encode::serialize_hex(&child_tx);
@@ -529,8 +537,8 @@ impl ArkService {
                     return;
                 }
                 let pkg_url = format!("{}/txs/package", esplora_url);
-                let pkg_body = serde_json::to_string(&vec![&parent_hex, &child_hex])
-                    .unwrap_or_default();
+                let pkg_body =
+                    serde_json::to_string(&vec![&parent_hex, &child_hex]).unwrap_or_default();
 
                 match reqwest::Client::new()
                     .post(&pkg_url)
@@ -1064,8 +1072,10 @@ impl ArkService {
             match (old_txid, new_txid) {
                 (Some(old), Some(new)) if old != new => {
                     info!(old_txid = %old, new_txid = %new, "Patching vtxo tree and connector tree to new commitment txid after fee input");
-                    let vtxo_tree = Self::patch_vtxo_tree_commitment_txid(&result.vtxo_tree, &old, &new);
-                    let connectors = Self::patch_vtxo_tree_commitment_txid(&result.connectors, &old, &new);
+                    let vtxo_tree =
+                        Self::patch_vtxo_tree_commitment_txid(&result.vtxo_tree, &old, &new);
+                    let connectors =
+                        Self::patch_vtxo_tree_commitment_txid(&result.connectors, &old, &new);
                     (vtxo_tree, connectors)
                 }
                 _ => (result.vtxo_tree.clone(), result.connectors.clone()),
@@ -1724,10 +1734,10 @@ impl ArkService {
                 }
 
                 let (vtxo_txid, vtxo_vout) = if let Some(leaf) = leaf_nodes.get(vtxo_idx as usize) {
-                        (leaf.txid.clone(), 0u32)
-                    } else {
-                        (commitment_txid.clone(), vtxo_idx)
-                    };
+                    (leaf.txid.clone(), 0u32)
+                } else {
+                    (commitment_txid.clone(), vtxo_idx)
+                };
 
                 let mut vtxo = Vtxo::new(
                     VtxoOutpoint::new(vtxo_txid, vtxo_vout),
@@ -1798,10 +1808,7 @@ impl ArkService {
                 {
                     warn!(error = %e, "Failed to settle intent input VTXOs (non-fatal)");
                 } else {
-                    info!(
-                        count = spend_list.len(),
-                        "Settled intent input VTXOs"
-                    );
+                    info!(count = spend_list.len(), "Settled intent input VTXOs");
                 }
             }
         }
@@ -2060,9 +2067,7 @@ impl ArkService {
                 .vtxo_tree
                 .iter()
                 .filter(|n| !n.tx.is_empty())
-                .flat_map(|n| {
-                    Self::extract_cosigners_from_psbt_b64(&n.tx).unwrap_or_default()
-                })
+                .flat_map(|n| Self::extract_cosigners_from_psbt_b64(&n.tx).unwrap_or_default())
                 .filter(|pk| !pk.is_empty())
                 .collect();
 
@@ -3664,7 +3669,10 @@ impl ArkService {
         if round.is_none() {
             // Check last completed round (fast path)
             if let Some(last) = self.last_completed_round.read().await.as_ref() {
-                if self.find_forfeit_tx_for_vtxo(vtxo, &last.forfeit_txs).is_ok() {
+                if self
+                    .find_forfeit_tx_for_vtxo(vtxo, &last.forfeit_txs)
+                    .is_ok()
+                {
                     round = Some(last.clone());
                 }
             }
@@ -3751,35 +3759,24 @@ impl ArkService {
                     // Sign each input with the ASP's key (taproot key-path)
                     let asp_sk_bytes = self.signer.get_secret_key_bytes().await?;
                     let secp = bitcoin::secp256k1::Secp256k1::new();
-                    let asp_sk =
-                        bitcoin::secp256k1::SecretKey::from_slice(&asp_sk_bytes)
-                            .map_err(|e| ArkError::Internal(format!("Invalid ASP key: {e}")))?;
-                    let asp_kp =
-                        bitcoin::secp256k1::Keypair::from_secret_key(&secp, &asp_sk);
+                    let asp_sk = bitcoin::secp256k1::SecretKey::from_slice(&asp_sk_bytes)
+                        .map_err(|e| ArkError::Internal(format!("Invalid ASP key: {e}")))?;
+                    let asp_kp = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &asp_sk);
                     // Tweak the keypair for Taproot key-path spending (no script tree)
                     use bitcoin::key::TapTweak as _;
-                    let asp_kp_tweaked = asp_kp
-                        .tap_tweak(&secp, None)
-                        .to_inner();
+                    let asp_kp_tweaked = asp_kp.tap_tweak(&secp, None).to_inner();
 
                     // We need the commitment tx output to compute the sighash
                     // for the connector tx's input. Add witness_utxo from commitment tx.
                     if psbt.inputs[0].witness_utxo.is_none() {
                         if let Ok(ct_bytes) =
-                            base64::engine::general_purpose::STANDARD
-                                .decode(&round.commitment_tx)
+                            base64::engine::general_purpose::STANDARD.decode(&round.commitment_tx)
                         {
-                            if let Ok(ct_psbt) =
-                                bitcoin::psbt::Psbt::deserialize(&ct_bytes)
-                            {
-                                let prev_vout = psbt.unsigned_tx.input[0]
-                                    .previous_output
-                                    .vout as usize;
-                                if let Some(txout) =
-                                    ct_psbt.unsigned_tx.output.get(prev_vout)
-                                {
-                                    psbt.inputs[0].witness_utxo =
-                                        Some(txout.clone());
+                            if let Ok(ct_psbt) = bitcoin::psbt::Psbt::deserialize(&ct_bytes) {
+                                let prev_vout =
+                                    psbt.unsigned_tx.input[0].previous_output.vout as usize;
+                                if let Some(txout) = ct_psbt.unsigned_tx.output.get(prev_vout) {
+                                    psbt.inputs[0].witness_utxo = Some(txout.clone());
                                 }
                             }
                         }
@@ -3788,17 +3785,15 @@ impl ArkService {
                     // Attempt taproot key-path signing
                     if let Some(ref utxo) = psbt.inputs[0].witness_utxo {
                         let prevouts = vec![utxo.clone()];
-                        let mut cache =
-                            bitcoin::sighash::SighashCache::new(&psbt.unsigned_tx);
+                        let mut cache = bitcoin::sighash::SighashCache::new(&psbt.unsigned_tx);
                         if let Ok(sighash) = cache.taproot_key_spend_signature_hash(
                             0,
                             &bitcoin::sighash::Prevouts::All(&prevouts),
                             bitcoin::TapSighashType::Default,
                         ) {
                             use bitcoin::hashes::Hash;
-                            let msg = bitcoin::secp256k1::Message::from_digest(
-                                sighash.to_byte_array(),
-                            );
+                            let msg =
+                                bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array());
                             let sig = secp.sign_schnorr(&msg, &asp_kp_tweaked);
                             // Set tap_key_sig and finalize the input
                             let tap_sig = bitcoin::taproot::Signature {
@@ -3808,15 +3803,12 @@ impl ArkService {
                             psbt.inputs[0].tap_key_sig = Some(tap_sig);
                             // Finalize: set final_script_witness from the signature
                             psbt.inputs[0].final_script_witness =
-                                Some(bitcoin::Witness::from_slice(&[
-                                    tap_sig.serialize(),
-                                ]));
+                                Some(bitcoin::Witness::from_slice(&[tap_sig.serialize()]));
                         }
                     }
 
                     let signed_tx = psbt.extract_tx_unchecked_fee_rate();
-                    let tx_hex =
-                        hex::encode(bitcoin::consensus::serialize(&signed_tx));
+                    let tx_hex = hex::encode(bitcoin::consensus::serialize(&signed_tx));
                     signed_connector_hexes.push(tx_hex);
                 }
             }
@@ -3826,17 +3818,11 @@ impl ArkService {
         let forfeit_tx_str = self.find_forfeit_tx_for_vtxo(vtxo, &round.forfeit_txs)?;
 
         // Sign the forfeit tx (connector input needs ASP signature).
-        let signed_tx_hex = match self
-            .wallet
-            .sign_transaction(&forfeit_tx_str, true)
-            .await
-        {
+        let signed_tx_hex = match self.wallet.sign_transaction(&forfeit_tx_str, true).await {
             Ok(signed) => {
                 // The wallet returns a signed PSBT or hex. Extract raw tx.
                 use base64::Engine;
-                if let Ok(psbt_bytes) =
-                    base64::engine::general_purpose::STANDARD.decode(&signed)
-                {
+                if let Ok(psbt_bytes) = base64::engine::general_purpose::STANDARD.decode(&signed) {
                     if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&psbt_bytes) {
                         hex::encode(bitcoin::consensus::serialize(
                             &psbt.extract_tx_unchecked_fee_rate(),
@@ -3863,11 +3849,7 @@ impl ArkService {
         let mut package_txs: Vec<String> = signed_connector_hexes;
         package_txs.push(signed_tx_hex.clone());
 
-        match self
-            .wallet
-            .broadcast_transaction(package_txs)
-            .await
-        {
+        match self.wallet.broadcast_transaction(package_txs).await {
             Ok(txid) => {
                 info!(
                     vtxo = %outpoint_str,
@@ -5669,9 +5651,7 @@ impl ArkService {
                         ArkError::Validation(format!("Forfeit tx {idx}: invalid format: {e}"))
                     })?;
                     deserialize(&tx_bytes).map_err(|e| {
-                        ArkError::Validation(format!(
-                            "Forfeit tx {idx}: invalid transaction: {e}"
-                        ))
+                        ArkError::Validation(format!("Forfeit tx {idx}: invalid transaction: {e}"))
                     })?
                 }
             };
@@ -5751,7 +5731,11 @@ impl ArkService {
                 // Try hex-encoded raw transaction
                 if let Ok(raw) = hex::decode(&connector_node.tx) {
                     if let Ok(ctx) = deserialize::<bitcoin::Transaction>(&raw) {
-                        amount = ctx.output.get(conn_vout).map(|o| o.value.to_sat()).unwrap_or(0);
+                        amount = ctx
+                            .output
+                            .get(conn_vout)
+                            .map(|o| o.value.to_sat())
+                            .unwrap_or(0);
                     }
                 }
                 // Try base64-encoded PSBT
@@ -5761,8 +5745,12 @@ impl ArkService {
                         &connector_node.tx,
                     ) {
                         if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&psbt_bytes) {
-                            amount = psbt.unsigned_tx.output.get(conn_vout)
-                                .map(|o| o.value.to_sat()).unwrap_or(0);
+                            amount = psbt
+                                .unsigned_tx
+                                .output
+                                .get(conn_vout)
+                                .map(|o| o.value.to_sat())
+                                .unwrap_or(0);
                         }
                     }
                 }
@@ -5793,86 +5781,88 @@ impl ArkService {
 
             // Key-path signature verification (skip for script-path spends
             // and partially-signed PSBTs without extracted witnesses).
-            if !is_script_path && sig_bytes.map_or(false, |s| s.len() >= 64) {
-            let sig_bytes = sig_bytes.unwrap();
-            let schnorr_sig = bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_bytes[..64])
+            if !is_script_path && sig_bytes.is_some_and(|s| s.len() >= 64) {
+                let sig_bytes = sig_bytes.unwrap();
+                let schnorr_sig = bitcoin::secp256k1::schnorr::Signature::from_slice(
+                    &sig_bytes[..64],
+                )
                 .map_err(|e| {
                     ArkError::Validation(format!(
                         "Forfeit tx {idx}: invalid Schnorr signature: {e}"
                     ))
                 })?;
 
-            // Get the VTXO owner's x-only public key.
-            let vtxo_pubkey = vtxo.tap_key().ok_or_else(|| {
-                ArkError::Validation(format!(
-                    "Forfeit tx {idx}: VTXO has invalid pubkey '{}'",
-                    vtxo.pubkey
-                ))
-            })?;
+                // Get the VTXO owner's x-only public key.
+                let vtxo_pubkey = vtxo.tap_key().ok_or_else(|| {
+                    ArkError::Validation(format!(
+                        "Forfeit tx {idx}: VTXO has invalid pubkey '{}'",
+                        vtxo.pubkey
+                    ))
+                })?;
 
-            // Build prevouts for sighash computation.
-            let vtxo_script = bitcoin::ScriptBuf::new_p2tr_tweaked(
-                bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(vtxo_pubkey),
-            );
-            let vtxo_txout = bitcoin::TxOut {
-                value: bitcoin::Amount::from_sat(vtxo_amount),
-                script_pubkey: vtxo_script,
-            };
-
-            // Build connector prevout (use ASP script as connector script).
-            let connector_txout = bitcoin::TxOut {
-                value: bitcoin::Amount::from_sat(connector_amount),
-                script_pubkey: asp_script.clone(),
-            };
-
-            // Order prevouts to match input order.
-            let prevouts_vec = if vtxo_idx == 0 {
-                vec![vtxo_txout, connector_txout]
-            } else {
-                vec![connector_txout, vtxo_txout]
-            };
-
-            // Only verify signature if we have valid connector amount (parsed successfully).
-            if connector_amount > 0 {
-                let mut cache = SighashCache::new(&tx);
-                let sighash_type = if sig_bytes.len() == 65 {
-                    // Explicit sighash type in the last byte.
-                    match sig_bytes[64] {
-                        0x00 | 0x01 => TapSighashType::Default,
-                        0x02 => TapSighashType::NonePlusAnyoneCanPay,
-                        0x03 => TapSighashType::SinglePlusAnyoneCanPay,
-                        0x81 => TapSighashType::AllPlusAnyoneCanPay,
-                        _ => TapSighashType::Default,
-                    }
-                } else {
-                    TapSighashType::Default
+                // Build prevouts for sighash computation.
+                let vtxo_script = bitcoin::ScriptBuf::new_p2tr_tweaked(
+                    bitcoin::key::TweakedPublicKey::dangerous_assume_tweaked(vtxo_pubkey),
+                );
+                let vtxo_txout = bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(vtxo_amount),
+                    script_pubkey: vtxo_script,
                 };
 
-                match cache.taproot_key_spend_signature_hash(
-                    vtxo_idx,
-                    &Prevouts::All(&prevouts_vec),
-                    sighash_type,
-                ) {
-                    Ok(sighash) => {
-                        let digest: [u8; 32] = sighash.to_byte_array();
-                        let msg = Message::from_digest(digest);
-                        if secp
-                            .verify_schnorr(&schnorr_sig, &msg, &vtxo_pubkey)
-                            .is_err()
-                        {
+                // Build connector prevout (use ASP script as connector script).
+                let connector_txout = bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(connector_amount),
+                    script_pubkey: asp_script.clone(),
+                };
+
+                // Order prevouts to match input order.
+                let prevouts_vec = if vtxo_idx == 0 {
+                    vec![vtxo_txout, connector_txout]
+                } else {
+                    vec![connector_txout, vtxo_txout]
+                };
+
+                // Only verify signature if we have valid connector amount (parsed successfully).
+                if connector_amount > 0 {
+                    let mut cache = SighashCache::new(&tx);
+                    let sighash_type = if sig_bytes.len() == 65 {
+                        // Explicit sighash type in the last byte.
+                        match sig_bytes[64] {
+                            0x00 | 0x01 => TapSighashType::Default,
+                            0x02 => TapSighashType::NonePlusAnyoneCanPay,
+                            0x03 => TapSighashType::SinglePlusAnyoneCanPay,
+                            0x81 => TapSighashType::AllPlusAnyoneCanPay,
+                            _ => TapSighashType::Default,
+                        }
+                    } else {
+                        TapSighashType::Default
+                    };
+
+                    match cache.taproot_key_spend_signature_hash(
+                        vtxo_idx,
+                        &Prevouts::All(&prevouts_vec),
+                        sighash_type,
+                    ) {
+                        Ok(sighash) => {
+                            let digest: [u8; 32] = sighash.to_byte_array();
+                            let msg = Message::from_digest(digest);
+                            if secp
+                                .verify_schnorr(&schnorr_sig, &msg, &vtxo_pubkey)
+                                .is_err()
+                            {
+                                return Err(ArkError::Validation(format!(
+                                    "Forfeit tx {idx}: invalid taproot signature for VTXO {}:{}",
+                                    vtxo_key.0, vtxo_key.1
+                                )));
+                            }
+                        }
+                        Err(e) => {
                             return Err(ArkError::Validation(format!(
-                                "Forfeit tx {idx}: invalid taproot signature for VTXO {}:{}",
-                                vtxo_key.0, vtxo_key.1
+                                "Forfeit tx {idx}: sighash computation failed: {e}"
                             )));
                         }
                     }
-                    Err(e) => {
-                        return Err(ArkError::Validation(format!(
-                            "Forfeit tx {idx}: sighash computation failed: {e}"
-                        )));
-                    }
                 }
-            }
             } // end if !is_script_path
 
             // Validation passed — store the forfeit transaction.
@@ -5888,10 +5878,8 @@ impl ArkService {
 
             // Also persist the forfeit on the round so broadcast_forfeit_tx
             // can find it when reacting to fraud.
-            if let Ok(Some(mut round)) = self
-                .round_repo
-                .get_round_with_id(&effective_batch_id)
-                .await
+            if let Ok(Some(mut round)) =
+                self.round_repo.get_round_with_id(&effective_batch_id).await
             {
                 round.forfeit_txs.push(crate::domain::ForfeitTx {
                     txid: tx.compute_txid().to_string(),

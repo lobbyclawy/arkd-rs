@@ -219,6 +219,127 @@ impl IndexerGrpcService {
             event_receivers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
+
+    /// Ensure the tree node that a checkpoint spends is on-chain.
+    ///
+    /// When the SDK requests a checkpoint PSBT via GetVirtualTxs, it's about to
+    /// broadcast the checkpoint. The checkpoint spends a tree leaf output. If
+    /// the tree leaf isn't on-chain yet, the checkpoint broadcast will fail.
+    /// This method broadcasts the tree node as a package (parent + CPFP child)
+    /// using the Esplora /txs/package endpoint.
+    async fn ensure_checkpoint_parent_onchain(&self, ckpt_b64: &str) {
+        use base64::Engine;
+
+        // Parse checkpoint PSBT to find its inputs
+        let ckpt_bytes = match base64::engine::general_purpose::STANDARD.decode(ckpt_b64) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        let ckpt_psbt = match bitcoin::psbt::Psbt::deserialize(&ckpt_bytes) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        for inp in &ckpt_psbt.unsigned_tx.input {
+            let parent_txid = inp.previous_output.txid.to_string();
+            let _parent_vout = inp.previous_output.vout;
+
+            // Check if this input references a tree node from a round
+            let rounds = self.core.list_rounds(0, 100).await.unwrap_or_default();
+            for round in &rounds {
+                for node in &round.vtxo_tree {
+                    if node.txid != parent_txid || node.tx.is_empty() {
+                        continue;
+                    }
+
+                    // Check if it's already on-chain
+                    if let Ok(true) = self.core.scanner_is_tx_confirmed(&parent_txid).await {
+                        return; // Already on-chain
+                    }
+
+                    // Extract raw tx from the tree node PSBT
+                    let node_bytes =
+                        match base64::engine::general_purpose::STANDARD.decode(&node.tx) {
+                            Ok(b) => b,
+                            Err(_) => continue,
+                        };
+                    let node_psbt = match bitcoin::psbt::Psbt::deserialize(&node_bytes) {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    let raw_tx = match node_psbt.extract_tx() {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    let parent_hex = bitcoin::consensus::encode::serialize_hex(&raw_tx);
+                    let parent_tx_id = raw_tx.compute_txid();
+
+                    // Find P2A anchor output
+                    let p2a_script = bitcoin::ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73]);
+                    let anchor_vout = match raw_tx
+                        .output
+                        .iter()
+                        .position(|o| o.script_pubkey == p2a_script)
+                    {
+                        Some(v) => v,
+                        None => continue,
+                    };
+
+                    // Build minimal CPFP child spending the anchor
+                    let child_tx = bitcoin::Transaction {
+                        version: bitcoin::transaction::Version::TWO,
+                        lock_time: bitcoin::absolute::LockTime::ZERO,
+                        input: vec![bitcoin::TxIn {
+                            previous_output: bitcoin::OutPoint {
+                                txid: parent_tx_id,
+                                vout: anchor_vout as u32,
+                            },
+                            script_sig: bitcoin::ScriptBuf::new(),
+                            sequence: bitcoin::Sequence::MAX,
+                            witness: bitcoin::Witness::from_slice(&[&[]]),
+                        }],
+                        output: vec![bitcoin::TxOut {
+                            value: bitcoin::Amount::ZERO,
+                            script_pubkey: bitcoin::ScriptBuf::new_op_return([]),
+                        }],
+                    };
+                    let child_hex = bitcoin::consensus::encode::serialize_hex(&child_tx);
+
+                    // Broadcast via /txs/package
+                    let esplora_url = &self.core.config().explorer_url;
+                    if esplora_url.is_empty() {
+                        return;
+                    }
+                    let pkg_url = format!("{}/txs/package", esplora_url);
+                    let pkg_body =
+                        serde_json::to_string(&vec![&parent_hex, &child_hex]).unwrap_or_default();
+
+                    let send_result: Result<reqwest::Response, reqwest::Error> =
+                        reqwest::Client::new()
+                            .post(&pkg_url)
+                            .header("Content-Type", "application/json")
+                            .body(pkg_body)
+                            .send()
+                            .await;
+                    match send_result {
+                        Ok(resp) if resp.status().is_success() => {
+                            info!(
+                                tree_txid = %parent_txid,
+                                "Broadcast tree node package (checkpoint parent) via GetVirtualTxs"
+                            );
+                        }
+                        _ => {
+                            tracing::debug!(
+                                tree_txid = %parent_txid,
+                                "Tree node package broadcast attempt (may already be on-chain)"
+                            );
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -528,7 +649,12 @@ impl IndexerServiceTrait for IndexerGrpcService {
         // Pre-compute pending input VTXO IDs for pending_only filter.
         // These are outpoints used as inputs in non-finalized offchain txs.
         let pending_input_ids: std::collections::HashSet<String> = if req.pending_only {
-            let pending_txs = self.core.get_offchain_tx_repo().get_pending().await.unwrap_or_default();
+            let pending_txs = self
+                .core
+                .get_offchain_tx_repo()
+                .get_pending()
+                .await
+                .unwrap_or_default();
             pending_txs
                 .iter()
                 .flat_map(|tx| tx.inputs.iter().map(|inp| inp.vtxo_id.clone()))
@@ -726,7 +852,9 @@ impl IndexerServiceTrait for IndexerGrpcService {
                                     parent_map.insert(node.txid.clone(), parent_txid);
                                 }
                             }
-                            let empty_tx_nodes: Vec<_> = round.vtxo_tree.iter()
+                            let empty_tx_nodes: Vec<_> = round
+                                .vtxo_tree
+                                .iter()
                                 .filter(|n| n.tx.is_empty())
                                 .map(|n| &n.txid[..8.min(n.txid.len())])
                                 .collect();
@@ -882,6 +1010,26 @@ impl IndexerServiceTrait for IndexerGrpcService {
                 found = txs.len(),
                 "GetVirtualTxs: searched rounds for tree node PSBTs"
             );
+            // DEBUG: log each found PSBT's bitcoin txid and whether it's finalizable
+            for (idx, psbt_b64) in txs.iter().enumerate() {
+                use base64::Engine;
+                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(psbt_b64) {
+                    if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
+                        let unsigned_txid = psbt.unsigned_tx.compute_txid();
+                        let input_count = psbt.unsigned_tx.input.len();
+                        let has_witness = psbt.inputs.iter().any(|inp| {
+                            inp.final_script_witness.is_some() || inp.tap_key_sig.is_some()
+                        });
+                        info!(
+                            idx,
+                            unsigned_txid = %unsigned_txid,
+                            input_count,
+                            has_witness,
+                            "GetVirtualTxs: PSBT debug"
+                        );
+                    }
+                }
+            }
 
             // Also search offchain tx PSBTs (for preconfirmed VTXOs).
             // These are stored when SubmitTx/FinalizeTx are called.
@@ -913,6 +1061,11 @@ impl IndexerServiceTrait for IndexerGrpcService {
                                 if remaining.contains(txid.as_str()) {
                                     txs.push(ckpt.clone());
                                     matched_this_otx = true;
+
+                                    // Ensure the tree node that the checkpoint spends
+                                    // is on-chain. The SDK's Unroll will broadcast this
+                                    // checkpoint next, and its input must be available.
+                                    self.ensure_checkpoint_parent_onchain(ckpt).await;
                                 }
                             }
                         }
@@ -940,9 +1093,7 @@ impl IndexerServiceTrait for IndexerGrpcService {
                                 otx_id = %otx.id,
                                 "GetVirtualTxs: ark tx matched — looking for preconfirmed VTXOs to mark unrolled"
                             );
-                            if let Ok((spendable, spent)) =
-                                self.core.vtxo_repo().list_all().await
-                            {
+                            if let Ok((spendable, spent)) = self.core.vtxo_repo().list_all().await {
                                 info!(
                                     spendable_count = spendable.len(),
                                     spent_count = spent.len(),
@@ -952,16 +1103,23 @@ impl IndexerServiceTrait for IndexerGrpcService {
                                 // have been marked as "spent" (in the virtual sense) by
                                 // a subsequent offchain tx while the preconfirmed field
                                 // and ark_txid still match.
-                                let all_vtxos: Vec<_> = spendable.iter().chain(spent.iter()).collect();
+                                let all_vtxos: Vec<_> =
+                                    spendable.iter().chain(spent.iter()).collect();
                                 let to_mark: Vec<_> = all_vtxos
                                     .iter()
                                     .filter(|v| v.preconfirmed && v.ark_txid == otx.id)
                                     .collect();
                                 if to_mark.is_empty() {
                                     // Debug: log all preconfirmed VTXOs and their ark_txids
-                                    let preconfirmed: Vec<_> = all_vtxos.iter()
+                                    let preconfirmed: Vec<_> = all_vtxos
+                                        .iter()
                                         .filter(|v| v.preconfirmed)
-                                        .map(|v| format!("outpoint={}:{} ark_txid={}", v.outpoint.txid, v.outpoint.vout, v.ark_txid))
+                                        .map(|v| {
+                                            format!(
+                                                "outpoint={}:{} ark_txid={}",
+                                                v.outpoint.txid, v.outpoint.vout, v.ark_txid
+                                            )
+                                        })
                                         .collect();
                                     info!(
                                         otx_id = %otx.id,

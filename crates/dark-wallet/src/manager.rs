@@ -506,6 +506,11 @@ impl WalletManager {
         }
     }
 
+    /// Public wrapper for regtest block mining (used by package broadcast).
+    pub async fn mine_regtest_block_public(&self) {
+        self.mine_regtest_block().await;
+    }
+
     /// Sync wallet with the blockchain via Esplora
     pub async fn sync(&self) -> WalletResult<SyncResult> {
         info!("Starting wallet sync");
