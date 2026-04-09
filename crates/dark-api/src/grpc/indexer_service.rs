@@ -1577,6 +1577,77 @@ impl IndexerServiceTrait for IndexerGrpcService {
                                     return;
                                 }
                             }
+                            dark_core::domain::ArkEvent::VtxoSpent {
+                                vtxo_id,
+                                spending_txid,
+                            } => {
+                                let current_scripts = {
+                                    let store = subscriptions.read().await;
+                                    store.get(&sub_id).cloned().unwrap_or_default()
+                                };
+                                if current_scripts.is_empty() {
+                                    continue;
+                                }
+
+                                // Fetch the spent VTXO to check its pubkey
+                                let parts: Vec<&str> = vtxo_id.splitn(2, ':').collect();
+                                if parts.len() != 2 {
+                                    continue;
+                                }
+                                let outpoint = dark_core::VtxoOutpoint::new(
+                                    parts[0].to_string(),
+                                    parts[1].parse().unwrap_or(0),
+                                );
+                                let vtxos = match core.get_vtxos(&[outpoint]).await {
+                                    Ok(v) => v,
+                                    Err(_) => continue,
+                                };
+                                let vtxo = match vtxos.first() {
+                                    Some(v) => v,
+                                    None => continue,
+                                };
+
+                                let p2tr_script = format!("5120{}", vtxo.pubkey);
+                                if !current_scripts
+                                    .iter()
+                                    .any(|s| s == &vtxo.pubkey || s == &p2tr_script)
+                                {
+                                    continue;
+                                }
+
+                                info!(
+                                    subscription_id = %sub_id,
+                                    vtxo_id = %vtxo_id,
+                                    spending_txid = %spending_txid,
+                                    "Matching VtxoSpent event — sending to subscriber"
+                                );
+
+                                let spent_vtxos: Vec<_> = vtxos.iter().map(vtxo_to_proto).collect();
+
+                                let response = GetSubscriptionResponse {
+                                    data: Some(
+                                        crate::proto::ark_v1::get_subscription_response::Data::Event(
+                                            IndexerSubscriptionEvent {
+                                                txid: spending_txid.clone(),
+                                                scripts: vec![vtxo.pubkey.clone()],
+                                                new_vtxos: vec![],
+                                                spent_vtxos,
+                                                tx: String::new(),
+                                                checkpoint_txs: HashMap::new(),
+                                                swept_vtxos: vec![],
+                                            },
+                                        ),
+                                    ),
+                                };
+
+                                if tx.send(Ok(response)).await.is_err() {
+                                    info!(
+                                        subscription_id = %sub_id,
+                                        "Subscriber disconnected — stopping event listener"
+                                    );
+                                    return;
+                                }
+                            }
                             _ => {
                                 // Ignore other events
                             }

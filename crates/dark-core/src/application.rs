@@ -1809,6 +1809,17 @@ impl ArkService {
                     warn!(error = %e, "Failed to settle intent input VTXOs (non-fatal)");
                 } else {
                     info!(count = spend_list.len(), "Settled intent input VTXOs");
+                    // Emit VtxoSpent events so indexer subscriptions can notify
+                    // clients watching these scripts (e.g. NotifyIncomingFunds).
+                    for (outpoint, _) in &spend_list {
+                        let _ = self
+                            .events
+                            .publish_event(ArkEvent::VtxoSpent {
+                                vtxo_id: format!("{}:{}", outpoint.txid, outpoint.vout),
+                                spending_txid: commitment_txid.clone(),
+                            })
+                            .await;
+                    }
                 }
             }
         }
@@ -2408,7 +2419,10 @@ impl ArkService {
                  (collaborative exit without change)"
             );
 
-            // Mark input VTXOs as spent.
+            // Mark input VTXOs as settled (not just spent). settle_vtxos
+            // atomically sets BOTH spent_by AND settled_by, which ensures
+            // react_to_fraud can find the correct round via settled_by even
+            // if spent_by is later overwritten by an offchain tx.
             let spend_list: Vec<(VtxoOutpoint, String)> = ac
                 .intents
                 .iter()
@@ -2425,18 +2439,29 @@ impl ArkService {
             if !spend_list.is_empty() {
                 if let Err(e) = self
                     .vtxo_repo
-                    .spend_vtxos(&spend_list, &ac.commitment_txid)
+                    .settle_vtxos(&spend_list, &ac.commitment_txid)
                     .await
                 {
                     warn!(
                         error = %e,
-                        "Failed to mark input VTXOs as spent (non-fatal, empty-tree auto-complete)"
+                        "Failed to settle input VTXOs (non-fatal, empty-tree auto-complete)"
                     );
                 } else {
                     info!(
                         count = spend_list.len(),
-                        "Marked input VTXOs as spent (empty-tree auto-complete)"
+                        "Settled input VTXOs (empty-tree auto-complete)"
                     );
+                    // Emit VtxoSpent events so indexer subscriptions can notify
+                    // clients watching these scripts (e.g. NotifyIncomingFunds).
+                    for (outpoint, _) in &spend_list {
+                        let _ = self
+                            .events
+                            .publish_event(ArkEvent::VtxoSpent {
+                                vtxo_id: format!("{}:{}", outpoint.txid, outpoint.vout),
+                                spending_txid: ac.commitment_txid.clone(),
+                            })
+                            .await;
+                    }
                 }
             }
 
@@ -2451,8 +2476,19 @@ impl ArkService {
                 }
             }
 
+            // Merge forfeit_txs from the DB: submit_signed_forfeit_txs may
+            // have stored forfeits on the DB round before this auto-complete
+            // runs. The in-memory round_clone doesn't have them, so merge to
+            // avoid losing them when we overwrite below.
+            let mut round_to_persist = ac.round_clone.clone();
+            if let Ok(Some(db_round)) = self.round_repo.get_round_with_id(&ac.round_id).await {
+                if !db_round.forfeit_txs.is_empty() && round_to_persist.forfeit_txs.is_empty() {
+                    round_to_persist.forfeit_txs = db_round.forfeit_txs;
+                }
+            }
+
             // Persist the round (with ended state).
-            if let Err(e) = self.round_repo.add_or_update_round(&ac.round_clone).await {
+            if let Err(e) = self.round_repo.add_or_update_round(&round_to_persist).await {
                 warn!(
                     error = %e,
                     "Failed to persist round (non-fatal, empty-tree auto-complete)"
@@ -2495,6 +2531,28 @@ impl ArkService {
                     timestamp: chrono::Utc::now().timestamp(),
                 })
                 .await?;
+
+            // Release wallet UTXO reservations so the next round can use them.
+            if let Err(e) = self.wallet.release_all_reservations().await {
+                warn!(error = %e, "Failed to release wallet reservations (non-fatal, empty-tree auto-complete)");
+            }
+
+            // Store the completed round so submit_signed_forfeit_txs can
+            // find it as a fallback when forfeits arrive after completion.
+            {
+                let mut last = self.last_completed_round.write().await;
+                *last = Some(round_to_persist);
+            }
+
+            // Auto-start a new round to prevent stalls.
+            match self.start_round().await {
+                Ok(new_round) => {
+                    info!(round_id = %new_round.id, "Auto-started new round after empty-tree auto-complete");
+                }
+                Err(e) => {
+                    debug!(error = %e, "Could not auto-start new round after empty-tree auto-complete (will retry on scheduler tick)");
+                }
+            }
 
             info!(round_id = %ac.round_id, "Empty-tree round auto-complete finished");
         }
@@ -3764,7 +3822,7 @@ impl ArkService {
                     let asp_kp = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &asp_sk);
                     // Tweak the keypair for Taproot key-path spending (no script tree)
                     use bitcoin::key::TapTweak as _;
-                    let asp_kp_tweaked = asp_kp.tap_tweak(&secp, None).to_inner();
+                    let asp_kp_tweaked = asp_kp.tap_tweak(&secp, None).to_keypair();
 
                     // We need the commitment tx output to compute the sighash
                     // for the connector tx's input. Add witness_utxo from commitment tx.
@@ -3808,31 +3866,305 @@ impl ArkService {
                     }
 
                     let signed_tx = psbt.extract_tx_unchecked_fee_rate();
+                    info!(
+                        tx_version = signed_tx.version.0,
+                        "broadcast_forfeit_tx: connector tx version"
+                    );
+                    for (i, inp) in signed_tx.input.iter().enumerate() {
+                        info!(
+                            input_idx = i,
+                            prev_txid = %inp.previous_output.txid,
+                            prev_vout = inp.previous_output.vout,
+                            witness_len = inp.witness.len(),
+                            "broadcast_forfeit_tx: connector tx input"
+                        );
+                    }
+                    for (i, out) in signed_tx.output.iter().enumerate() {
+                        info!(
+                            output_idx = i,
+                            value = out.value.to_sat(),
+                            "broadcast_forfeit_tx: connector tx output"
+                        );
+                    }
                     let tx_hex = hex::encode(bitcoin::consensus::serialize(&signed_tx));
                     signed_connector_hexes.push(tx_hex);
                 }
             }
         }
 
+        info!(
+            connector_count = signed_connector_hexes.len(),
+            commitment_txid = %round.commitment_txid,
+            "broadcast_forfeit_tx: signed connectors"
+        );
+
         // Find the forfeit tx that spends this VTXO
         let forfeit_tx_str = self.find_forfeit_tx_for_vtxo(vtxo, &round.forfeit_txs)?;
 
         // Sign the forfeit tx (connector input needs ASP signature).
-        let signed_tx_hex = match self.wallet.sign_transaction(&forfeit_tx_str, true).await {
-            Ok(signed) => {
-                // The wallet returns a signed PSBT or hex. Extract raw tx.
+        // We request the signed PSBT back (extract_raw = false) so we can
+        // manually finalize the VTXO input before extraction.  BDK's sign()
+        // finalizes inputs it owns (the connector key-path input) but leaves
+        // the VTXO script-path input unfinalized because the signature was
+        // provided by the Go SDK, not by BDK.
+        let signed_tx_hex = match self.wallet.sign_transaction(&forfeit_tx_str, false).await {
+            Ok(signed_psbt_b64) => {
                 use base64::Engine;
-                if let Ok(psbt_bytes) = base64::engine::general_purpose::STANDARD.decode(&signed) {
-                    if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&psbt_bytes) {
-                        hex::encode(bitcoin::consensus::serialize(
-                            &psbt.extract_tx_unchecked_fee_rate(),
+                let psbt_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&signed_psbt_b64)
+                    .map_err(|e| {
+                        ArkError::Internal(format!(
+                            "Failed to decode signed forfeit PSBT: {e}"
                         ))
-                    } else {
-                        signed
+                    })?;
+                let mut psbt =
+                    bitcoin::psbt::Psbt::deserialize(&psbt_bytes).map_err(|e| {
+                        ArkError::Internal(format!(
+                            "Failed to deserialize signed forfeit PSBT: {e}"
+                        ))
+                    })?;
+
+                // The forfeit closure is a 2-of-2 multisig (VTXO owner + ASP).
+                // The Go SDK signed with the owner's key; we must add the ASP's
+                // Taproot script-path signature to complete the multisig.
+                {
+                    let asp_sk_bytes = self.signer.get_secret_key_bytes().await?;
+                    let secp = bitcoin::secp256k1::Secp256k1::new();
+                    let asp_sk = bitcoin::secp256k1::SecretKey::from_slice(&asp_sk_bytes)
+                        .map_err(|e| ArkError::Internal(format!("Invalid ASP key: {e}")))?;
+                    let asp_kp = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &asp_sk);
+                    let asp_xonly = asp_kp.x_only_public_key().0;
+
+                    // Build prevouts once for sighash computation.
+                    let prevouts: Vec<bitcoin::TxOut> = psbt
+                        .inputs
+                        .iter()
+                        .map(|inp| {
+                            inp.witness_utxo.clone().unwrap_or(bitcoin::TxOut {
+                                value: bitcoin::Amount::ZERO,
+                                script_pubkey: bitcoin::ScriptBuf::new(),
+                            })
+                        })
+                        .collect();
+
+                    for input_idx in 0..psbt.inputs.len() {
+                        let input = &psbt.inputs[input_idx];
+                        if input.final_script_witness.is_some()
+                            || input.tap_scripts.is_empty()
+                            || input.tap_script_sigs.is_empty()
+                        {
+                            continue;
+                        }
+
+                        // Find the leaf and add ASP's signature.
+                        let tap_scripts_clone = input.tap_scripts.clone();
+                        for (_cb, (script, leaf_ver)) in &tap_scripts_clone {
+                            let leaf_hash =
+                                bitcoin::taproot::TapLeafHash::from_script(script, *leaf_ver);
+                            let asp_key_for_leaf = (asp_xonly, leaf_hash);
+
+                            if psbt.inputs[input_idx]
+                                .tap_script_sigs
+                                .contains_key(&asp_key_for_leaf)
+                            {
+                                continue;
+                            }
+
+                            let asp_bytes = asp_xonly.serialize();
+                            if !script.as_bytes().windows(32).any(|w| w == asp_bytes) {
+                                continue;
+                            }
+
+                            let mut cache =
+                                bitcoin::sighash::SighashCache::new(&psbt.unsigned_tx);
+                            if let Ok(sighash) = cache.taproot_script_spend_signature_hash(
+                                input_idx,
+                                &bitcoin::sighash::Prevouts::All(&prevouts),
+                                leaf_hash,
+                                bitcoin::TapSighashType::Default,
+                            ) {
+                                use bitcoin::hashes::Hash;
+                                let msg = bitcoin::secp256k1::Message::from_digest(
+                                    sighash.to_byte_array(),
+                                );
+                                let sig = secp.sign_schnorr(&msg, &asp_kp);
+                                let tap_sig = bitcoin::taproot::Signature {
+                                    signature: sig,
+                                    sighash_type: bitcoin::TapSighashType::Default,
+                                };
+                                psbt.inputs[input_idx]
+                                    .tap_script_sigs
+                                    .insert(asp_key_for_leaf, tap_sig);
+                                info!(
+                                    input_idx,
+                                    "Added ASP script-path signature to forfeit VTXO input"
+                                );
+                            }
+                            break;
+                        }
                     }
-                } else {
-                    signed
+                    // Also sign the connector input (key-path) if it hasn't
+                    // been finalized by BDK. BDK doesn't own the connector UTXO
+                    // so it can't sign it.
+                    use bitcoin::key::TapTweak as _;
+                    let asp_kp_tweaked = asp_kp.tap_tweak(&secp, None).to_keypair();
+
+                    for input_idx in 0..psbt.inputs.len() {
+                        let input = &psbt.inputs[input_idx];
+                        // Key-path inputs: no tap_scripts, no tap_script_sigs,
+                        // no final_script_witness yet, but has witness_utxo.
+                        if input.final_script_witness.is_some()
+                            || !input.tap_script_sigs.is_empty()
+                            || !input.tap_scripts.is_empty()
+                            || input.witness_utxo.is_none()
+                        {
+                            continue;
+                        }
+
+                        let mut cache =
+                            bitcoin::sighash::SighashCache::new(&psbt.unsigned_tx);
+                        if let Ok(sighash) = cache.taproot_key_spend_signature_hash(
+                            input_idx,
+                            &bitcoin::sighash::Prevouts::All(&prevouts),
+                            bitcoin::TapSighashType::Default,
+                        ) {
+                            use bitcoin::hashes::Hash;
+                            let msg = bitcoin::secp256k1::Message::from_digest(
+                                sighash.to_byte_array(),
+                            );
+                            let sig = secp.sign_schnorr(&msg, &asp_kp_tweaked);
+                            let tap_sig = bitcoin::taproot::Signature {
+                                signature: sig,
+                                sighash_type: bitcoin::TapSighashType::Default,
+                            };
+                            psbt.inputs[input_idx].final_script_witness =
+                                Some(bitcoin::Witness::from_slice(&[tap_sig.serialize()]));
+                            info!(
+                                input_idx,
+                                "Finalized connector key-path input for forfeit tx"
+                            );
+                        }
+                    }
                 }
+
+                // Finalize Taproot script-path inputs that BDK left unfinalized.
+                // Now that both owner and ASP signatures are present, build the
+                // witness from tap_script_sigs + tap_scripts.
+                for (idx, input) in psbt.inputs.iter_mut().enumerate() {
+                    if input.final_script_witness.is_some() {
+                        // Already finalized (e.g. connector key-path input
+                        // finalized by BDK).
+                        continue;
+                    }
+                    if input.tap_script_sigs.is_empty() || input.tap_scripts.is_empty() {
+                        continue;
+                    }
+
+                    // Build the witness for a Taproot script-path spend:
+                    //   <sig₁> [<sig₂> ...] <script> <control_block>
+                    //
+                    // tap_scripts: BTreeMap<ControlBlock, (ScriptBuf, LeafVersion)>
+                    // tap_script_sigs: BTreeMap<(XOnlyPublicKey, TapLeafHash), Signature>
+                    //
+                    // For a forfeit tx there is one leaf with one signature.
+                    // We pick the first matching (control_block, script) pair
+                    // whose leaf hash appears in tap_script_sigs.
+                    let mut finalized = false;
+                    for (control_block, (script, _leaf_ver)) in &input.tap_scripts {
+                        let leaf_hash =
+                            bitcoin::taproot::TapLeafHash::from_script(script, *_leaf_ver);
+
+                        // Collect signatures for this leaf, ordered by pubkey
+                        // position in the script (reversed, as required by
+                        // OP_CHECKSIGVERIFY/OP_CHECKSIG multisig pattern).
+                        // Extract pubkeys from the script (32-byte pushes).
+                        let script_bytes = script.as_bytes();
+                        let mut pubkeys_in_script: Vec<bitcoin::secp256k1::XOnlyPublicKey> =
+                            Vec::new();
+                        let mut i_byte = 0;
+                        while i_byte < script_bytes.len() {
+                            // 0x20 = push 32 bytes
+                            if script_bytes[i_byte] == 0x20
+                                && i_byte + 33 <= script_bytes.len()
+                            {
+                                if let Ok(pk) =
+                                    bitcoin::secp256k1::XOnlyPublicKey::from_slice(
+                                        &script_bytes[i_byte + 1..i_byte + 33],
+                                    )
+                                {
+                                    pubkeys_in_script.push(pk);
+                                }
+                                i_byte += 33;
+                            } else {
+                                i_byte += 1;
+                            }
+                        }
+
+                        // Collect sigs in REVERSE pubkey order (last pubkey's
+                        // sig first on the stack).
+                        let mut sigs: Vec<Vec<u8>> = Vec::new();
+                        for pk in pubkeys_in_script.iter().rev() {
+                            let key = (*pk, leaf_hash);
+                            if let Some(sig) = input.tap_script_sigs.get(&key) {
+                                sigs.push(sig.serialize().to_vec());
+                            }
+                        }
+
+                        if sigs.is_empty() {
+                            continue;
+                        }
+
+                        // Witness stack: [sig_last_pk, ..., sig_first_pk, script, control_block]
+                        let mut witness = bitcoin::Witness::new();
+                        for sig in &sigs {
+                            witness.push(sig);
+                        }
+                        witness.push(script.as_bytes());
+                        witness.push(control_block.serialize());
+
+                        input.final_script_witness = Some(witness);
+                        // Clear PSBT fields now that the input is finalized.
+                        input.tap_script_sigs.clear();
+                        input.tap_scripts.clear();
+                        input.tap_key_sig = None;
+                        input.tap_internal_key = None;
+                        input.tap_merkle_root = None;
+
+                        info!(
+                            input_idx = idx,
+                            num_sigs = sigs.len(),
+                            "Finalized Taproot script-path PSBT input for forfeit tx"
+                        );
+                        finalized = true;
+                        break;
+                    }
+
+                    if !finalized {
+                        warn!(
+                            input_idx = idx,
+                            tap_script_sigs = input.tap_script_sigs.len(),
+                            tap_scripts = input.tap_scripts.len(),
+                            "Could not finalize Taproot script-path input: \
+                             no matching leaf hash between tap_scripts and tap_script_sigs"
+                        );
+                    }
+                }
+
+                let tx = psbt.extract_tx_unchecked_fee_rate();
+                info!(
+                    forfeit_version = tx.version.0,
+                    forfeit_inputs = tx.input.len(),
+                    forfeit_outputs = tx.output.len(),
+                    "broadcast_forfeit_tx: forfeit tx details"
+                );
+                for (i, inp) in tx.input.iter().enumerate() {
+                    info!(
+                        input_idx = i,
+                        witness_len = inp.witness.len(),
+                        "broadcast_forfeit_tx: forfeit tx input witness"
+                    );
+                }
+                hex::encode(bitcoin::consensus::serialize(&tx))
             }
             Err(e) => {
                 warn!(
@@ -3843,13 +4175,12 @@ impl ArkService {
             }
         };
 
-        // Broadcast the connector + forfeit as a package. TRUC v3 forfeit
-        // txs are 0-fee and require package evaluation where the total
-        // package fee (from the connector tx) covers relay requirements.
+        // Broadcast connectors individually (each has its own fee),
+        // then forfeit + CPFP anchor child as a package.
         let mut package_txs: Vec<String> = signed_connector_hexes;
         package_txs.push(signed_tx_hex.clone());
 
-        match self.wallet.broadcast_transaction(package_txs).await {
+        match self.wallet.broadcast_forfeit_with_anchor(&package_txs).await {
             Ok(txid) => {
                 info!(
                     vtxo = %outpoint_str,

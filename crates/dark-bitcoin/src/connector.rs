@@ -116,7 +116,9 @@ fn build_connector_tx(
         .collect();
 
     Transaction {
-        version: Version::TWO,
+        // TRUC v3 so the forfeit tx (also v3) can use package relay with
+        // this connector as its fee-paying parent.
+        version: Version(3),
         lock_time: LockTime::ZERO,
         input: tx_ins,
         output: tx_outs,

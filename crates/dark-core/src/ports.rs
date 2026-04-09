@@ -100,6 +100,12 @@ pub trait WalletService: Send + Sync {
     ) -> ArkResult<(Vec<TxInput>, u64)>;
     /// Broadcast a transaction
     async fn broadcast_transaction(&self, txs: Vec<String>) -> ArkResult<String>;
+
+    /// Broadcast a forfeit tx package (connector + forfeit) via submitpackage.
+    /// Tolerates partial acceptance (connector accepted but forfeit pending).
+    async fn broadcast_forfeit_with_anchor(&self, txs: &[String]) -> ArkResult<String> {
+        self.broadcast_transaction(txs.to_vec()).await
+    }
     /// Get current fee rate (sat/vB)
     async fn fee_rate(&self) -> ArkResult<u64>;
     /// Get the current block timestamp

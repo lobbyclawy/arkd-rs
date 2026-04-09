@@ -510,12 +510,16 @@ impl LocalTxBuilder {
             outputs.push(bo.clone());
         }
 
-        // Index 1: connector output (if any)
+        // Connector output (if any).
+        // Track whether an on-chain output was inserted before the connector
+        // so connector_vout is computed correctly below.
+        let mut onchain_before_connector = false;
         if connector_amount > 0 {
             // When there's no batch output, we need something at index 0 first.
             // Go puts the first onchain output at index 0 in that case.
             if batch_output.is_none() && !onchain_outputs.is_empty() {
                 outputs.push(onchain_outputs.remove(0));
+                onchain_before_connector = true;
             }
             outputs.push(TxOut {
                 value: Amount::from_sat(connector_amount),
@@ -555,7 +559,15 @@ impl LocalTxBuilder {
         };
 
         // ── Build connector tree ────────────────────────────────────────────
-        let connector_vout = if batch_output.is_some() { 1u32 } else { 0u32 };
+        // The connector output vout depends on what came before it:
+        // - With batch output: batch at 0, connector at 1
+        // - Without batch but with on-chain output: on-chain at 0, connector at 1
+        // - Without batch and no on-chain output: connector at 0
+        let connector_vout = if batch_output.is_some() || onchain_before_connector {
+            1u32
+        } else {
+            0u32
+        };
         let connectors = self.build_connector_tree(
             asp_pubkey,
             commitment_txid,

@@ -168,9 +168,16 @@ impl WalletService for WalletServiceImpl {
                 .send()
                 .await
                 .map_err(|e| map_wallet_err(format!("Package broadcast HTTP error: {e}")))?;
-            if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                return Err(map_wallet_err(format!("Package broadcast failed: {body}")));
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if !status.is_success() {
+                return Err(map_wallet_err(format!("Package broadcast failed ({}): {body}", status)));
+            }
+            // submitpackage returns 200 even when txs are rejected — check
+            // the JSON body for "package_msg" != "success".
+            if body.contains("\"package_msg\"") && !body.contains("\"package_msg\":\"success\"") {
+                info!(body = %body, "Package broadcast rejected by node");
+                return Err(map_wallet_err(format!("Package broadcast rejected: {body}")));
             }
             let last_hex = txs.last().unwrap();
             let tx_bytes =
@@ -202,6 +209,91 @@ impl WalletService for WalletServiceImpl {
             info!(%txid, "Broadcast transaction");
         }
         Ok(last_txid)
+    }
+
+    async fn broadcast_forfeit_with_anchor(&self, txs: &[String]) -> ArkResult<String> {
+        use bitcoin::consensus::deserialize;
+
+        // Package: [connector_hexes..., forfeit_hex].
+        // 1. Broadcast connectors individually (each has its own fee).
+        // 2. Create a CPFP child spending the forfeit's P2A anchor output.
+        // 3. Broadcast [forfeit, cpfp_child] as a package via submitpackage.
+        let forfeit_hex = txs.last().ok_or_else(|| map_wallet_err(String::from("Empty tx list")))?;
+        let connector_hexes = &txs[..txs.len() - 1];
+
+        // Step 1: broadcast connectors individually.
+        for hex_str in connector_hexes {
+            let tx_bytes = hex::decode(hex_str)
+                .map_err(|e| map_wallet_err(format!("Invalid connector hex: {e}")))?;
+            let tx: bitcoin::Transaction = deserialize(&tx_bytes)
+                .map_err(|e| map_wallet_err(format!("Invalid connector tx: {e}")))?;
+            match self.manager.broadcast_transaction(&tx).await {
+                Ok(txid) => info!(%txid, "Connector tx broadcast"),
+                Err(e) => info!(error = %e, "Connector broadcast failed (may already be in mempool)"),
+            }
+        }
+
+        // Sync wallet so UTXOs are up-to-date after connector broadcast.
+        let _ = self.manager.sync().await;
+
+        // Step 2: parse forfeit tx, find P2A anchor output.
+        let forfeit_bytes = hex::decode(forfeit_hex)
+            .map_err(|e| map_wallet_err(format!("Invalid forfeit hex: {e}")))?;
+        let forfeit_tx: bitcoin::Transaction = deserialize(&forfeit_bytes)
+            .map_err(|e| map_wallet_err(format!("Invalid forfeit tx: {e}")))?;
+        let forfeit_txid = forfeit_tx.compute_txid();
+
+        let p2a_script = bitcoin::ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73]);
+        let anchor_vout = forfeit_tx
+            .output
+            .iter()
+            .position(|o| o.script_pubkey == p2a_script);
+
+        if let Some(anchor_vout) = anchor_vout {
+            // Step 3: build CPFP child via BDK TxBuilder (proper signing).
+            let anchor_outpoint = bitcoin::OutPoint {
+                txid: forfeit_txid,
+                vout: anchor_vout as u32,
+            };
+            let child_raw = self.manager.build_anchor_bump_tx(anchor_outpoint).await
+                .map_err(map_wallet_err)?;
+            let child_hex = hex::encode(bitcoin::consensus::serialize(&child_raw));
+
+                info!(
+                    forfeit_txid = %forfeit_txid,
+                    child_txid = %child_raw.compute_txid(),
+                    "Broadcasting forfeit + CPFP child as package"
+                );
+
+                // Broadcast [forfeit, cpfp_child] as a 2-tx TRUC v3 package.
+                // The forfeit (0-fee, v3) can't be accepted individually. The
+                // CPFP child (v3, has fee) provides the fee for both.
+                let esplora_url = self.manager.config().esplora_url();
+                let url = format!("{}/txs/package", esplora_url.trim_end_matches('/'));
+                let package = vec![forfeit_hex.clone(), child_hex];
+                let resp = reqwest::Client::new()
+                    .post(&url)
+                    .json(&package)
+                    .send()
+                    .await
+                    .map_err(|e| map_wallet_err(format!("Package HTTP error: {e}")))?;
+
+                let body = resp.text().await.unwrap_or_default();
+                info!(body = %body.chars().take(500).collect::<String>(), "CPFP package response");
+
+                if body.contains("\"package_msg\":\"success\"") {
+                    info!(%forfeit_txid, "Forfeit broadcast success");
+                    if self.manager.config().network == bitcoin::Network::Regtest {
+                        self.manager.mine_regtest_block_public().await;
+                    }
+                    return Ok(forfeit_txid.to_string());
+                }
+
+                return Err(map_wallet_err(format!("CPFP package rejected: {body}")));
+        }
+
+        // Fallback: no anchor or no UTXOs
+        self.broadcast_transaction(vec![forfeit_hex.clone()]).await
     }
 
     async fn fee_rate(&self) -> ArkResult<u64> {

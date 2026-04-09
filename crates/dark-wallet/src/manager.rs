@@ -430,6 +430,76 @@ impl WalletManager {
         self.asp_keypair.x_only_public_key().0
     }
 
+    /// Build and sign a CPFP child tx that spends a P2A anchor output.
+    /// Uses BDK's TxBuilder to properly select UTXOs and sign.
+    pub async fn build_anchor_bump_tx(
+        &self,
+        anchor_outpoint: bitcoin::OutPoint,
+    ) -> WalletResult<Transaction> {
+        use bdk_wallet::bitcoin::FeeRate;
+
+        let mut wallet = self.wallet.write().await;
+
+        // Use BDK's TxBuilder to create a tx that spends the anchor
+        // as a "foreign UTXO" (anyone-can-spend) plus wallet UTXOs for fees.
+        let p2a_script = bitcoin::ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73]);
+        // BDK requires non_witness_utxo for foreign UTXOs. Since the anchor
+        // is from an unbroadcast tx, we provide a minimal non_witness_utxo
+        // that satisfies BDK's check.
+        let anchor_psbt_input = bitcoin::psbt::Input {
+            witness_utxo: Some(bitcoin::TxOut {
+                value: bitcoin::Amount::ZERO,
+                script_pubkey: p2a_script.clone(),
+            }),
+            // Provide a minimal non_witness_utxo with just the anchor output
+            non_witness_utxo: Some(bitcoin::Transaction {
+                version: bitcoin::transaction::Version(3),
+                lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
+                input: vec![],
+                output: {
+                    let mut outs = Vec::new();
+                    for _ in 0..=anchor_outpoint.vout {
+                        outs.push(bitcoin::TxOut {
+                            value: bitcoin::Amount::ZERO,
+                            script_pubkey: p2a_script.clone(),
+                        });
+                    }
+                    outs
+                },
+            }),
+            final_script_witness: Some(bitcoin::Witness::new()),
+            ..Default::default()
+        };
+        let anchor_satisfaction_weight = bitcoin::Weight::from_wu(1); // empty witness
+
+        let drain_script = wallet.reveal_next_address(bdk_wallet::KeychainKind::Internal).script_pubkey();
+
+        let mut builder = wallet.build_tx();
+        builder
+            .version(3)
+            .add_foreign_utxo(anchor_outpoint, anchor_psbt_input, anchor_satisfaction_weight)
+            .map_err(|e| WalletError::BroadcastError(format!("Add anchor UTXO: {e}")))?;
+        builder.fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
+        builder.drain_to(drain_script);
+        builder.drain_wallet();
+
+        let mut psbt = builder
+            .finish()
+            .map_err(|e| WalletError::BroadcastError(format!("Build CPFP child: {e}")))?;
+
+        wallet
+            .sign(&mut psbt, bdk_wallet::SignOptions {
+                trust_witness_utxo: true,
+                ..Default::default()
+            })
+            .map_err(|e| WalletError::SigningError(format!("Sign CPFP child: {e}")))?;
+
+        // Persist wallet state
+        Self::persist_wallet_static(&mut wallet, &self.config.database_path)?;
+
+        Ok(psbt.extract_tx_unchecked_fee_rate())
+    }
+
     /// Broadcast a transaction via Esplora
     pub async fn broadcast_transaction(&self, tx: &Transaction) -> WalletResult<Txid> {
         let txid = tx.compute_txid();
