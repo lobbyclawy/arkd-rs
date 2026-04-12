@@ -48,8 +48,10 @@ const VTXO_TREE_RADIX: usize = 2;
 /// Dust threshold for connector outputs (satoshis).
 const CONNECTOR_DUST: u64 = 546;
 
-/// Estimated fee for tree-internal transactions (conservative, in sats).
-const TREE_TX_FEE: u64 = 300;
+/// Fee for tree-internal transactions. Set to 0 because tree TXs use
+/// P2A (Pay-to-Anchor) outputs for CPFP fee bumping. Bitcoin Core
+/// requires transactions with dust P2A outputs to be 0-fee.
+const TREE_TX_FEE: u64 = 0;
 
 /// Anchor output: `OP_1 OP_PUSHBYTES_2 4e73` (BIP-431 ephemeral anchor).
 const ANCHOR_PKSCRIPT: [u8; 4] = [0x51, 0x02, 0x4e, 0x73];
