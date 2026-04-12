@@ -5184,12 +5184,7 @@ impl ArkService {
                     );
                     vtxo.ark_txid = tx_id.to_string();
                     vtxo.preconfirmed = true;
-                    // Preconfirmed VTXOs use a longer expiry: 5 hours.
-                    // They'll be properly expired when settled into a round
-                    // (which sets expires_at_block from the tree's CSV delay).
-                    // Using unilateral_exit_delay (30s in test) is too short
-                    // and causes premature sweep.
-                    vtxo.expires_at = now + 5 * 3600;
+                    vtxo.expires_at = now + self.config.unilateral_exit_delay as i64;
                     vtxo.assets = out.assets.clone();
                     // Mark sub-dust preconfirmed VTXOs as swept, matching Go server
                     // behavior. Sub-dust VTXOs can't be spent individually or
