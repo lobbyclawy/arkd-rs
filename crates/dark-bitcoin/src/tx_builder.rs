@@ -102,6 +102,11 @@ pub struct IntentInput {
     /// This determines the connector count (one connector per forfeitable input).
     /// Matches Go's `Intent.CountSpentVtxos()` which excludes notes and swept VTXOs.
     pub num_forfeitable_inputs: usize,
+    /// Base64-encoded asset extension data for the leaf transaction.
+    /// When non-empty, the tree builder adds an OP_RETURN output with this data
+    /// to the leaf PSBT so the Go SDK's tree validation can verify asset outputs.
+    #[allow(dead_code)]
+    pub leaf_tx_asset_packet: String,
 }
 
 /// Boarding input descriptor.
@@ -146,6 +151,8 @@ struct VtxoNode {
     children: Vec<VtxoNode>,
     /// Leaf-level outputs (set only for leaf nodes).
     leaf_outputs: Vec<TxOut>,
+    /// Asset packet bytes for the leaf OP_RETURN output (empty for branches).
+    asset_packet: Vec<u8>,
 }
 
 impl VtxoNode {
@@ -164,7 +171,34 @@ impl VtxoNode {
                 })
                 .collect()
         };
-        // Append ephemeral anchor output
+        // Add asset extension OP_RETURN output if the leaf has an asset packet.
+        // This is a 0-value OP_RETURN output containing the serialized
+        // asset extension data. The Go SDK's validateVtxoTree calls
+        // extension.NewExtensionFromTx which expects this output.
+        // Insert BEFORE the ephemeral anchor (anchor must be last).
+        if !self.asset_packet.is_empty() {
+            // Build OP_RETURN script: OP_RETURN <push_data>
+            let data = &self.asset_packet;
+            let mut script_bytes: Vec<u8> = Vec::with_capacity(data.len() + 3);
+            script_bytes.push(0x6a); // OP_RETURN
+            if data.len() <= 75 {
+                script_bytes.push(data.len() as u8);
+            } else if data.len() <= 255 {
+                script_bytes.push(0x4c); // OP_PUSHDATA1
+                script_bytes.push(data.len() as u8);
+            } else {
+                script_bytes.push(0x4d); // OP_PUSHDATA2
+                let len_bytes = (data.len() as u16).to_le_bytes();
+                script_bytes.extend_from_slice(&len_bytes);
+            }
+            script_bytes.extend_from_slice(data);
+
+            outs.push(TxOut {
+                value: Amount::from_sat(0),
+                script_pubkey: ScriptBuf::from_bytes(script_bytes),
+            });
+        }
+        // Append ephemeral anchor output (always last)
         outs.push(TxOut {
             value: Amount::from_sat(ANCHOR_VALUE),
             script_pubkey: ScriptBuf::from_bytes(ANCHOR_PKSCRIPT.to_vec()),
@@ -363,6 +397,8 @@ impl LocalTxBuilder {
             outputs: Vec<TxOut>,
             cosigners: Vec<[u8; 33]>,
             amount: i64,
+            /// Raw asset packet bytes (from intent.leaf_tx_asset_packet, base64-decoded OP_RETURN data)
+            asset_packet: Vec<u8>,
         }
         let mut leaves: Vec<LeafData> = Vec::new();
         let mut onchain_outputs: Vec<TxOut> = Vec::new();
@@ -422,10 +458,19 @@ impl LocalTxBuilder {
                     .collect::<Result<Vec<_>, _>>()?
             };
 
+            // The asset packet is the raw OP_RETURN extension data to embed
+            // in the leaf PSBT. It comes hex-encoded from the intent.
+            let asset_packet = if !intent.leaf_tx_asset_packet.is_empty() {
+                hex::decode(&intent.leaf_tx_asset_packet).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
             leaves.push(LeafData {
                 outputs: leaf_outs,
                 cosigners,
                 amount: leaf_amount,
+                asset_packet,
             });
         }
 
@@ -443,6 +488,7 @@ impl LocalTxBuilder {
                     cosigners: l.cosigners.clone(),
                     children: Vec::new(),
                     leaf_outputs: l.outputs.clone(),
+                    asset_packet: l.asset_packet.clone(),
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -682,6 +728,7 @@ impl LocalTxBuilder {
                 cosigners: all_cosigners,
                 children: chunk.to_vec(),
                 leaf_outputs: Vec::new(),
+                asset_packet: Vec::new(),
             });
         }
         Ok(groups)
@@ -864,6 +911,8 @@ impl LocalTxBuilder {
         connector_amount: u64,
         participant_count: usize,
     ) -> Vec<TreeNode> {
+        use base64::Engine;
+
         if participant_count == 0 || connector_amount == 0 {
             return vec![];
         }
@@ -875,15 +924,63 @@ impl LocalTxBuilder {
             connector_amount.saturating_sub(TREE_TX_FEE) / participant_count as u64,
         );
 
-        let outputs: Vec<TxOut> = (0..participant_count)
+        // P2A anchor output appended to every connector tx (TRUC v3).
+        let anchor_out = TxOut {
+            value: Amount::from_sat(ANCHOR_VALUE),
+            script_pubkey: ScriptBuf::from_bytes(ANCHOR_PKSCRIPT.to_vec()),
+        };
+
+        // Single participant: one connector tx that spends the commitment
+        // output and produces the connector leaf + anchor.
+        if participant_count == 1 {
+            let tx = Transaction {
+                version: Version(3),
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: commitment_txid,
+                        vout: connector_vout,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::default(),
+                }],
+                output: vec![
+                    TxOut {
+                        value: Amount::from_sat(leaf_amount),
+                        script_pubkey: asp_script.clone(),
+                    },
+                    anchor_out.clone(),
+                ],
+            };
+            let txid = tx.compute_txid();
+            let psbt = Psbt::from_unsigned_tx(tx).expect("valid unsigned tx");
+            return vec![TreeNode {
+                txid: txid.to_string(),
+                tx: base64::engine::general_purpose::STANDARD.encode(psbt.serialize()),
+                children: HashMap::new(),
+            }];
+        }
+
+        // Multiple participants: build a two-level tree.
+        //   Root connector: spends commitment output → N + anchor outputs
+        //   Leaf connectors: each spends one root output → 1 + anchor output
+        //
+        // The Go SDK's connector tree validator counts LEAF NODES (tree
+        // nodes with no children) and expects one per forfeitable input.
+        // It also checks `children <= outputs - 1` (anchor is the last output).
+
+        // Root connector tx with N outputs + anchor
+        let mut root_outputs: Vec<TxOut> = (0..participant_count)
             .map(|_| TxOut {
                 value: Amount::from_sat(leaf_amount),
                 script_pubkey: asp_script.clone(),
             })
             .collect();
+        root_outputs.push(anchor_out.clone());
 
-        let tx = Transaction {
-            version: Version::non_standard(3),
+        let root_tx = Transaction {
+            version: Version(3),
             lock_time: LockTime::ZERO,
             input: vec![TxIn {
                 previous_output: OutPoint {
@@ -894,20 +991,55 @@ impl LocalTxBuilder {
                 sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
                 witness: Witness::default(),
             }],
-            output: outputs,
+            output: root_outputs,
         };
+        let root_txid = root_tx.compute_txid();
+        let root_psbt = Psbt::from_unsigned_tx(root_tx).expect("valid unsigned tx");
 
-        let txid = tx.compute_txid();
-        let psbt = Psbt::from_unsigned_tx(tx).expect("valid unsigned tx");
+        // Leaf connector txs — one per participant
+        let mut all_nodes = Vec::new();
+        let mut root_children: HashMap<u32, String> = HashMap::new();
 
-        vec![TreeNode {
-            txid: txid.to_string(),
-            tx: {
-                use base64::Engine;
-                base64::engine::general_purpose::STANDARD.encode(psbt.serialize())
-            },
-            children: HashMap::new(),
-        }]
+        for i in 0..participant_count {
+            let leaf_tx = Transaction {
+                version: Version(3),
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: root_txid,
+                        vout: i as u32,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::default(),
+                }],
+                output: vec![
+                    TxOut {
+                        value: Amount::from_sat(leaf_amount),
+                        script_pubkey: asp_script.clone(),
+                    },
+                    anchor_out.clone(),
+                ],
+            };
+            let leaf_txid = leaf_tx.compute_txid();
+            let leaf_psbt = Psbt::from_unsigned_tx(leaf_tx).expect("valid unsigned tx");
+
+            root_children.insert(i as u32, leaf_txid.to_string());
+            all_nodes.push(TreeNode {
+                txid: leaf_txid.to_string(),
+                tx: base64::engine::general_purpose::STANDARD.encode(leaf_psbt.serialize()),
+                children: HashMap::new(),
+            });
+        }
+
+        // Root node (added last, leaves first — matches vtxo tree convention)
+        all_nodes.push(TreeNode {
+            txid: root_txid.to_string(),
+            tx: base64::engine::general_purpose::STANDARD.encode(root_psbt.serialize()),
+            children: root_children,
+        });
+
+        all_nodes
     }
 }
 
@@ -942,6 +1074,7 @@ mod tests {
                 .map(|r| r.pubkey.clone())
                 .collect(),
             num_forfeitable_inputs: num_offchain,
+            leaf_tx_asset_packet: String::new(),
         }
     }
 

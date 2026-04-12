@@ -313,6 +313,12 @@ async fn main() -> Result<()> {
             .esplora_url
             .clone()
             .unwrap_or_else(|| "http://localhost:3000".to_string()),
+        fee_manager_url: file_config.bitcoin.rpc_host.as_ref().map(|host| {
+            let port = file_config.bitcoin.rpc_port.unwrap_or(18443);
+            format!("http://{}:{}", host, port)
+        }),
+        fee_manager_user: file_config.bitcoin.rpc_user.clone(),
+        fee_manager_pass: file_config.bitcoin.rpc_password.clone(),
         ..Default::default()
     };
 

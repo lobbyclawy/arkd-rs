@@ -598,10 +598,11 @@ impl ArkClient {
 
         client
             .delete_intent(DeleteIntentRequest {
-                intent_id: intent_id.to_string(),
-                // Proof bytes are optional for dev environments; production callers should
-                // supply a valid authorization proof to prevent unauthorised cancellation.
-                proof: vec![],
+                intent: Some(crate::proto::ark_v1::Intent {
+                    message: intent_id.to_string(),
+                    proof: String::new(),
+                    delegate: String::new(),
+                }),
             })
             .await
             .map_err(|e| ClientError::Rpc(format!("DeleteIntent failed: {}", e)))?;

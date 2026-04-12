@@ -893,6 +893,8 @@ pub trait AssetRepository: Send + Sync {
     async fn list_assets(&self) -> ArkResult<Vec<Asset>>;
     /// Store an asset issuance record.
     async fn store_issuance(&self, issuance: &AssetIssuance) -> ArkResult<()>;
+    /// Get the control asset ID for a given asset (from issuance records).
+    async fn get_control_asset_id(&self, asset_id: &str) -> ArkResult<String>;
 }
 
 /// No-op asset repository (for testing / stubs).
@@ -911,6 +913,9 @@ impl AssetRepository for NoopAssetRepository {
     }
     async fn store_issuance(&self, _issuance: &AssetIssuance) -> ArkResult<()> {
         Ok(())
+    }
+    async fn get_control_asset_id(&self, _asset_id: &str) -> ArkResult<String> {
+        Ok(String::new())
     }
 }
 

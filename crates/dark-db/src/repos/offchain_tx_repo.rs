@@ -278,6 +278,7 @@ mod tests {
             vec![VtxoOutput {
                 pubkey: "02deadbeef".to_string(),
                 amount_sats: 10_000,
+                assets: vec![],
             }],
         )
     }

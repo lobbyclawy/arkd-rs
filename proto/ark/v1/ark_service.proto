@@ -133,7 +133,7 @@ message GetInfoResponse {
   int64 dust = 14;
   FeeInfo fees = 15;
   ScheduledSession scheduled_session = 16;
-  repeated string deprecated_signers = 17;
+  repeated DeprecatedSigner deprecated_signers = 17;
   map<string, string> service_status = 18;
   string digest = 19;
   int64 max_tx_weight = 20;
@@ -144,8 +144,16 @@ message GetInfoResponse {
 
 // ScheduledSession describes the next scheduled round session.
 message ScheduledSession {
-  int64 start_time = 1;
-  int64 end_time = 2;
+  int64 next_start_time = 1;
+  int64 next_end_time = 2;
+  int64 period = 3;
+  int64 duration = 4;
+  FeeInfo fees = 5;
+}
+
+message DeprecatedSigner {
+  string pubkey = 1;
+  int64 cutoff_date = 2;
 }
 
 message RegisterForRoundRequest {
@@ -301,8 +309,9 @@ message EstimateIntentFeeResponse {
 }
 
 message DeleteIntentRequest {
-  string intent_id = 1;
-  bytes proof = 2;
+  // An intent proof that includes any of the inputs of the intent to be
+  // deleted, proving ownership of that intent.
+  Intent intent = 1;
 }
 
 message DeleteIntentResponse {}

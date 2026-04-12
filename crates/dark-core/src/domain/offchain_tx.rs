@@ -88,6 +88,9 @@ pub struct VtxoOutput {
     pub pubkey: String,
     /// Output amount in satoshis
     pub amount_sats: u64,
+    /// Asset amounts carried by this output (asset_id → amount)
+    #[serde(default)]
+    pub assets: Vec<(String, u64)>,
 }
 
 impl OffchainTx {
@@ -215,6 +218,7 @@ mod tests {
             vec![VtxoOutput {
                 pubkey: "02deadbeef".to_string(),
                 amount_sats: 10_000,
+                assets: vec![],
             }],
         )
     }

@@ -261,15 +261,29 @@ impl NoteStore {
 
         // Lock order: pending → inner (consistent across all methods).
         let mut pending = self.pending.lock().await;
-        for entries in pending.values() {
+        // Check if the note is already pending. If so, roll it back from
+        // the old key and allow re-redemption under the new round_id.
+        // This handles the case where a batch failed and the SDK retries
+        // without successfully deleting the previous intent.
+        let mut found_in_key: Option<String> = None;
+        for (key, entries) in pending.iter() {
             if entries
                 .iter()
                 .any(|e| e.outpoint_txid.as_deref() == Some(outpoint_txid_hex))
             {
-                return Err(format!(
-                    "note already redeemed (outpoint {}…)",
-                    &outpoint_txid_hex[..8.min(outpoint_txid_hex.len())]
-                ));
+                found_in_key = Some(key.clone());
+                break;
+            }
+        }
+        if let Some(old_key) = found_in_key {
+            // Roll back the note from the old pending key so it can be
+            // re-redeemed under the new round_id.
+            if let Some(entries) = pending.remove(&old_key) {
+                let mut store = self.inner.lock().await;
+                for entry in entries {
+                    store.insert(entry.key, entry.entry);
+                }
+                drop(store);
             }
         }
 

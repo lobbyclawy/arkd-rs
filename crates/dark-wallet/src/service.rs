@@ -222,14 +222,27 @@ impl WalletService for WalletServiceImpl {
         let connector_hexes = &txs[..txs.len() - 1];
 
         // Step 1: broadcast connectors individually.
+        // Broadcast connectors via Esplora without mining a block.
+        // The CPFP package broadcast handles block mining at the end.
+        let esplora_url = self.manager.config().esplora_url();
         for hex_str in connector_hexes {
-            let tx_bytes = hex::decode(hex_str)
-                .map_err(|e| map_wallet_err(format!("Invalid connector hex: {e}")))?;
-            let tx: bitcoin::Transaction = deserialize(&tx_bytes)
-                .map_err(|e| map_wallet_err(format!("Invalid connector tx: {e}")))?;
-            match self.manager.broadcast_transaction(&tx).await {
-                Ok(txid) => info!(%txid, "Connector tx broadcast"),
-                Err(e) => info!(error = %e, "Connector broadcast failed (may already be in mempool)"),
+            let url = format!("{}/tx", esplora_url.trim_end_matches('/'));
+            match reqwest::Client::new()
+                .post(&url)
+                .body(hex_str.clone())
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    info!("Connector tx broadcast via Esplora");
+                }
+                Ok(resp) => {
+                    let body = resp.text().await.unwrap_or_default();
+                    info!(error = %body, "Connector broadcast failed (may already be in mempool)");
+                }
+                Err(e) => {
+                    info!(error = %e, "Connector broadcast HTTP error");
+                }
             }
         }
 

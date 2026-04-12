@@ -49,7 +49,29 @@ impl TxBuilder for LocalTxBuilder {
                     })
                     .collect(),
                 cosigners_public_keys: i.cosigners_public_keys.clone(),
-                num_forfeitable_inputs: i.inputs.iter().filter(|v| v.needs_connector()).count(),
+                num_forfeitable_inputs: {
+                    let count = i.inputs.iter().filter(|v| v.needs_connector()).count();
+                    for v in &i.inputs {
+                        tracing::info!(
+                            outpoint = %format!("{}:{}", v.outpoint.txid, v.outpoint.vout),
+                            needs_connector = v.needs_connector(),
+                            is_note = v.is_note(),
+                            swept = v.swept,
+                            preconfirmed = v.preconfirmed,
+                            ark_txid_empty = v.ark_txid.is_empty(),
+                            commitment_txids_empty = v.commitment_txids.is_empty(),
+                            "build_commitment_tx: intent input detail"
+                        );
+                    }
+                    tracing::info!(
+                        intent_id = %i.id,
+                        total_inputs = i.inputs.len(),
+                        forfeitable = count,
+                        "build_commitment_tx: intent connector count"
+                    );
+                    count
+                },
+                leaf_tx_asset_packet: i.leaf_tx_asset_packet.clone(),
             })
             .collect();
 

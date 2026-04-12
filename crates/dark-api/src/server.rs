@@ -353,6 +353,7 @@ impl Server {
     /// between the spawned task scheduling and events being published.
     async fn spawn_event_bridge(&self) {
         let broker = Arc::clone(&self.broker);
+        let tx_broker = Arc::clone(&self.tx_broker);
         let note_store = Arc::clone(&self.note_store);
         let batch_expiry = self.core.config().unilateral_exit_delay as i64;
 
@@ -402,6 +403,7 @@ impl Server {
                                 round_id,
                                 commitment_tx,
                                 has_boarding_inputs,
+                                has_connectors,
                                 ..
                             } => {
                                 // Always emit BatchFinalization so clients can
@@ -552,6 +554,31 @@ impl Server {
                                     },
                                 )),
                             }),
+                            // Transaction events → publish to tx_broker
+                            // for GetTransactionsStream subscribers.
+                            dark_core::domain::ArkEvent::TxFinalized {
+                                ark_txid,
+                                ..
+                            } => {
+                                use crate::proto::ark_v1::{
+                                    ArkTxEvent, TransactionEvent,
+                                    transaction_event::Event as TxEventInner,
+                                };
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() as i64;
+                                tx_broker.publish(TransactionEvent {
+                                    event: Some(TxEventInner::ArkTx(ArkTxEvent {
+                                        txid: ark_txid.clone(),
+                                        from_script: String::new(),
+                                        to_script: String::new(),
+                                        amount: 0,
+                                        timestamp: now,
+                                    })),
+                                });
+                                None // No round event for this
+                            }
                             _ => None,
                         };
 
@@ -607,6 +634,7 @@ impl Server {
             Arc::clone(&self.tx_broker),
             Arc::clone(&self.offchain_tx_repo),
             Arc::clone(&self.note_store),
+            Arc::clone(&self.cel_fee_store),
         );
 
         // Create auth interceptor

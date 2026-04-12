@@ -56,6 +56,12 @@ pub enum ArkEvent {
         /// actually broadcast (via `RoundBroadcast`).
         #[serde(default)]
         has_boarding_inputs: bool,
+        /// Whether the round has connectors (forfeitable inputs).  When `true`,
+        /// clients must submit forfeit txs before the round can be considered
+        /// complete.  `BatchFinalized` is deferred until forfeits are received
+        /// (or the round times out).
+        #[serde(default)]
+        has_connectors: bool,
     },
 
     /// Registration phase ended; confirmation phase has started.
@@ -463,6 +469,7 @@ mod tests {
             timestamp: 1234567890,
             vtxo_count: 3,
             has_boarding_inputs: false,
+            has_connectors: false,
         };
 
         let json = serde_json::to_string(&event).expect("serialize");

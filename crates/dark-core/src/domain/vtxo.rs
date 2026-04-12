@@ -126,13 +126,20 @@ impl Vtxo {
 
     /// Check if this VTXO needs a connector when spent in a new round.
     ///
-    /// Like `requires_forfeit()` but also includes preconfirmed VTXOs
-    /// (which have empty commitment_txids but a non-empty ark_txid).
-    /// These represent real offchain value that needs a connector for
-    /// the batch protocol, even though they don't have a traditional
-    /// commitment chain.
+    /// Returns true for:
+    /// - Round-based VTXOs (have commitment_txids) that aren't swept
+    /// - Preconfirmed VTXOs (have ark_txid) regardless of swept status,
+    ///   because the server's time-based sweep is a bookkeeping detail
+    ///   that doesn't remove the need for a forfeit connector
+    ///
+    /// Returns false for notes (no commitment chain and no ark_txid).
     pub fn needs_connector(&self) -> bool {
-        !self.swept && (!self.is_note() || !self.ark_txid.is_empty())
+        // Preconfirmed VTXOs with an ark_txid always need a connector,
+        // even if the server's expiry sweep marked them as swept.
+        if !self.ark_txid.is_empty() {
+            return true;
+        }
+        !self.swept && !self.is_note()
     }
 
     /// Generate a note URI for this VTXO using the given prefix.

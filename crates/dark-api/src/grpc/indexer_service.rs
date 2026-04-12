@@ -622,6 +622,18 @@ impl IndexerServiceTrait for IndexerGrpcService {
             "GetVtxos: script → tapkey extraction"
         );
 
+        // Check if the queried pubkey is banned. Return an error early
+        // so the SDK's Settle/SendOffChain fails instead of silently
+        // proceeding with no funds.
+        if let Some(pk) = pubkey_filter {
+            if let Ok(true) = self.core.is_participant_banned(pk).await {
+                return Err(Status::permission_denied(format!(
+                    "Participant {} is banned",
+                    pk
+                )));
+            }
+        }
+
         let vtxos = self
             .core
             .list_vtxos(pubkey_filter)
@@ -1232,12 +1244,20 @@ impl IndexerServiceTrait for IndexerGrpcService {
 
         match asset {
             Some(a) => {
-                let metadata_json = serde_json::to_string(&a.metadata).unwrap_or_default();
+                // Look up control asset from issuance records
+                let control_asset = self
+                    .core
+                    .asset_repo()
+                    .get_control_asset_id(&a.asset_id)
+                    .await
+                    .unwrap_or_default();
+                // Go SDK expects metadata as hex-encoded serialized asset.MetadataList.
+                // For now, send empty string (no metadata).
                 Ok(Response::new(GetAssetResponse {
                     asset_id: a.asset_id,
                     supply: a.amount.to_string(),
-                    metadata: metadata_json,
-                    control_asset: String::new(),
+                    metadata: String::new(),
+                    control_asset,
                 }))
             }
             None => Err(Status::not_found(format!(
@@ -1290,13 +1310,7 @@ impl IndexerServiceTrait for IndexerGrpcService {
     ) -> Result<Response<SubscribeForScriptsResponse>, Status> {
         let req = request.into_inner();
         let subscription_id = if req.subscription_id.is_empty() {
-            format!(
-                "sub-{:x}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            )
+            format!("sub-{}", uuid::Uuid::new_v4())
         } else {
             req.subscription_id
         };

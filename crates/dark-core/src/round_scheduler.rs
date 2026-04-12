@@ -454,6 +454,7 @@ impl RoundScheduler {
                 timestamp: round.ending_timestamp,
                 vtxo_count,
                 has_boarding_inputs: has_boarding,
+                has_connectors: !round.connectors.is_empty(),
             })
             .await?;
 

@@ -15,7 +15,7 @@ use dark_api::proto::ark_v1::ark_service_server::ArkServiceServer;
 use dark_api::proto::ark_v1::{
     DeleteIntentRequest, EstimateIntentFeeRequest, FinalizeTxRequest, GetEventStreamRequest,
     GetInfoRequest, GetPendingTxRequest, GetRoundRequest, GetStatusRequest,
-    GetTransactionsStreamRequest, GetVtxosRequest, ListRoundsRequest, Outpoint, Output,
+    GetTransactionsStreamRequest, GetVtxosRequest, Intent, ListRoundsRequest, Outpoint, Output,
     RegisterForRoundRequest, RequestExitRequest, SubmitTxRequest, UpdateStreamTopicsRequest,
 };
 
@@ -924,8 +924,7 @@ async fn test_delete_intent_empty_id() {
 
     let result = client
         .delete_intent(DeleteIntentRequest {
-            intent_id: String::new(),
-            proof: vec![1, 2, 3],
+            intent: None,
         })
         .await;
     assert!(result.is_err());
@@ -936,12 +935,14 @@ async fn test_delete_intent_empty_id() {
 async fn test_delete_intent_empty_proof() {
     let mut client = start_ark_server().await;
 
-    // Empty proof is accepted in dev/test mode (BIP-322 verification is TODO(#40)).
     // With no active round, we expect NotFound (not InvalidArgument).
     let result = client
         .delete_intent(DeleteIntentRequest {
-            intent_id: "some-intent-id".to_string(),
-            proof: vec![],
+            intent: Some(Intent {
+                message: "some-intent-id".to_string(),
+                proof: String::new(),
+                delegate: String::new(),
+            }),
         })
         .await;
     assert!(result.is_err());
@@ -954,8 +955,11 @@ async fn test_delete_intent_not_found() {
 
     let result = client
         .delete_intent(DeleteIntentRequest {
-            intent_id: "nonexistent-intent".to_string(),
-            proof: vec![1, 2, 3, 4],
+            intent: Some(Intent {
+                message: "nonexistent-intent".to_string(),
+                proof: "proof".to_string(),
+                delegate: String::new(),
+            }),
         })
         .await;
     assert!(result.is_err());
