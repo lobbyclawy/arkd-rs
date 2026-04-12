@@ -401,17 +401,16 @@ impl AdminServiceTrait for AdminGrpcService {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
-            let dust_expired: Vec<dark_core::domain::Vtxo> = spendable.into_iter()
+            // Admin force-sweep: mark dust VTXOs as swept regardless
+            // of expiry. The automatic sweep skips dust VTXOs; the admin
+            // endpoint handles them explicitly.
+            let force_sweepable: Vec<dark_core::domain::Vtxo> = spendable.into_iter()
                 .chain(spent.into_iter())
                 .filter(|v| !v.swept && v.amount < 546)
-                .filter(|v| {
-                    (v.expires_at > 0 && v.expires_at < now) ||
-                    (v.expires_at_block > 0 && v.expires_at_block <= current_height)
-                })
                 .collect();
-            force_swept = dust_expired.len() as u32;
-            if !dust_expired.is_empty() {
-                let _ = self.core.vtxo_repo().mark_vtxos_swept(&dust_expired).await;
+            force_swept = force_sweepable.len() as u32;
+            if !force_sweepable.is_empty() {
+                let _ = self.core.vtxo_repo().mark_vtxos_swept(&force_sweepable).await;
             }
         }
 

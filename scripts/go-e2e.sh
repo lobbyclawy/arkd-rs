@@ -70,6 +70,7 @@ utxo_min_amount = 1000
 utxo_max_amount = 100000000
 unilateral_exit_delay = 30
 boarding_exit_delay = 30
+default_fee_rate_sats_per_vb = 1
 TOMLEOF
 echo "  ✅ Config written to /tmp/dark-go-e2e.toml"
 
