@@ -4564,29 +4564,58 @@ impl ArkService {
             }
         };
 
-        // Broadcast connectors individually (each has its own fee),
-        // then forfeit + CPFP anchor child as a package.
-        let mut package_txs: Vec<String> = signed_connector_hexes;
-        package_txs.push(signed_tx_hex.clone());
+        // === Broadcast chain: commitment TX → connectors → forfeit ===
+        //
+        // The Go reference server broadcasts the commitment TX during round
+        // finalization, then during fraud reaction broadcasts the connector
+        // branch (waiting for each to confirm) before the forfeit TX.
+        //
+        // Step 1: Broadcast the commitment TX if not already on-chain.
+        // The commitment TX must be confirmed for connector inputs to be valid.
+        {
+            use base64::Engine;
+            if let Ok(psbt_bytes) = base64::engine::general_purpose::STANDARD.decode(&round.commitment_tx) {
+                if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&psbt_bytes) {
+                    let raw_tx = psbt.extract_tx_unchecked_fee_rate();
+                    let tx_hex = hex::encode(bitcoin::consensus::serialize(&raw_tx));
+                    match self.wallet.broadcast_transaction(vec![tx_hex]).await {
+                        Ok(txid) => info!(txid = %txid, "Commitment TX broadcast for fraud reaction"),
+                        Err(e) => debug!(error = %e, "Commitment TX broadcast failed (may already be on-chain)"),
+                    }
+                }
+            }
+        }
 
-        match self.wallet.broadcast_forfeit_with_anchor(&package_txs).await {
+        // Step 2: Broadcast each connector TX individually.
+        // Each connector's input references the commitment TX (for root)
+        // or a parent connector (for leaves). We broadcast root first,
+        // then leaves.
+        for (i, connector_hex) in signed_connector_hexes.iter().enumerate() {
+            match self.wallet.broadcast_transaction(vec![connector_hex.clone()]).await {
+                Ok(txid) => info!(connector_idx = i, txid = %txid, "Connector TX broadcast"),
+                Err(e) => debug!(connector_idx = i, error = %e, "Connector TX broadcast failed (may already be on-chain)"),
+            }
+        }
+
+        // Step 3: Broadcast the forfeit TX.
+        // The forfeit spends from a connector output + the unrolled VTXO.
+        match self.wallet.broadcast_forfeit_with_anchor(&[signed_tx_hex.clone()]).await {
             Ok(txid) => {
-                info!(
-                    vtxo = %outpoint_str,
-                    forfeit_txid = %txid,
-                    "Forfeit tx broadcast successfully"
-                );
+                info!(vtxo = %outpoint_str, forfeit_txid = %txid, "Forfeit tx broadcast successfully");
                 Ok(())
             }
             Err(e) => {
-                warn!(
-                    vtxo = %outpoint_str,
-                    error = %e,
-                    "Forfeit tx broadcast failed — will retry on next cycle"
-                );
-                Err(ArkError::Internal(format!(
-                    "Forfeit broadcast failed: {e}"
-                )))
+                // Fallback: try as raw transaction (no CPFP anchor)
+                match self.wallet.broadcast_transaction(vec![signed_tx_hex]).await {
+                    Ok(txid) => {
+                        info!(vtxo = %outpoint_str, forfeit_txid = %txid, "Forfeit tx broadcast (raw) successfully");
+                        Ok(())
+                    }
+                    Err(e2) => {
+                        warn!(vtxo = %outpoint_str, error = %e, fallback = %e2, "Forfeit tx broadcast failed");
+                        Err(ArkError::Internal(format!("Forfeit broadcast failed: {e}")))
+                    }
+                }
             }
         }
     }
