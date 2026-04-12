@@ -573,15 +573,21 @@ impl ArkService {
     /// current tip height and returns a block-height-based expiry.
     /// Otherwise falls back to wall-clock time: `now() + vtxo_expiry_secs`.
     async fn compute_vtxo_expiry(&self) -> VtxoExpiry {
-        if let Some(blocks) = self.config.vtxo_expiry_blocks {
+        // Use unilateral_exit_delay as the block-based VTXO expiry.
+        // This matches the Go reference server which uses the commitment TX's
+        // CSV delay (= unilateral_exit_delay) as the VTXO tree expiry.
+        // The vtxo_expiry_blocks config is ignored in favor of the actual
+        // CSV timelock that controls when the ASP can sweep.
+        let expiry_blocks = self.config.unilateral_exit_delay as u32;
+        if expiry_blocks > 0 {
             match self.scanner.tip_height().await {
                 Ok(tip) if tip > 0 => {
-                    let expires = tip + blocks;
+                    let expires = tip + expiry_blocks;
                     tracing::debug!(
                         tip_height = tip,
-                        vtxo_expiry_blocks = blocks,
+                        unilateral_exit_delay = expiry_blocks,
                         expires_at_block = expires,
-                        "Using block-height VTXO expiry"
+                        "Using block-height VTXO expiry (CSV delay)"
                     );
                     return VtxoExpiry::Block(expires);
                 }
@@ -4558,31 +4564,12 @@ impl ArkService {
             }
         };
 
-        // Broadcast connector TXs individually first. Each connector TX
-        // must be on-chain (or in mempool) before the forfeit TX can be
-        // broadcast, because the forfeit TX spends from a connector output.
-        for (i, connector_hex) in signed_connector_hexes.iter().enumerate() {
-            match self.wallet.broadcast_transaction(vec![connector_hex.clone()]).await {
-                Ok(txid) => {
-                    info!(
-                        connector_idx = i,
-                        txid = %txid,
-                        "Connector TX broadcast for forfeit"
-                    );
-                }
-                Err(e) => {
-                    // Connector might already be in mempool/confirmed - continue
-                    debug!(
-                        connector_idx = i,
-                        error = %e,
-                        "Connector TX broadcast failed (may already be on-chain)"
-                    );
-                }
-            }
-        }
+        // Broadcast connectors individually (each has its own fee),
+        // then forfeit + CPFP anchor child as a package.
+        let mut package_txs: Vec<String> = signed_connector_hexes;
+        package_txs.push(signed_tx_hex.clone());
 
-        // Now broadcast the forfeit TX (+ optional CPFP anchor)
-        match self.wallet.broadcast_forfeit_with_anchor(&[signed_tx_hex.clone()]).await {
+        match self.wallet.broadcast_forfeit_with_anchor(&package_txs).await {
             Ok(txid) => {
                 info!(
                     vtxo = %outpoint_str,
@@ -4592,28 +4579,14 @@ impl ArkService {
                 Ok(())
             }
             Err(e) => {
-                // Fallback: try broadcasting as a raw transaction
-                match self.wallet.broadcast_transaction(vec![signed_tx_hex]).await {
-                    Ok(txid) => {
-                        info!(
-                            vtxo = %outpoint_str,
-                            forfeit_txid = %txid,
-                            "Forfeit tx broadcast (raw fallback) successfully"
-                        );
-                        Ok(())
-                    }
-                    Err(e2) => {
-                        warn!(
-                            vtxo = %outpoint_str,
-                            error = %e,
-                            fallback_error = %e2,
-                            "Forfeit tx broadcast failed — will retry on next cycle"
-                        );
-                        Err(ArkError::Internal(format!(
-                            "Forfeit broadcast failed: {e}"
-                        )))
-                    }
-                }
+                warn!(
+                    vtxo = %outpoint_str,
+                    error = %e,
+                    "Forfeit tx broadcast failed — will retry on next cycle"
+                );
+                Err(ArkError::Internal(format!(
+                    "Forfeit broadcast failed: {e}"
+                )))
             }
         }
     }
@@ -5205,7 +5178,7 @@ impl ArkService {
                 .unwrap_or_default()
                 .as_secs() as i64;
             let dust = self.wallet.get_dust_amount().await.unwrap_or(330);
-            let mut output_vtxos: Vec<Vtxo> = tx
+            let output_vtxos: Vec<Vtxo> = tx
                 .outputs
                 .iter()
                 .enumerate()
@@ -5229,12 +5202,6 @@ impl ArkService {
                     vtxo
                 })
                 .collect();
-
-            // Preconfirmed VTXOs keep time-based expiry (set in the map
-            // closure above). They should NOT use block-based expiry because
-            // they expire too quickly with the 30-block CSV delay, breaking
-            // TestUnilateralExit. Block-based expiry is only for round VTXOs
-            // created via complete_round().
 
             for vtxo in &output_vtxos {
                 info!(
