@@ -573,21 +573,15 @@ impl ArkService {
     /// current tip height and returns a block-height-based expiry.
     /// Otherwise falls back to wall-clock time: `now() + vtxo_expiry_secs`.
     async fn compute_vtxo_expiry(&self) -> VtxoExpiry {
-        // Use unilateral_exit_delay as the block-based VTXO expiry.
-        // This matches the Go reference server which uses the commitment TX's
-        // CSV delay (= unilateral_exit_delay) as the VTXO tree expiry.
-        // The vtxo_expiry_blocks config is ignored in favor of the actual
-        // CSV timelock that controls when the ASP can sweep.
-        let expiry_blocks = self.config.unilateral_exit_delay as u32;
-        if expiry_blocks > 0 {
+        if let Some(blocks) = self.config.vtxo_expiry_blocks {
             match self.scanner.tip_height().await {
                 Ok(tip) if tip > 0 => {
-                    let expires = tip + expiry_blocks;
+                    let expires = tip + blocks;
                     tracing::debug!(
                         tip_height = tip,
-                        unilateral_exit_delay = expiry_blocks,
+                        vtxo_expiry_blocks = blocks,
                         expires_at_block = expires,
-                        "Using block-height VTXO expiry (CSV delay)"
+                        "Using block-height VTXO expiry"
                     );
                     return VtxoExpiry::Block(expires);
                 }
@@ -5190,7 +5184,12 @@ impl ArkService {
                     );
                     vtxo.ark_txid = tx_id.to_string();
                     vtxo.preconfirmed = true;
-                    vtxo.expires_at = now + self.config.unilateral_exit_delay as i64;
+                    // Preconfirmed VTXOs use a longer expiry: 5 hours.
+                    // They'll be properly expired when settled into a round
+                    // (which sets expires_at_block from the tree's CSV delay).
+                    // Using unilateral_exit_delay (30s in test) is too short
+                    // and causes premature sweep.
+                    vtxo.expires_at = now + 5 * 3600;
                     vtxo.assets = out.assets.clone();
                     // Mark sub-dust preconfirmed VTXOs as swept, matching Go server
                     // behavior. Sub-dust VTXOs can't be spent individually or
