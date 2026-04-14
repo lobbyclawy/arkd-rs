@@ -905,6 +905,62 @@ impl LocalTxBuilder {
     // ── Connector tree ──────────────────────────────────────────────────────
 
     /// Build the connector tree.
+    /// Build flat (independent) connectors — one per forfeitable input.
+    /// Each connector TX spends its own commitment TX output and produces
+    /// a single leaf output + P2A anchor. No shared root.
+    fn build_flat_connectors(
+        &self,
+        asp_pubkey: &XOnlyPublicKey,
+        commitment_txid: Txid,
+        first_vout: u32,
+        count: usize,
+    ) -> Vec<TreeNode> {
+        use base64::Engine;
+
+        if count == 0 {
+            return vec![];
+        }
+
+        let asp_script = asp_p2tr_script(asp_pubkey);
+        let anchor_out = TxOut {
+            value: Amount::from_sat(ANCHOR_VALUE),
+            script_pubkey: ScriptBuf::from_bytes(ANCHOR_PKSCRIPT.to_vec()),
+        };
+
+        let mut nodes = Vec::with_capacity(count);
+        for i in 0..count {
+            let tx = Transaction {
+                version: Version(3),
+                lock_time: LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: commitment_txid,
+                        vout: first_vout + i as u32,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::default(),
+                }],
+                output: vec![
+                    TxOut {
+                        value: Amount::from_sat(CONNECTOR_DUST),
+                        script_pubkey: asp_script.clone(),
+                    },
+                    anchor_out.clone(),
+                ],
+            };
+            let txid = tx.compute_txid();
+            let psbt = Psbt::from_unsigned_tx(tx).expect("valid unsigned tx");
+            nodes.push(TreeNode {
+                txid: txid.to_string(),
+                tx: base64::engine::general_purpose::STANDARD.encode(psbt.serialize()),
+                children: HashMap::new(), // leaf — no children
+            });
+        }
+
+        nodes
+    }
+
     fn build_connector_tree(
         &self,
         asp_pubkey: &XOnlyPublicKey,

@@ -187,7 +187,7 @@ e2e *args: build
     @bash -c 'DATADIR="${HOME}/Library/Application Support/Nigiri"; rm -rf "${DATADIR}/volumes/bitcoin/regtest" "${DATADIR}/volumes/electrs" && echo "  ✅ Blockchain data cleared (fresh regtest)"'
     nigiri start
     @echo "⏳ Waiting for Esplora (chopsticks:3000) to be ready..."
-    @bash -c 'for i in $(seq 1 120); do h=$(curl -sf http://localhost:3000/blocks/tip/height 2>/dev/null); echo "$h" | grep -qE "^[0-9]+$" && echo "✅ Esplora ready (block $h)" && exit 0; echo "  waiting... ($i/120)"; sleep 1; done; echo "❌ Esplora did not start within 120s"; exit 1'
+    @bash -c 'for i in $(seq 1 180); do h=$(curl -sf http://localhost:3000/blocks/tip/height 2>/dev/null); echo "$h" | grep -qE "^[0-9]+$" && echo "✅ Esplora ready (block $h)" && exit 0; if [ $((i % 15)) -eq 0 ]; then exited=$(docker ps -a --filter name=chopsticks --filter status=exited -q 2>/dev/null); if [ -n "$exited" ]; then echo "  ⚠️  chopsticks crashed — restarting..."; docker restart chopsticks 2>/dev/null || true; fi; fi; echo "  waiting... ($i/180)"; sleep 1; done; echo "❌ Esplora did not start within 180s"; exit 1'
     ./scripts/e2e-test.sh {{args}}
 
 # Run upstream arkd Go e2e tests against the dark Rust server.
@@ -200,7 +200,7 @@ go-e2e: build
     @bash -c 'DATADIR="${HOME}/Library/Application Support/Nigiri"; rm -rf "${DATADIR}/volumes/bitcoin/regtest" "${DATADIR}/volumes/electrs" && echo "  ✅ Blockchain data cleared (fresh regtest)"'
     nigiri start
     @echo "⏳ Waiting for Esplora (chopsticks:3000) to be ready..."
-    @bash -c 'for i in $(seq 1 120); do h=$(curl -sf http://localhost:3000/blocks/tip/height 2>/dev/null); echo "$h" | grep -qE "^[0-9]+$" && echo "✅ Esplora ready (block $h)" && exit 0; echo "  waiting... ($i/120)"; sleep 1; done; echo "❌ Esplora did not start within 120s"; exit 1'
+    @bash -c 'for i in $(seq 1 180); do h=$(curl -sf http://localhost:3000/blocks/tip/height 2>/dev/null); echo "$h" | grep -qE "^[0-9]+$" && echo "✅ Esplora ready (block $h)" && exit 0; if [ $((i % 15)) -eq 0 ]; then exited=$(docker ps -a --filter name=chopsticks --filter status=exited -q 2>/dev/null); if [ -n "$exited" ]; then echo "  ⚠️  chopsticks crashed — restarting..."; docker restart chopsticks 2>/dev/null || true; fi; fi; echo "  waiting... ($i/180)"; sleep 1; done; echo "❌ Esplora did not start within 180s"; exit 1'
     ./scripts/go-e2e.sh
 
 # Stop Nigiri (run this manually when you are done testing)

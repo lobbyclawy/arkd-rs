@@ -73,6 +73,9 @@ pub struct EsploraScanner {
     /// Last known chain tip height, used to detect new blocks.
     last_tip: std::sync::atomic::AtomicU32,
     poll_interval: Duration,
+    /// Optional Bitcoin Core RPC URL for fast tx confirmation checks.
+    /// Bypasses Esplora/chopsticks indexing lag.
+    rpc_url: Option<String>,
 }
 
 impl EsploraScanner {
@@ -93,7 +96,80 @@ impl EsploraScanner {
             block_sender,
             last_tip: std::sync::atomic::AtomicU32::new(0),
             poll_interval: Duration::from_secs(poll_interval_secs),
+            rpc_url: None,
         }
+    }
+
+    /// Set the Bitcoin Core RPC URL for fast confirmation checks.
+    /// Format: `http://user:pass@host:port`
+    pub fn with_rpc_url(mut self, url: String) -> Self {
+        self.rpc_url = Some(url);
+        self
+    }
+
+    /// Check tx confirmation via Bitcoin Core RPC (no indexing lag).
+    /// Uses `gettxout` to check if ANY output of the TX exists as a UTXO,
+    /// which works even when the TX was broadcast via chopsticks and hasn't
+    /// been indexed by Esplora/electrs yet.
+    async fn rpc_is_tx_confirmed(&self, txid: &str) -> Option<bool> {
+        let rpc_url = self.rpc_url.as_ref()?;
+        // Try gettxout for vout 0 (include_mempool=false for confirmed only)
+        let body = serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": "dark",
+            "method": "gettxout",
+            "params": [txid, 0, false]
+        });
+        let resp = self.client.post(rpc_url).json(&body).send().await.ok()?;
+        let json: serde_json::Value = resp.json().await.ok()?;
+        // gettxout returns null result if UTXO doesn't exist (spent or never confirmed)
+        if json.get("result")?.is_null() {
+            // UTXO at vout 0 not found — but it might have been spent already.
+            // Fall back to getrawtransaction to check if the TX exists at all.
+            let body2 = serde_json::json!({
+                "jsonrpc": "1.0",
+                "id": "dark",
+                "method": "getrawtransaction",
+                "params": [txid, true]
+            });
+            let resp2 = self.client.post(rpc_url).json(&body2).send().await.ok()?;
+            let json2: serde_json::Value = resp2.json().await.ok()?;
+            let result = json2.get("result")?;
+            if result.is_null() {
+                return Some(false); // TX truly not found
+            }
+            let confirmations = result.get("confirmations")?.as_u64()?;
+            return Some(confirmations > 0);
+        }
+        // UTXO exists → TX is confirmed
+        Some(true)
+    }
+
+    /// Get tx confirmation height via Bitcoin Core RPC.
+    async fn rpc_get_tx_confirmation_height(&self, txid: &str) -> Option<u32> {
+        let rpc_url = self.rpc_url.as_ref()?;
+        let body = serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": "dark",
+            "method": "getrawtransaction",
+            "params": [txid, true]
+        });
+        let resp = self.client.post(rpc_url).json(&body).send().await.ok()?;
+        let json: serde_json::Value = resp.json().await.ok()?;
+        let result = json.get("result")?;
+        let confirmations = result.get("confirmations")?.as_u64()?;
+        if confirmations == 0 { return None; }
+        // blockhash → getblockheader → height
+        let blockhash = result.get("blockhash")?.as_str()?;
+        let body2 = serde_json::json!({
+            "jsonrpc": "1.0",
+            "id": "dark",
+            "method": "getblockheader",
+            "params": [blockhash]
+        });
+        let resp2 = self.client.post(rpc_url).json(&body2).send().await.ok()?;
+        let json2: serde_json::Value = resp2.json().await.ok()?;
+        json2.get("result")?.get("height")?.as_u64().map(|h| h as u32)
     }
 
     /// Return the base URL (useful for diagnostics / tests).
@@ -439,11 +515,137 @@ impl BlockchainScanner for EsploraScanner {
             .await
             .map_err(|e| ArkError::Internal(format!("Failed to parse tx status: {e}")))?;
 
-        Ok(status.confirmed)
+        if status.confirmed {
+            return Ok(true);
+        }
+
+        // Esplora says not confirmed — try Bitcoin Core RPC as fallback
+        // (no indexing lag, immediate block data access).
+        if let Some(true) = self.rpc_is_tx_confirmed(txid).await {
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     async fn is_output_spent(&self, txid: &str, vout: u32) -> ArkResult<bool> {
-        self.is_output_spent(txid, vout).await
+        let esplora_result = self.is_output_spent(txid, vout).await?;
+        if esplora_result {
+            return Ok(true);
+        }
+        // Esplora says not spent — try Bitcoin Core RPC as fallback.
+        // gettxout returns null if the output was spent or TX unknown.
+        // We check gettxout(false) for confirmed-only: if null AND the TX
+        // has confirmations, the output was spent on-chain.
+        if let Some(rpc_url) = &self.rpc_url {
+            let body = serde_json::json!({
+                "jsonrpc": "1.0",
+                "id": "dark",
+                "method": "gettxout",
+                "params": [txid, vout, false]
+            });
+            if let Ok(resp) = self.client.post(rpc_url).json(&body).send().await {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(result) = json.get("result") {
+                        if result.is_null() {
+                            // Output not in UTXO set. Verify the TX exists
+                            // (to distinguish "spent" from "never existed").
+                            let body2 = serde_json::json!({
+                                "jsonrpc": "1.0",
+                                "id": "dark",
+                                "method": "getrawtransaction",
+                                "params": [txid, true]
+                            });
+                            if let Ok(resp2) = self.client.post(rpc_url).json(&body2).send().await {
+                                if let Ok(json2) = resp2.json::<serde_json::Value>().await {
+                                    if let Some(r) = json2.get("result") {
+                                        if !r.is_null() {
+                                            // TX exists but output not in UTXO set → spent
+                                            return Ok(true);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Output exists in UTXO set → not spent
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    async fn get_tx_confirmation_height(&self, txid: &str) -> ArkResult<Option<u32>> {
+        let url = format!("{}/tx/{}/status", self.base_url, txid);
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ArkError::Internal(format!("Esplora request failed: {e}")))?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(ArkError::Internal(format!(
+                "Esplora GET {url} returned {}",
+                resp.status()
+            )));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct TxStatus {
+            confirmed: bool,
+            block_height: Option<u32>,
+        }
+
+        let status: TxStatus = resp
+            .json()
+            .await
+            .map_err(|e| ArkError::Internal(format!("Failed to parse tx status: {e}")))?;
+
+        if status.confirmed {
+            return Ok(status.block_height);
+        }
+
+        // Esplora says not confirmed — try Bitcoin Core RPC as fallback.
+        if let Some(height) = self.rpc_get_tx_confirmation_height(txid).await {
+            return Ok(Some(height));
+        }
+
+        Ok(None)
+    }
+
+    async fn broadcast_raw_tx(&self, tx_hex: &str) -> ArkResult<()> {
+        if let Some(rpc_url) = &self.rpc_url {
+            // TRUC v3 tree TXs have 0 fee — Bitcoin Core's sendrawtransaction
+            // rejects them. Use testmempoolaccept first to check, then
+            // submitpackage if needed, but the simplest approach is
+            // sendrawtransaction with maxfeerate as a string "0".
+            // Bitcoin Core 24+ accepts maxfeerate=0 to skip the fee check.
+            let body = serde_json::json!({
+                "jsonrpc": "1.0",
+                "id": "dark-relay",
+                "method": "sendrawtransaction",
+                "params": [tx_hex, "0.00000000"]
+            });
+            match self.client.post(rpc_url).json(&body).send().await {
+                Ok(resp) => {
+                    let text = resp.text().await.unwrap_or_default();
+                    if text.contains("error") && !text.contains("already in block chain") && !text.contains("already known") {
+                        tracing::debug!(response = %text.chars().take(200).collect::<String>(),
+                            "broadcast_raw_tx: RPC response");
+                    } else {
+                        tracing::info!("broadcast_raw_tx: tree TX relayed to Bitcoin Core via RPC");
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "broadcast_raw_tx: RPC request failed");
+                }
+            }
+        }
+        Ok(())
     }
 
     fn block_notification_channel(&self) -> broadcast::Receiver<dark_core::ports::NewBlockEvent> {

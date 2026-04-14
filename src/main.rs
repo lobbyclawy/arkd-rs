@@ -161,7 +161,17 @@ async fn main() -> Result<()> {
             } else {
                 30
             };
-            let scanner = Arc::new(dark_scanner::EsploraScanner::new(esplora_url, poll_secs));
+            let mut scanner = dark_scanner::EsploraScanner::new(esplora_url, poll_secs);
+            // Wire Bitcoin Core RPC for fast tx confirmation checks
+            // (bypasses Esplora/chopsticks indexing lag).
+            if let (Some(host), Some(port)) = (&file_config.bitcoin.rpc_host, file_config.bitcoin.rpc_port) {
+                let user = file_config.bitcoin.rpc_user.as_deref().unwrap_or("admin1");
+                let pass = file_config.bitcoin.rpc_password.as_deref().unwrap_or("123");
+                let rpc_url = format!("http://{}:{}@{}:{}", user, pass, host, port);
+                info!(rpc_url = %rpc_url, "Wiring Bitcoin RPC fallback for scanner");
+                scanner = scanner.with_rpc_url(rpc_url);
+            }
+            let scanner = Arc::new(scanner);
             Arc::clone(&scanner).start_polling();
             scanner
         } else {

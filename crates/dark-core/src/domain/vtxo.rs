@@ -134,12 +134,18 @@ impl Vtxo {
     ///
     /// Returns false for notes (no commitment chain and no ark_txid).
     pub fn needs_connector(&self) -> bool {
-        // Preconfirmed VTXOs with an ark_txid always need a connector,
-        // even if the server's expiry sweep marked them as swept.
+        // Swept VTXOs never need connectors — the server already
+        // reclaimed the funds. The Go SDK's vtxosToForfeit() also
+        // excludes swept VTXOs, so the connector count must match.
+        if self.swept {
+            return false;
+        }
+        // Preconfirmed VTXOs with an ark_txid need a connector for
+        // their forfeit path (via checkpoint mechanism).
         if !self.ark_txid.is_empty() {
             return true;
         }
-        !self.swept && !self.is_note()
+        !self.is_note()
     }
 
     /// Generate a note URI for this VTXO using the given prefix.

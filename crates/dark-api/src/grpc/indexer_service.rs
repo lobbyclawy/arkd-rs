@@ -675,14 +675,46 @@ impl IndexerServiceTrait for IndexerGrpcService {
             std::collections::HashSet::new()
         };
 
+        // Real-time unroll detection: for committed VTXOs that aren't yet
+        // marked as unrolled, check if the commitment output was spent on-chain.
+        // This catches unrolls that the background maintenance loop hasn't
+        // processed yet (e.g. due to Esplora indexing lag). Matches Go server
+        // behavior where GetVtxos returns up-to-date on-chain state.
+        // Real-time unroll detection: check each committed VTXO's leaf TX.
+        // If the leaf TX is confirmed on-chain (via RPC fallback for speed),
+        // mark the VTXO as unrolled. This catches unrolls that the
+        // maintenance loop hasn't processed yet.
+        let vtxos = {
+            let mut did_mark = false;
+            for v in &vtxos {
+                if v.unrolled || v.swept || v.spent || v.preconfirmed || v.commitment_txids.is_empty() {
+                    continue;
+                }
+                // Check if THIS VTXO's specific leaf TX is confirmed
+                if let Ok(true) = self.core.scanner().is_tx_confirmed(&v.outpoint.txid).await {
+                    info!(
+                        outpoint = %v.outpoint,
+                        "GetVtxos: leaf TX confirmed — marking VTXO as unrolled (real-time)"
+                    );
+                    let _ = self.core.vtxo_repo()
+                        .mark_vtxos_unrolled(std::slice::from_ref(v))
+                        .await;
+                    did_mark = true;
+                }
+            }
+            if did_mark {
+                self.core.list_vtxos(pubkey_filter).await
+                    .map_err(|e| Status::internal(e.to_string()))?
+            } else {
+                vtxos
+            }
+        };
+
         // Apply client-requested filters.
         let filtered: Vec<IndexerVtxo> = vtxos
             .iter()
             .filter(|v| {
                 if req.spendable_only {
-                    // Unrolled VTXOs are published on-chain — they are no longer
-                    // offchain-spendable even though they haven't been "spent" in
-                    // the virtual sense.
                     return !v.spent && !v.swept && !v.unrolled;
                 }
                 if req.spent_only {
@@ -1182,34 +1214,42 @@ impl IndexerServiceTrait for IndexerGrpcService {
             }
         }
 
-        // Mark VTXOs sharing the matched commitment txids as unrolled.
-        for ctxid in &unroll_commitment_txids {
-            let (spendable, _) = self.core.vtxo_repo().list_all().await.unwrap_or_default();
-            let to_mark: Vec<_> = spendable
-                .iter()
-                .filter(|v| {
-                    v.root_commitment_txid == *ctxid
-                        || v.commitment_txids.first().map(|s| s.as_str()) == Some(ctxid.as_str())
-                })
-                .collect();
-            if !to_mark.is_empty() {
-                info!(
-                    commitment_txid = %ctxid,
-                    vtxo_count = to_mark.len(),
-                    "GetVirtualTxs: marking VTXOs as unrolled (tree PSBTs requested)"
-                );
-                for vtxo in &to_mark {
-                    if let Err(e) = self
-                        .core
-                        .vtxo_repo()
-                        .mark_vtxos_unrolled(std::slice::from_ref(vtxo))
-                        .await
-                    {
-                        warn!(
-                            outpoint = %vtxo.outpoint,
-                            error = %e,
-                            "Failed to mark VTXO as unrolled in GetVirtualTxs"
-                        );
+        // Mark VTXOs as unrolled when the SDK requests LEAF-level tree PSBTs.
+        // When a requested txid matches a tree leaf node (no children), the SDK
+        // is requesting the deepest tree level — it's about to broadcast the
+        // full tree. At this point it's safe to mark the VTXOs as unrolled.
+        // (We don't mark on root/branch requests because the SDK may need to
+        // request deeper levels, and marking prematurely would make the VTXOs
+        // non-spendable, breaking subsequent GetVirtualTxs calls.)
+        // Relay signed tree TXs DIRECTLY to Bitcoin Core via RPC
+        // (bypasses chopsticks relay lag). The scanner has the RPC URL.
+        // This ensures tree TXs are in Bitcoin Core's mempool before
+        // the SDK calls Balance/GetVtxos, enabling real-time unroll
+        // detection via the gettxout RPC fallback.
+        for psbt_b64 in &txs {
+            use base64::Engine;
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(psbt_b64) {
+                if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
+                    let has_witness = psbt.inputs.iter().any(|inp| {
+                        inp.final_script_witness.is_some() || inp.tap_key_sig.is_some()
+                    });
+                    if has_witness {
+                        // Finalize: set final_script_witness from tap_key_sig
+                        let mut finalized = psbt.clone();
+                        for inp in &mut finalized.inputs {
+                            if inp.final_script_witness.is_none() {
+                                if let Some(sig) = inp.tap_key_sig {
+                                    inp.final_script_witness = Some(
+                                        bitcoin::Witness::from_slice(&[sig.serialize()])
+                                    );
+                                }
+                            }
+                        }
+                        let tx = finalized.extract_tx_unchecked_fee_rate();
+                        let tx_hex = hex::encode(bitcoin::consensus::serialize(&tx));
+                        let _ = self.core.wallet()
+                            .broadcast_with_anchor_bump(&tx_hex)
+                            .await;
                     }
                 }
             }

@@ -106,6 +106,16 @@ pub trait WalletService: Send + Sync {
     async fn broadcast_forfeit_with_anchor(&self, txs: &[String]) -> ArkResult<String> {
         self.broadcast_transaction(txs.to_vec()).await
     }
+
+    /// Broadcast a 0-fee P2A transaction by creating a CPFP child that spends
+    /// the anchor output and pays the package fee. Returns the parent txid.
+    ///
+    /// The child TX spends the P2A anchor (OP_1 0x4e73) output of the parent
+    /// plus a wallet UTXO to cover fees, with change back to the wallet.
+    async fn broadcast_with_anchor_bump(&self, raw_tx_hex: &str) -> ArkResult<String> {
+        // Default: just broadcast directly (implementations override for CPFP)
+        self.broadcast_transaction(vec![raw_tx_hex.to_string()]).await
+    }
     /// Get current fee rate (sat/vB)
     async fn fee_rate(&self) -> ArkResult<u64>;
     /// Get the current block timestamp
@@ -827,6 +837,22 @@ pub trait BlockchainScanner: Send + Sync {
     /// Default implementation returns `Ok(false)`.
     async fn is_output_spent(&self, _txid: &str, _vout: u32) -> ArkResult<bool> {
         Ok(false)
+    }
+
+    /// Get the block height at which a transaction was confirmed.
+    ///
+    /// Returns `Ok(Some(height))` if the tx is confirmed, `Ok(None)` if
+    /// unconfirmed or not found. Used for calculating CSV expiry of
+    /// on-chain tree outputs.
+    async fn get_tx_confirmation_height(&self, _txid: &str) -> ArkResult<Option<u32>> {
+        Ok(None)
+    }
+
+    /// Broadcast a raw transaction hex directly via Bitcoin Core RPC.
+    /// Bypasses Esplora/chopsticks for zero relay lag.
+    /// Default implementation is a no-op.
+    async fn broadcast_raw_tx(&self, _tx_hex: &str) -> ArkResult<()> {
+        Ok(())
     }
 
     /// Get a receiver for new-block notifications.

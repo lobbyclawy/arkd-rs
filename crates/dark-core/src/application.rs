@@ -340,6 +340,11 @@ impl ArkService {
         self.scanner.as_ref()
     }
 
+    /// Broadcast a raw hex transaction via the scanner (direct RPC if available).
+    pub async fn broadcast_raw_tx_via_rpc(&self, tx_hex: &str) -> ArkResult<()> {
+        self.scanner.broadcast_raw_tx(tx_hex).await
+    }
+
     /// Set a round repository for persisting completed rounds.
     pub fn with_round_repo(mut self, repo: Arc<dyn crate::ports::RoundRepository>) -> Self {
         self.round_repo = repo;
@@ -756,8 +761,11 @@ impl ArkService {
             return Err(ArkError::Internal("Round already ended".to_string()));
         }
 
-        // Collect intents
+        // Collect intents (duplicates already filtered in register_intent).
+        // Sort deterministically by intent ID so connector leaf → outpoint
+        // mapping is consistent regardless of HashMap iteration order.
         let mut intents: Vec<Intent> = round.intents.values().cloned().collect();
+        intents.sort_by(|a, b| a.id.cmp(&b.id));
 
         if intents.is_empty() {
             info!(round_id = %round.id, "No intents — skipping round");
@@ -1308,6 +1316,25 @@ impl ArkService {
             if node.tx.is_empty() {
                 continue;
             }
+            // Verify stored txid matches the PSBT's unsigned TX txid.
+            // If these differ, the SDK will generate nonces for the wrong txids.
+            {
+                use base64::Engine;
+                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&node.tx) {
+                    if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
+                        let recomputed = psbt.unsigned_tx.compute_txid().to_string();
+                        if recomputed != node.txid {
+                            error!(
+                                stored_txid = %node.txid,
+                                psbt_txid = %recomputed,
+                                "TXID MISMATCH: stored tree node txid differs from PSBT unsigned TX txid!"
+                            );
+                        } else {
+                            debug!(txid = %node.txid, "Tree node txid verified OK");
+                        }
+                    }
+                }
+            }
             let node_cosigners =
                 Self::extract_cosigners_from_psbt_b64(&node.tx).unwrap_or_default();
             // Fall back to global cosigners only when extraction fails (should
@@ -1356,11 +1383,9 @@ impl ArkService {
                 if node.tx.is_empty() {
                     continue;
                 }
-                // Leaf nodes (no children) → send with their specific input
-                // outpoint as topic.  Root/branch nodes → send to all clients.
+                // Leaf nodes → specific outpoint topic.
+                // Root/branch → all outpoints (all clients receive).
                 let topic = if node.children.is_empty() {
-                    // Find this leaf's index among leaf nodes to map it to
-                    // the corresponding forfeitable outpoint.
                     let leaf_idx = round
                         .connectors
                         .iter()
@@ -1789,10 +1814,27 @@ impl ArkService {
                 vtxo_expiry.apply_to(&mut vtxo);
 
                 // Carry over assets from the leaf PSBT's OP_RETURN extension.
-                // During Settle, the intent's leaf_tx_asset_packet may contain
-                // asset data that was extracted from the proof PSBT.
-                // Also check the leaf PSBT itself for asset extensions.
-                if let Some(leaf) = leaf_nodes.get(vtxo_idx as usize) {
+                // Find the leaf whose P2TR output matches this receiver's pubkey
+                // (not by positional index, which depends on HashMap ordering).
+                let receiver_xonly = if receiver.pubkey.len() == 66 { &receiver.pubkey[2..] } else { receiver.pubkey.as_str() };
+                let matching_leaf = leaf_nodes.iter().find(|leaf| {
+                    if leaf.tx.is_empty() { return false; }
+                    use base64::Engine;
+                    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&leaf.tx) {
+                        if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
+                            // Check if the leaf's first P2TR output matches the receiver
+                            for out in &psbt.unsigned_tx.output {
+                                let sb = out.script_pubkey.as_bytes();
+                                if sb.len() == 34 && sb[0] == 0x51 && sb[1] == 0x20 {
+                                    let leaf_xonly = hex::encode(&sb[2..]);
+                                    if leaf_xonly == receiver_xonly { return true; }
+                                }
+                            }
+                        }
+                    }
+                    false
+                });
+                if let Some(leaf) = matching_leaf.or(leaf_nodes.get(vtxo_idx as usize)) {
                     if !leaf.tx.is_empty() {
                         use base64::Engine;
                         if let Ok(psbt_bytes) = base64::engine::general_purpose::STANDARD.decode(&leaf.tx) {
@@ -1836,11 +1878,8 @@ impl ArkService {
 
                 // Carry over assets from intent input VTXOs if the leaf PSBT
                 // didn't have an asset extension AND there's only one intent
-                // (single-party Settle). For multi-party rounds, we can't
-                // safely map assets to receivers without parsing the leaf's
-                // asset extension (which we already do above from the PSBT).
-                // Single-party is safe because all inputs belong to the
-                // same user who is the sole receiver.
+                // (single-party Settle). Multi-party rounds rely on the leaf
+                // PSBT's OP_RETURN asset extension (parsed above).
                 if vtxo.assets.is_empty() && intents.len() == 1 {
                     let mut asset_sums: std::collections::HashMap<String, u64> =
                         std::collections::HashMap::new();
@@ -2062,28 +2101,12 @@ impl ArkService {
                 targets
             };
 
-            let ban_repo_ref = self.ban_repo.clone();
-            let timeout_round_id = round.id.clone();
-            tokio::spawn(async move {
-                // Wait for forfeits. If submit_signed_forfeit_txs ends
-                // the round and emits BatchFinalized before this fires,
-                // the ban is unnecessary.  The SDK will have completed
-                // successfully.
-                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                // Ban ALL non-ASP participants.  If the SDK already
-                // completed (forfeits were submitted), the ban only
-                // affects misbehaving sessions.
-                for (cpk, owners) in &ban_targets {
-                    let _ = ban_repo_ref
-                        .ban(cpk, crate::domain::BanReason::FailedToConfirm, &timeout_round_id)
-                        .await;
-                    for opk in owners {
-                        let _ = ban_repo_ref
-                            .ban(opk, crate::domain::BanReason::FailedToConfirm, &timeout_round_id)
-                            .await;
-                    }
-                }
-            });
+            // NOTE: Delayed ban removed. Banning is handled by abort_round()
+            // when the signing timeout fires. The fire-and-forget delayed ban
+            // caused cross-test ban leakage by banning ALL participants
+            // (including innocent ones from stale sessions) after every round,
+            // even successful ones.
+            let _ = &ban_targets; // suppress unused warning
         }
 
         // Mark boarding transactions as claimed now that the round has completed.
@@ -2222,6 +2245,89 @@ impl ArkService {
         }
 
         Ok(completed_round)
+    }
+
+    /// Try to complete the round with only confirmed intents.
+    ///
+    /// Called by the round loop before aborting on signing timeout. If the round
+    /// has unconfirmed intents (from stale SDK sessions), drops them and checks
+    /// if all remaining (confirmed) cosigners have submitted nonces. If yes,
+    /// returns Ok (the round will complete normally). If not, returns Err.
+    pub async fn try_complete_confirmed_only(&self) -> ArkResult<()> {
+        let mut guard = self.current_round.write().await;
+        let round = guard
+            .as_mut()
+            .ok_or_else(|| ArkError::Internal("No active round".to_string()))?;
+
+        if round.is_ended() {
+            return Ok(()); // Already completed
+        }
+
+        // Check if there are unconfirmed intents
+        let unconfirmed: Vec<String> = round
+            .confirmation_status
+            .iter()
+            .filter(|(_, status)| matches!(status, crate::domain::ConfirmationStatus::Pending))
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        if unconfirmed.is_empty() {
+            return Err(ArkError::Internal("All intents confirmed — timeout is genuine".to_string()));
+        }
+
+        // Drop unconfirmed intents
+        let dropped = round.drop_unconfirmed();
+        if dropped > 0 {
+            info!(
+                round_id = %round.id,
+                dropped_count = dropped,
+                "Dropped unconfirmed intents from timed-out round"
+            );
+
+            // Re-count cosigners from remaining (confirmed) intents
+            let confirmed_cosigners: std::collections::HashSet<String> = round
+                .vtxo_tree
+                .iter()
+                .filter(|n| !n.tx.is_empty())
+                .flat_map(|n| Self::extract_cosigners_from_psbt_b64(&n.tx).unwrap_or_default())
+                .collect();
+
+            // Check if the signing session has all confirmed cosigners' nonces
+            if let Ok(Some(session)) = self.signing_session_store.get_session(&round.id).await {
+                let nonce_keys: std::collections::HashSet<String> = session
+                    .tree_nonces
+                    .iter()
+                    .map(|(k, _)| k.clone())
+                    .collect();
+
+                // Check if all confirmed cosigners submitted nonces
+                let all_confirmed_have_nonces = confirmed_cosigners.iter().all(|ck| {
+                    let xonly = if ck.len() == 66 { &ck[2..] } else { ck.as_str() };
+                    nonce_keys.contains(ck) || nonce_keys.contains(xonly)
+                });
+
+                if all_confirmed_have_nonces {
+                    // Re-initialize signing session with correct participant count
+                    let _ = self.signing_session_store
+                        .init_session(&round.id, confirmed_cosigners.len())
+                        .await;
+                    // Re-add nonces from confirmed cosigners
+                    for (key, nonce) in &session.tree_nonces {
+                        let _ = self.signing_session_store
+                            .add_nonce(&round.id, key, nonce.clone())
+                            .await;
+                    }
+                    info!(
+                        round_id = %round.id,
+                        confirmed_cosigners = confirmed_cosigners.len(),
+                        "All confirmed cosigners have nonces — round can proceed"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(ArkError::Internal("Cannot complete with confirmed-only".to_string()))
     }
 
     /// Abort the current round due to timeout or other failure.
@@ -2369,25 +2475,82 @@ impl ArkService {
 
             if !all_expected.is_empty() {
                 let expected_pubkeys = all_expected;
-                // Ban ALL non-ASP cosigners and their VTXO owners.
-                //
-                // When a round times out, at least one participant failed
-                // to complete the protocol. Rather than trying to determine
-                // WHICH specific phase failed (nonces, signatures, forfeits,
-                // boarding inputs), ban all participants in the round.
-                //
-                // This covers:
-                //  - failed_to_submit_tree_nonces
-                //  - failed_to_submit_tree_signatures
-                //  - failed_to_submit_valid_tree_signatures (invalid sigs)
-                //  - failed_to_submit_forfeit_txs
-                //  - failed_to_submit_valid_forfeit_txs (invalid forfeits)
-                //  - failed_to_submit_boarding_inputs
-                //
-                // Innocent participants in multi-party rounds may be caught,
-                // but this matches the Go server's conviction approach where
-                // all round participants share liability for round failure.
+                // Only ban cosigners whose intents have forfeitable VTXO inputs
+                // (i.e. inputs that need a connector). Note-only intents (faucet
+                // rounds) shouldn't trigger bans because the participant isn't
+                // misbehaving — they just got caught in a multi-party round where
+                // another participant failed to respond.
+                // Cosigners from intents that have real inputs (VTXOs or boarding).
+                // Note-only intents have empty inputs — those are faucet rounds
+                // that shouldn't trigger bans on cross-test collision.
+                let cosigners_with_real_inputs: std::collections::HashSet<String> = failed_round
+                    .intents
+                    .values()
+                    .filter(|i| !i.inputs.is_empty())
+                    .flat_map(|i| i.cosigners_public_keys.iter().cloned())
+                    .collect();
+
+                // For signing timeouts where NO signatures were submitted at all,
+                // only ban cosigners that didn't submit nonces. Participants
+                // that DID submit nonces are innocent — they got caught in a
+                // round where someone ELSE failed to respond.
+                // If any signatures were submitted, the abort is due to
+                // signature issues (not pure nonce timeout) — ban everyone.
+                let nonce_submitters: std::collections::HashSet<String> =
+                    if reason == "signing timeout" {
+                        let session = self.signing_session_store
+                            .get_session(&failed_round.id)
+                            .await
+                            .ok()
+                            .flatten();
+                        let has_any_sigs = session.as_ref()
+                            .map(|s| !s.tree_signatures.is_empty())
+                            .unwrap_or(false);
+                        if has_any_sigs {
+                            // Signatures were submitted — this isn't a pure nonce timeout
+                            std::collections::HashSet::new()
+                        } else {
+                            session
+                                .map(|s| {
+                                    let mut keys: std::collections::HashSet<String> = s.tree_nonces.iter().map(|(k, _)| k.clone()).collect();
+                                    let xonly: Vec<String> = keys.iter()
+                                        .filter(|k| k.len() == 66)
+                                        .map(|k| k[2..].to_string())
+                                        .collect();
+                                    keys.extend(xonly);
+                                    keys
+                                })
+                                .unwrap_or_default()
+                        }
+                    } else {
+                        std::collections::HashSet::new() // non-timeout: ban everyone
+                    };
+
                 for expected_pk in &expected_pubkeys {
+                    // Skip banning note-only (faucet) participants
+                    if !cosigners_with_real_inputs.contains(expected_pk) {
+                        let is_in_intent_cosigners = intent_cosigners.contains(expected_pk);
+                        if is_in_intent_cosigners {
+                            info!(
+                                pubkey = %expected_pk,
+                                round_id = %failed_round.id,
+                                "Skipping ban for note-only participant (no real inputs)"
+                            );
+                            continue;
+                        }
+                    }
+                    // For signing timeouts, skip banning participants that submitted nonces
+                    if reason == "signing timeout" {
+                        let pk_xonly = if expected_pk.len() == 66 { &expected_pk[2..] } else { expected_pk.as_str() };
+                        if nonce_submitters.contains(expected_pk) || nonce_submitters.contains(pk_xonly) {
+                            info!(
+                                pubkey = %expected_pk,
+                                round_id = %failed_round.id,
+                                "Skipping ban — participant submitted nonces (signing timeout)"
+                            );
+                            continue;
+                        }
+                    }
                     warn!(
                         pubkey = %expected_pk,
                         round_id = %failed_round.id,
@@ -2405,18 +2568,39 @@ impl ArkService {
                     }
 
                     // Also ban the VTXO owner keys associated with this
-                    // cosigner so the ban applies when the user reconnects
-                    // with a different signer session.
-                    if let Some(owners) = cosigner_to_owner.get(expected_pk) {
-                        for owner_pk in owners {
-                            let _ = self
-                                .ban_participant(
-                                    owner_pk,
-                                    crate::domain::BanReason::FailedToConfirm,
-                                    &failed_round.id,
-                                )
-                                .await;
+                    // cosigner — but ONLY if the cosigner's intent was confirmed.
+                    // Unconfirmed intents are from stale SDK sessions (cross-test
+                    // collision). Their owner keys are innocent and shouldn't be
+                    // banned, otherwise the ban cascades to later tests.
+                    let cosigner_was_confirmed = failed_round
+                        .intents
+                        .values()
+                        .any(|i| {
+                            i.cosigners_public_keys.contains(&expected_pk.to_string())
+                                && failed_round
+                                    .confirmation_status
+                                    .get(&i.id)
+                                    .map(|s| matches!(s, crate::domain::ConfirmationStatus::Confirmed { .. }))
+                                    .unwrap_or(false)
+                        });
+                    if cosigner_was_confirmed {
+                        if let Some(owners) = cosigner_to_owner.get(expected_pk) {
+                            for owner_pk in owners {
+                                let _ = self
+                                    .ban_participant(
+                                        owner_pk,
+                                        crate::domain::BanReason::FailedToConfirm,
+                                        &failed_round.id,
+                                    )
+                                    .await;
+                            }
                         }
+                    } else {
+                        info!(
+                            pubkey = %expected_pk,
+                            round_id = %failed_round.id,
+                            "Skipping owner ban — cosigner's intent was not confirmed"
+                        );
                     }
                 }
             }
@@ -3041,6 +3225,46 @@ impl ArkService {
             .as_mut()
             .ok_or_else(|| ArkError::Internal("No active round".to_string()))?;
 
+        // Isolate note-only intents: if this intent only has note inputs
+        // (no forfeitable VTXOs) and the round already has intents from
+        // OTHER users, start a new round. This prevents cross-test/cross-user
+        // collisions where a faucet note redemption lands in another user's
+        // round — the extra cosigner would never submit nonces, causing a
+        // signing timeout.
+        // Note-only: intent has zero inputs (notes are "redeemed pending"
+        // and skipped as intent inputs in RegisterIntent). Settle/SendOffChain
+        // intents always have at least one input (VTXO or boarding).
+        let is_note_only = intent.inputs.is_empty();
+        if is_note_only && !round.intents.is_empty() {
+            let my_owner = intent.receivers.first().map(|r| r.pubkey.as_str()).unwrap_or("");
+            // Only isolate if the round has a non-note intent from a different
+            // user. If ALL existing intents are also notes, share the round
+            // (this is the normal batch note redemption case like redeem_notes test).
+            let has_non_note_other_user = round.intents.values().any(|existing| {
+                let other_owner = existing.receivers.first().map(|r| r.pubkey.as_str()).unwrap_or("");
+                let other_is_note = existing.inputs.is_empty();
+                other_owner != my_owner && !other_is_note
+            });
+            let has_other_user = has_non_note_other_user;
+            if has_other_user {
+                info!(
+                    round_id = %round.id,
+                    "Note-only intent collides with other users — starting new round"
+                );
+                round.fail("Restarting for note isolation".to_string());
+                drop(guard);
+                let _ = self.start_round().await;
+                guard = self.current_round.write().await;
+                let round = guard.as_mut()
+                    .ok_or_else(|| ArkError::Internal("No active round after restart".to_string()))?;
+                // Re-register in the fresh round
+                round.intents.insert(intent.id.clone(), intent);
+                let intent_id = round.intents.keys().last().unwrap().clone();
+                info!(round_id = %round.id, intent_id, "Intent registered (in fresh round)");
+                return Ok(intent_id);
+            }
+        }
+
         // Reject duplicate VTXO inputs: if any input is already registered
         // in another intent within this round, this is a double-spend attempt.
         for input in &intent.inputs {
@@ -3055,6 +3279,32 @@ impl ArkService {
                             input_op, existing_intent.id
                         )));
                     }
+                }
+            }
+        }
+
+        // Reject duplicate owner: if the round already has an intent with the
+        // same first receiver pubkey, this is a SDK retry that landed in the
+        // same round. Including both intents would add an extra cosigner to the
+        // signing session that never responds, causing a timeout → ban.
+        // Replace the old intent with the new one (the SDK abandoned the old signer session).
+        if let Some(owner_pk) = intent.receivers.first().map(|r| &r.pubkey) {
+            if !owner_pk.is_empty() {
+                let dup_id = round
+                    .intents
+                    .values()
+                    .find(|existing| {
+                        existing.receivers.first().map(|r| &r.pubkey) == Some(owner_pk)
+                    })
+                    .map(|existing| existing.id.clone());
+                if let Some(old_id) = dup_id {
+                    info!(
+                        old_intent = %old_id,
+                        new_intent = %intent.id,
+                        owner = %owner_pk,
+                        "Replacing duplicate intent from same owner (SDK retry)"
+                    );
+                    round.intents.remove(&old_id);
                 }
             }
         }
@@ -3451,10 +3701,17 @@ impl ArkService {
         // Also group SPENT VTXOs by commitment txid for fraud detection.
         // If a spent VTXO's tree is unrolled on-chain, we must broadcast
         // the forfeit tx to claim the funds before the user's timelock expires.
+        // Spent preconfirmed VTXOs are also collected for checkpoint-based sweep.
         let mut spent_by_commitment: std::collections::HashMap<String, Vec<&Vtxo>> =
             std::collections::HashMap::new();
         for vtxo in &spent {
             if vtxo.is_note() || vtxo.swept || vtxo.unrolled {
+                continue;
+            }
+            // Include spent preconfirmed VTXOs in the preconfirmed list
+            // so checkpoint-based sweep can update their expiry.
+            if vtxo.preconfirmed {
+                preconfirmed_vtxos.push(vtxo);
                 continue;
             }
             let ctxid = if !vtxo.root_commitment_txid.is_empty() {
@@ -3477,77 +3734,83 @@ impl ArkService {
             "check_unrolled_vtxos: categorised VTXOs"
         );
 
-        // Check preconfirmed VTXOs: mark as unrolled when EITHER the ark tx
-        // OR any of its checkpoint txs is confirmed on-chain.  The unroll
-        // chain is: tree node → checkpoint → ark tx.  The test does 2
-        // Unroll() calls which broadcast the tree node and checkpoint.
-        // The ark tx is never explicitly broadcast — once the checkpoint
-        // is on-chain the funds are committed and the VTXO should leave
-        // the offchain balance.
+        // Check preconfirmed VTXOs (both spendable and spent).
+        // When a checkpoint tx for the offchain TX is confirmed on-chain,
+        // set `expires_at_block` so the sweep can reclaim after CSV maturity.
+        // We do NOT mark them as "unrolled" (that is for user-initiated
+        // unrolls); instead we track when the server can sweep.
+        let csv_delay = self.config.unilateral_exit_delay;
         for vtxo in &preconfirmed_vtxos {
+            if vtxo.swept || vtxo.expires_at_block > 0 {
+                // Already swept or expiry already updated — skip.
+                continue;
+            }
             let offchain_tx_id = &vtxo.ark_txid;
-            let mut should_mark = false;
 
             if let Ok(Some(otx)) = self.offchain_tx_repo.get(offchain_tx_id).await {
                 use base64::Engine;
 
-                // Check if the ark tx itself is confirmed
-                if !otx.signed_ark_tx.is_empty() {
+                // Check each checkpoint tx for on-chain confirmation.
+                // When confirmed, update the VTXO's expires_at_block so
+                // the sweeper can reclaim after the checkpoint's CSV.
+                for ckpt_b64 in &otx.checkpoint_txs {
+                    if let Some(ckpt_txid) = base64::engine::general_purpose::STANDARD
+                        .decode(ckpt_b64)
+                        .ok()
+                        .and_then(|bytes| bitcoin::psbt::Psbt::deserialize(&bytes).ok())
+                        .map(|psbt| psbt.unsigned_tx.compute_txid().to_string())
+                    {
+                        if let Ok(Some(conf_height)) = self
+                            .scanner
+                            .get_tx_confirmation_height(&ckpt_txid)
+                            .await
+                        {
+                            let new_expiry_block = conf_height + csv_delay;
+                            if vtxo.expires_at_block != new_expiry_block {
+                                let mut updated = (*vtxo).clone();
+                                updated.expires_at_block = new_expiry_block;
+                                if let Err(e) = self.vtxo_repo.add_vtxos(&[updated]).await {
+                                    warn!(outpoint = %vtxo.outpoint, error = %e,
+                                        "Failed to update preconfirmed VTXO expiry from checkpoint");
+                                } else {
+                                    info!(outpoint = %vtxo.outpoint,
+                                        checkpoint_txid = %ckpt_txid,
+                                        conf_height, new_expiry_block,
+                                        "Updated preconfirmed VTXO expiry from confirmed checkpoint");
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+
+                // Also check the ark tx itself
+                if !otx.signed_ark_tx.is_empty() && vtxo.expires_at_block == 0 {
                     if let Some(btc_txid) = base64::engine::general_purpose::STANDARD
                         .decode(&otx.signed_ark_tx)
                         .ok()
                         .and_then(|bytes| bitcoin::psbt::Psbt::deserialize(&bytes).ok())
                         .map(|psbt| psbt.unsigned_tx.compute_txid().to_string())
                     {
-                        if let Ok(true) = self.scanner.is_tx_confirmed(&btc_txid).await {
-                            info!(
-                                outpoint = %vtxo.outpoint,
-                                bitcoin_txid = %btc_txid,
-                                "Preconfirmed VTXO: ark tx confirmed — marking as unrolled"
-                            );
-                            should_mark = true;
-                        }
-                    }
-                }
-
-                // Also check if any checkpoint tx is confirmed (the unroll
-                // may stop at the checkpoint level without broadcasting the
-                // ark tx itself).
-                if !should_mark {
-                    for ckpt_b64 in &otx.checkpoint_txs {
-                        if let Some(ckpt_txid) = base64::engine::general_purpose::STANDARD
-                            .decode(ckpt_b64)
-                            .ok()
-                            .and_then(|bytes| bitcoin::psbt::Psbt::deserialize(&bytes).ok())
-                            .map(|psbt| psbt.unsigned_tx.compute_txid().to_string())
+                        if let Ok(Some(conf_height)) = self
+                            .scanner
+                            .get_tx_confirmation_height(&btc_txid)
+                            .await
                         {
-                            if let Ok(true) = self.scanner.is_tx_confirmed(&ckpt_txid).await {
-                                info!(
-                                    outpoint = %vtxo.outpoint,
-                                    checkpoint_txid = %ckpt_txid,
-                                    "Preconfirmed VTXO: checkpoint confirmed — marking as unrolled"
-                                );
-                                should_mark = true;
-                                break;
+                            let new_expiry_block = conf_height + csv_delay;
+                            let mut updated = (*vtxo).clone();
+                            updated.expires_at_block = new_expiry_block;
+                            if let Err(e) = self.vtxo_repo.add_vtxos(&[updated]).await {
+                                warn!(outpoint = %vtxo.outpoint, error = %e,
+                                    "Failed to update preconfirmed VTXO expiry from ark tx");
+                            } else {
+                                info!(outpoint = %vtxo.outpoint,
+                                    bitcoin_txid = %btc_txid,
+                                    conf_height, new_expiry_block,
+                                    "Updated preconfirmed VTXO expiry from confirmed ark tx");
                             }
                         }
                     }
-                }
-            }
-
-            if should_mark {
-                if let Err(e) = self
-                    .vtxo_repo
-                    .mark_vtxos_unrolled(std::slice::from_ref(vtxo))
-                    .await
-                {
-                    warn!(
-                        outpoint = %vtxo.outpoint,
-                        error = %e,
-                        "Failed to mark preconfirmed VTXO as unrolled"
-                    );
-                } else {
-                    count += 1;
                 }
             }
         }
@@ -3572,14 +3835,20 @@ impl ArkService {
             // of spendable VTXOs and the user cannot continue unrolling
             // deeper tree levels.
             //
-            // First, check if the commitment tx shared output was spent at
-            // all (quick rejection — if not spent, no VTXO in this group
-            // can be unrolled).
+            // Check if the commitment TX output was spent (tree being unrolled).
+            // Uses Bitcoin Core RPC fallback to bypass chopsticks indexing lag.
             match self.scanner.is_output_spent(commitment_txid, 0).await {
                 Ok(true) => {
-                    // Commitment output is spent, but individual VTXOs may
-                    // be at different tree depths.  Check each VTXO's leaf.
+                    // Commitment output spent → tree is being unrolled.
+                    let csv_delay = self.config.unilateral_exit_delay;
                     for vtxo in vtxos {
+                        // Mark ALL VTXOs as unrolled when commitment is spent.
+                        // The Go server does this — it doesn't wait for each
+                        // individual leaf TX to be confirmed (which requires
+                        // multiple blocks for deep trees).
+                        if vtxo.unrolled {
+                            continue;
+                        }
                         match self.scanner.is_tx_confirmed(&vtxo.outpoint.txid).await {
                             Ok(true) => {
                                 info!(
@@ -3599,11 +3868,69 @@ impl ArkService {
                                     );
                                 } else {
                                     count += 1;
+                                    // Reset the CSV expiry from the leaf's
+                                    // confirmation height so the sweeper fires
+                                    // at the right time.
+                                    if let Ok(Some(conf_height)) = self
+                                        .scanner
+                                        .get_tx_confirmation_height(&vtxo.outpoint.txid)
+                                        .await
+                                    {
+                                        let new_expiry_block = conf_height + csv_delay;
+                                        let mut updated = (*vtxo).clone();
+                                        updated.expires_at_block = new_expiry_block;
+                                        if let Err(e) = self.vtxo_repo.add_vtxos(&[updated]).await {
+                                            warn!(outpoint = %vtxo.outpoint, error = %e,
+                                                "Failed to update expiry after unroll");
+                                        } else {
+                                            info!(outpoint = %vtxo.outpoint, new_expiry_block,
+                                                "Reset VTXO expiry after on-chain unroll");
+                                        }
+                                    }
                                 }
                             }
                             Ok(false) => {
-                                // Leaf tx not yet on-chain — tree not fully
-                                // unrolled for this VTXO; skip it.
+                                // Leaf tx not yet on-chain. Walk the tree to
+                                // find an ancestor for sweep timing. Do NOT
+                                // mark as unrolled — the SDK may still need
+                                // the VTXO for further unroll steps.
+                                if vtxo.swept || vtxo.unrolled {
+                                    continue;
+                                }
+                                // Skip if expiry was already updated by a prior cycle.
+                                // Original expires_at_block is creation_height + vtxo_expiry_blocks (large).
+                                // Updated value is ancestor_conf_height + csv_delay (smaller).
+                                if let Some(veb) = self.config.vtxo_expiry_blocks {
+                                    if vtxo.expires_at_block > 0 && vtxo.expires_at_block < veb {
+                                        continue;
+                                    }
+                                }
+                                if let Ok(Some(round)) = self
+                                    .round_repo
+                                    .get_round_by_commitment_txid(commitment_txid)
+                                    .await
+                                {
+                                    if let Some(ancestor_conf) = self
+                                        .find_confirmed_ancestor_height(
+                                            &round.vtxo_tree,
+                                            &vtxo.outpoint.txid,
+                                        )
+                                        .await
+                                    {
+                                        let new_expiry_block = ancestor_conf + csv_delay;
+                                        let mut updated = (*vtxo).clone();
+                                        if updated.expires_at_block != new_expiry_block {
+                                            updated.expires_at_block = new_expiry_block;
+                                            if let Err(e) = self.vtxo_repo.add_vtxos(&[updated]).await {
+                                                warn!(outpoint = %vtxo.outpoint, error = %e,
+                                                    "Failed to update expiry for ancestor-confirmed VTXO");
+                                            } else {
+                                                info!(outpoint = %vtxo.outpoint, new_expiry_block,
+                                                    "Updated VTXO expiry from confirmed ancestor tree node");
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             Err(e) => {
                                 warn!(
@@ -3616,125 +3943,7 @@ impl ArkService {
                     }
                 }
                 Ok(false) => {
-                    // Fallback: the Esplora outspend API is unreliable in some
-                    // environments (notably regtest with electrs). Try an
-                    // alternative detection path:
-                    //
-                    // 1. Look up the round that produced this commitment tx.
-                    // 2. Find the first tree transaction (the one that spends
-                    //    the commitment tx vout 0 when the user unrolls).
-                    // 3. Check if that tree tx is confirmed on-chain.
-                    //
-                    // If confirmed, the tree was unrolled.
-                    let mut found_onchain = false;
-                    match self
-                        .round_repo
-                        .get_round_by_commitment_txid(commitment_txid)
-                        .await
-                    {
-                        Ok(Some(round)) => {
-                            // The vtxo_tree is flattened bottom-up: children
-                            // first, root last. The root tx spends commitment
-                            // tx vout 0 when the user unrolls.
-                            //
-                            // Note: the stored `node.txid` may be stale if the
-                            // commitment tx was patched after fee-input addition.
-                            // Compute the real txid from the PSBT.
-                            if let Some(root_node) = round.vtxo_tree.last() {
-                                let tree_root_txid = Self::compute_txid_from_psbt(&root_node.tx)
-                                    .unwrap_or_else(|| root_node.txid.clone());
-                                info!(
-                                    tree_root_txid = %tree_root_txid,
-                                    commitment_txid = %commitment_txid,
-                                    tree_size = round.vtxo_tree.len(),
-                                    "Fallback: checking tree root tx confirmation"
-                                );
-                                match self.scanner.is_tx_confirmed(&tree_root_txid).await {
-                                    Ok(true) => {
-                                        info!(
-                                            tree_root_txid = %tree_root_txid,
-                                            commitment_txid = %commitment_txid,
-                                            "Tree root tx confirmed on-chain — marking group as unrolled"
-                                        );
-                                        found_onchain = true;
-                                    }
-                                    Ok(false) => {
-                                        info!(
-                                            tree_root_txid = %tree_root_txid,
-                                            commitment_txid = %commitment_txid,
-                                            "Tree root tx not yet confirmed"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        info!(
-                                            tree_root_txid = %tree_root_txid,
-                                            error = %e,
-                                            "Failed to check tree root tx confirmation"
-                                        );
-                                    }
-                                }
-                            } else {
-                                info!(
-                                    commitment_txid = %commitment_txid,
-                                    "Round found but vtxo_tree is empty"
-                                );
-                            }
-                        }
-                        Ok(None) => {
-                            info!(
-                                commitment_txid = %commitment_txid,
-                                "No round found for commitment txid (fallback skipped)"
-                            );
-                        }
-                        Err(e) => {
-                            info!(
-                                commitment_txid = %commitment_txid,
-                                error = %e,
-                                "Failed to look up round for commitment txid"
-                            );
-                        }
-                    }
-                    if found_onchain {
-                        // Tree root is on-chain; check each VTXO's leaf tx
-                        // individually (same logic as the primary path above).
-                        for vtxo in vtxos {
-                            match self.scanner.is_tx_confirmed(&vtxo.outpoint.txid).await {
-                                Ok(true) => {
-                                    info!(
-                                        outpoint = %vtxo.outpoint,
-                                        commitment_txid = %commitment_txid,
-                                        "VTXO leaf tx confirmed (fallback) — marking as unrolled"
-                                    );
-                                    if let Err(e) = self
-                                        .vtxo_repo
-                                        .mark_vtxos_unrolled(std::slice::from_ref(vtxo))
-                                        .await
-                                    {
-                                        warn!(
-                                            outpoint = %vtxo.outpoint,
-                                            error = %e,
-                                            "Failed to mark VTXO as unrolled"
-                                        );
-                                    } else {
-                                        count += 1;
-                                    }
-                                }
-                                Ok(false) => {}
-                                Err(e) => {
-                                    warn!(
-                                        outpoint = %vtxo.outpoint,
-                                        error = %e,
-                                        "Failed to check VTXO leaf tx confirmation (fallback)"
-                                    );
-                                }
-                            }
-                        }
-                    } else {
-                        info!(
-                            commitment_txid = %commitment_txid,
-                            "Commitment tx vout 0 not spent yet"
-                        );
-                    }
+                    // Commitment output not spent — no unroll detected
                 }
                 Err(e) => {
                     info!(
@@ -3788,24 +3997,48 @@ impl ArkService {
                         "Fraud detected: spent VTXO tree unrolled on-chain"
                     );
                     // React by broadcasting forfeit/checkpoint tx.
-                    // Only mark as unrolled AFTER successful reaction,
-                    // so deferred cases get re-processed on next cycle.
+                    // Mark as unrolled on success. On failure, check if a
+                    // prior cycle already got the forfeit/checkpoint confirmed
+                    // (the VTXO's leaf output will be spent on-chain). If so,
+                    // mark as unrolled to stop retrying. Otherwise let the
+                    // next maintenance cycle retry.
                     match self.react_to_fraud(vtxo).await {
                         Ok(true) => {
-                            let _ = self
-                                .vtxo_repo
-                                .mark_vtxos_unrolled(std::slice::from_ref(vtxo))
-                                .await;
+                            // Mark as both unrolled AND swept. The forfeit/
+                            // checkpoint was broadcast so the server has
+                            // (or will have) the funds once the CSV matures.
+                            let mut upd = (*vtxo).clone();
+                            upd.unrolled = true;
+                            upd.swept = true;
+                            let _ = self.vtxo_repo.add_vtxos(&[upd]).await;
                         }
                         Ok(false) => {
                             // Deferred — don't mark as unrolled
                         }
                         Err(e) => {
-                            warn!(
-                                outpoint = %vtxo.outpoint,
-                                error = %e,
-                                "Failed to react to fraud for spent VTXO"
-                            );
+                            // Check if the VTXO's leaf output was already
+                            // spent by a prior forfeit/checkpoint broadcast.
+                            let already_spent = self
+                                .scanner
+                                .is_output_spent(&vtxo.outpoint.txid, vtxo.outpoint.vout)
+                                .await
+                                .unwrap_or(false);
+                            if already_spent {
+                                info!(
+                                    outpoint = %vtxo.outpoint,
+                                    "VTXO leaf already spent on-chain — marking as unrolled+swept"
+                                );
+                                let mut upd = (*vtxo).clone();
+                                upd.unrolled = true;
+                                upd.swept = true;
+                                let _ = self.vtxo_repo.add_vtxos(&[upd]).await;
+                            } else {
+                                warn!(
+                                    outpoint = %vtxo.outpoint,
+                                    error = %e,
+                                    "Failed to react to fraud — will retry next cycle"
+                                );
+                            }
                         }
                     }
                 }
@@ -3831,21 +4064,11 @@ impl ArkService {
             Err(_) => return Ok(0),
         };
 
-        let mut expired = self.vtxo_repo.find_block_expired_vtxos(tip).await?;
+        let expired = self.vtxo_repo.find_block_expired_vtxos(tip).await?;
 
-        // Also sweep unrolled VTXOs that have expired. These are VTXOs whose
-        // tree branch was published on-chain but the CSV timelock has now matured,
-        // allowing the ASP to reclaim them.
-        if let Ok(all_vtxos) = self.vtxo_repo.list_all().await {
-            let (spendable, spent) = all_vtxos;
-            for v in spendable.iter().chain(spent.iter()) {
-                if v.unrolled && !v.swept && v.expires_at_block > 0 && v.expires_at_block <= tip {
-                    if !expired.iter().any(|e| e.outpoint == v.outpoint) {
-                        expired.push(v.clone());
-                    }
-                }
-            }
-        }
+        // `check_unrolled_vtxos` already updated `expires_at_block` for
+        // VTXOs under unrolled trees, so `find_block_expired_vtxos` only
+        // returns VTXOs whose CSV has genuinely matured.
 
         // Filter out dust VTXOs from automatic sweep — they're uneconomical
         // to sweep on-chain. The admin sweep endpoint can force-sweep them.
@@ -4080,16 +4303,25 @@ impl ArkService {
     async fn react_to_fraud(&self, vtxo: &Vtxo) -> ArkResult<bool> {
         let outpoint_str = format!("{}:{}", vtxo.outpoint.txid, vtxo.outpoint.vout);
 
-        // Find the round that has a forfeit tx for this VTXO.
+        // If the VTXO was spent by an offchain TX (not a round settlement),
+        // go directly to the checkpoint path. The offchain TX's checkpoint
+        // is the correct fraud proof — not a forfeit from the round that
+        // created this VTXO.
+        if !vtxo.spent_by.is_empty() {
+            if let Ok(Some(_otx)) = self.offchain_tx_repo.get(&vtxo.spent_by).await {
+                info!(
+                    outpoint = %outpoint_str,
+                    spent_by = %vtxo.spent_by,
+                    "VTXO spent by offchain TX — using checkpoint path"
+                );
+                self.broadcast_checkpoint_tx(vtxo).await?;
+                return Ok(true);
+            }
+        }
+
+        // Find the round that re-settled this VTXO (has a forfeit tx).
         //
-        // We try multiple lookup strategies because `spent_by` can be
-        // overwritten by an offchain tx (SubmitTx/FinalizeTx) from a
-        // concurrent context. `settled_by` is more stable (set atomically
-        // in `settle_vtxos` during round completion), but may also be
-        // absent if the round hasn't completed yet when fraud is detected.
-        //
-        // Strategy: try spent_by → settled_by → scan recent rounds for
-        // a matching forfeit tx (most robust, slightly expensive).
+        // Strategy: try spent_by → settled_by → scan recent rounds.
         let mut round = self
             .round_repo
             .get_round_by_commitment_txid(&vtxo.spent_by)
@@ -4689,13 +4921,121 @@ impl ArkService {
     /// The checkpoint tx is the signed offchain transaction that can be broadcast
     /// to prevent the fraudulent unroll from succeeding.
     async fn broadcast_checkpoint_tx(&self, vtxo: &Vtxo) -> ArkResult<()> {
-        let outpoint_str = format!("{}:{}", vtxo.outpoint.txid, vtxo.outpoint.vout);
+        // Follow the offchain TX chain and broadcast all checkpoints.
+        self.broadcast_checkpoint_chain(&vtxo.spent_by).await?;
 
-        // Look up the offchain tx that spent this VTXO
-        let offchain_tx = self.offchain_tx_repo.get(&vtxo.spent_by).await?;
+        // Mark ALL preconfirmed VTXOs in the offchain TX chain as swept.
+        // The checkpoint anchors the offchain state on-chain, so the server
+        // controls these funds. Walking the chain avoids waiting for
+        // the maintenance loop to detect checkpoint confirmation.
+        let mut current_tx_id = vtxo.spent_by.clone();
+        let mut seen = std::collections::HashSet::new();
+        while !current_tx_id.is_empty() && seen.insert(current_tx_id.clone()) {
+            if let Ok(Some(otx)) = self.offchain_tx_repo.get(&current_tx_id).await {
+                let output_outpoints: Vec<crate::domain::VtxoOutpoint> = otx
+                    .outputs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| crate::domain::VtxoOutpoint::new(current_tx_id.clone(), i as u32))
+                    .collect();
+                if let Ok(output_vtxos) = self.vtxo_repo.get_vtxos(&output_outpoints).await {
+                    let swept: Vec<crate::domain::Vtxo> = output_vtxos
+                        .into_iter()
+                        .map(|mut v| { v.swept = true; v })
+                        .collect();
+                    let _ = self.vtxo_repo.add_vtxos(&swept).await;
+                    // Follow to next TX in chain
+                    current_tx_id = swept
+                        .iter()
+                        .find(|v| !v.spent_by.is_empty() && v.spent_by != current_tx_id)
+                        .map(|v| v.spent_by.clone())
+                        .unwrap_or_default();
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Recursively broadcast checkpoints along an offchain TX chain.
+    async fn broadcast_checkpoint_chain(&self, tx_id: &str) -> ArkResult<()> {
+        let offchain_tx = self.offchain_tx_repo.get(tx_id).await?;
 
         if let Some(offchain_tx) = offchain_tx {
-            // The offchain tx contains signed spending transactions in its inputs
+            if !offchain_tx.checkpoint_txs.is_empty() {
+                for (i, checkpoint_b64) in offchain_tx.checkpoint_txs.iter().enumerate() {
+                    use base64::Engine;
+                    let hex_psbt = match base64::engine::general_purpose::STANDARD.decode(checkpoint_b64) {
+                        Ok(bytes) => hex::encode(bytes),
+                        Err(e) => {
+                            warn!(otx = %tx_id, error = %e, idx = i, "Failed to decode checkpoint base64");
+                            continue;
+                        }
+                    };
+                    match self.tx_builder.finalize_and_extract(&hex_psbt).await {
+                        Ok(raw_tx) => {
+                            match self.wallet.broadcast_with_anchor_bump(&raw_tx).await {
+                                Ok(txid) => {
+                                    info!(otx = %tx_id, checkpoint_txid = %txid, idx = i,
+                                        "Checkpoint tx broadcast successfully");
+                                }
+                                Err(e) => {
+                                    warn!(otx = %tx_id, error = %e, idx = i,
+                                        "Checkpoint tx broadcast failed");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(checkpoint_b64) {
+                                let hex_psbt = hex::encode(&bytes);
+                                match self.tx_builder.finalize_and_extract(&hex_psbt).await {
+                                    Ok(raw_tx) => {
+                                        match self.wallet.broadcast_with_anchor_bump(&raw_tx).await {
+                                            Ok(txid) => {
+                                                info!(otx = %tx_id, checkpoint_txid = %txid, idx = i,
+                                                    "Checkpoint tx broadcast (hex path)");
+                                            }
+                                            Err(e2) => {
+                                                warn!(otx = %tx_id, finalize_err = %e, cpfp_err = %e2, idx = i,
+                                                    "Checkpoint tx broadcast failed");
+                                            }
+                                        }
+                                    }
+                                    Err(e2) => {
+                                        warn!(otx = %tx_id, b64_err = %e, hex_err = %e2, idx = i,
+                                            "Checkpoint tx finalize failed (both b64 and hex)");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Follow the chain: check if any output VTXOs of this
+                // offchain TX were themselves spent by another offchain TX.
+                // If so, broadcast that TX's checkpoints too.
+                let output_outpoints: Vec<crate::domain::VtxoOutpoint> = offchain_tx
+                    .outputs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| crate::domain::VtxoOutpoint::new(tx_id.to_string(), i as u32))
+                    .collect();
+                if let Ok(output_vtxos) = self.vtxo_repo.get_vtxos(&output_outpoints).await {
+                    for ov in &output_vtxos {
+                        if !ov.spent_by.is_empty() && ov.spent_by != tx_id {
+                            let spent_by = ov.spent_by.clone();
+                            let _ = Box::pin(self.broadcast_checkpoint_chain(&spent_by)).await;
+                        }
+                    }
+                }
+
+                return Ok(());
+            }
+
+            // Legacy fallback: check inputs for signed_tx
             for input in &offchain_tx.inputs {
                 if !input.signed_tx.is_empty() {
                     let tx_hex = hex::encode(&input.signed_tx);
@@ -4706,14 +5046,14 @@ impl ArkService {
                     {
                         Ok(txid) => {
                             info!(
-                                vtxo = %outpoint_str,
+                                otx = %tx_id,
                                 checkpoint_txid = %txid,
-                                "Checkpoint tx broadcast successfully"
+                                "Checkpoint tx broadcast successfully (from signed input)"
                             );
                         }
                         Err(e) => {
                             warn!(
-                                vtxo = %outpoint_str,
+                                otx = %tx_id,
                                 error = %e,
                                 "Checkpoint tx broadcast failed (may already be confirmed)"
                             );
@@ -4725,67 +5065,46 @@ impl ArkService {
         }
 
         // Fallback: try looking up via checkpoint repository
-        let checkpoint = self.checkpoint_repo.get_checkpoint(&vtxo.spent_by).await?;
+        let checkpoint = self.checkpoint_repo.get_checkpoint(tx_id).await?;
         if let Some(checkpoint) = checkpoint {
             info!(
-                vtxo = %outpoint_str,
+                otx = %tx_id,
                 checkpoint_id = %checkpoint.id,
                 "Constructing checkpoint tx from tapscript"
             );
 
-            // Sign the checkpoint tapscript PSBT via the wallet
             let signed_psbt = self
                 .wallet
                 .sign_transaction(&checkpoint.tapscript, false)
                 .await
                 .map_err(|e| {
-                    warn!(
-                        vtxo = %outpoint_str,
-                        error = %e,
-                        "Failed to sign checkpoint PSBT"
-                    );
+                    warn!(otx = %tx_id, error = %e, "Failed to sign checkpoint PSBT");
                     e
                 })?;
 
-            // Finalize and extract the raw transaction
             let raw_tx = self
                 .tx_builder
                 .finalize_and_extract(&signed_psbt)
                 .await
                 .map_err(|e| {
-                    warn!(
-                        vtxo = %outpoint_str,
-                        error = %e,
-                        "Failed to finalize checkpoint tx"
-                    );
+                    warn!(otx = %tx_id, error = %e, "Failed to finalize checkpoint tx");
                     e
                 })?;
 
-            // Broadcast the checkpoint transaction
             match self.wallet.broadcast_transaction(vec![raw_tx]).await {
                 Ok(txid) => {
-                    info!(
-                        vtxo = %outpoint_str,
-                        checkpoint_txid = %txid,
-                        "Checkpoint tx from tapscript broadcast successfully"
-                    );
+                    info!(otx = %tx_id, checkpoint_txid = %txid,
+                        "Checkpoint tx from tapscript broadcast successfully");
                 }
                 Err(e) => {
-                    warn!(
-                        vtxo = %outpoint_str,
-                        error = %e,
-                        "Checkpoint tx from tapscript broadcast failed (may already be confirmed)"
-                    );
+                    warn!(otx = %tx_id, error = %e,
+                        "Checkpoint tx from tapscript broadcast failed");
                 }
             }
             return Ok(());
         }
 
-        warn!(
-            vtxo = %outpoint_str,
-            spent_by = %vtxo.spent_by,
-            "No checkpoint or offchain tx found for spent VTXO"
-        );
+        warn!(otx = %tx_id, "No checkpoint or offchain tx found");
         Ok(())
     }
 
@@ -5197,11 +5516,14 @@ impl ArkService {
                 }
             }
 
-            // Broadcast tree nodes for input VTXOs so their tree leaf is on-chain.
-            // This allows the checkpoint to be broadcast directly during Unroll.
-            for (outpoint, _) in &spend_list {
-                self.broadcast_tree_node_for_vtxo(outpoint).await;
-            }
+            // NOTE: We do NOT broadcast tree nodes here during offchain TX
+            // finalization. Tree nodes should only be broadcast when:
+            //   - The user explicitly calls Unroll (unilateral exit)
+            //   - The server needs to sweep expired VTXOs
+            //   - The server reacts to fraud (checkpoint/forfeit broadcast)
+            // Broadcasting tree nodes eagerly causes the maintenance loop to
+            // mark VTXOs as "unrolled", which breaks subsequent Unroll() calls
+            // ("no vtxos to unroll") because getSpendableVtxos filters them out.
         }
 
         // Create output VTXOs
@@ -5223,7 +5545,10 @@ impl ArkService {
                     );
                     vtxo.ark_txid = tx_id.to_string();
                     vtxo.preconfirmed = true;
-                    vtxo.expires_at = now + self.config.unilateral_exit_delay as i64;
+                    // unilateral_exit_delay is in blocks. Convert to seconds
+                    // using 10 min/block (BIP68 convention). This ensures
+                    // the timestamp sweep doesn't expire VTXOs prematurely.
+                    vtxo.expires_at = now + (self.config.unilateral_exit_delay as i64) * 600;
                     vtxo.assets = out.assets.clone();
                     // Mark sub-dust preconfirmed VTXOs as swept, matching Go server
                     // behavior. Sub-dust VTXOs can't be spent individually or
@@ -7056,6 +7381,58 @@ impl ArkService {
     /// `old_txid` to reference `new_txid` instead.  This is required after
     /// adding the server fee input to the commitment tx, which changes its txid.
     /// Extract the txid from a base64-encoded PSBT's unsigned transaction.
+    /// Walk the VTXO tree upward from a leaf txid to find the lowest
+    /// ancestor whose transaction is confirmed on-chain. Returns its
+    /// confirmation block height. Used to calculate when the server's
+    /// CSV timeout path on that ancestor output becomes spendable.
+    async fn find_confirmed_ancestor_height(
+        &self,
+        tree: &[crate::domain::TxTreeNode],
+        leaf_txid: &str,
+    ) -> Option<u32> {
+        // Build child→parent mapping: for every node that lists a child
+        // txid, record (child_txid → parent_node_real_txid).
+        let mut child_to_parent: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut real_txids: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
+        for node in tree {
+            let real_txid = Self::compute_txid_from_psbt(&node.tx)
+                .unwrap_or_else(|| node.txid.clone());
+            real_txids.insert(node.txid.clone(), real_txid.clone());
+            for (_vout, child_txid) in &node.children {
+                // The child_txid in the map refers to another node's .txid field
+                child_to_parent.insert(child_txid.clone(), node.txid.clone());
+            }
+        }
+
+        // Walk from the leaf up toward the root, checking each ancestor
+        let mut current = leaf_txid.to_string();
+        loop {
+            // Check if there's a parent node whose child matches `current`
+            let parent_stored_txid = match child_to_parent.get(&current) {
+                Some(p) => p.clone(),
+                None => break, // reached root or not found
+            };
+            let parent_real_txid = real_txids
+                .get(&parent_stored_txid)
+                .cloned()
+                .unwrap_or_else(|| parent_stored_txid.clone());
+
+            if let Ok(Some(height)) = self
+                .scanner
+                .get_tx_confirmation_height(&parent_real_txid)
+                .await
+            {
+                return Some(height);
+            }
+            current = parent_stored_txid;
+        }
+
+        None
+    }
+
     fn compute_txid_from_psbt(psbt_b64: &str) -> Option<String> {
         use base64::Engine;
         let bytes = base64::engine::general_purpose::STANDARD

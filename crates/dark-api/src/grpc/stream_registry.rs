@@ -88,6 +88,12 @@ impl StreamRegistry {
     /// - event_topics is empty (broadcast to all), OR
     /// - the stream's topic set intersects with event_topics
     ///
+    /// Get the topics a stream is subscribed to (for debug logging).
+    pub async fn debug_get_topics(&self, stream_id: &str) -> Vec<String> {
+        let streams = self.streams.read().await;
+        streams.get(stream_id).cloned().unwrap_or_default().into_iter().collect()
+    }
+
     /// Returns false if the stream_id is not found.
     pub async fn includes_any(&self, stream_id: &str, event_topics: &[String]) -> bool {
         if event_topics.is_empty() {

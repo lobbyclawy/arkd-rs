@@ -1418,6 +1418,15 @@ impl ArkServiceTrait for ArkGrpcService {
         // Checkpoint txs are virtual — they are NOT broadcast on-chain.
         // They are only needed if a unilateral exit is triggered.
         if !req.final_checkpoint_txs.is_empty() {
+            for (i, ckpt) in req.final_checkpoint_txs.iter().enumerate() {
+                info!(
+                    ark_txid = %req.ark_txid,
+                    idx = i,
+                    len = ckpt.len(),
+                    prefix = %&ckpt[..std::cmp::min(40, ckpt.len())],
+                    "FinalizeTx: checkpoint tx preview"
+                );
+            }
             info!(
                 ark_txid = %req.ark_txid,
                 count = req.final_checkpoint_txs.len(),
@@ -1904,6 +1913,10 @@ impl ArkServiceTrait for ArkGrpcService {
         // In a delegate flow, cosigners_public_keys contains the delegate's key (e.g. Bob's),
         // not the VTXO owner's key (Alice's). The delegate_pubkey field records who is acting
         // as the delegate. Full BIP-322 proof validation is tracked in TODO(#40).
+        info!(
+            cosigners = ?cosigners_public_keys,
+            "RegisterIntent: parsed cosigner public keys from message"
+        );
         intent.cosigners_public_keys = cosigners_public_keys;
         intent.delegate_pubkey = delegate_pubkey;
 
