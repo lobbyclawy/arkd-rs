@@ -601,7 +601,7 @@ impl ArkClient {
                 intent: Some(ProtoIntent {
                     message: intent_id.to_string(),
                     proof: String::new(),
-                    delegate: String::new(),
+                    delegate_pubkey: String::new(),
                 }),
             })
             .await

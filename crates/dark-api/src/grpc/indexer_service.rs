@@ -739,12 +739,7 @@ impl IndexerServiceTrait for IndexerGrpcService {
             .filter(|v| {
                 // Hide preconfirmed+swept asset VTXOs superseded by a
                 // committed+unrolled VTXO carrying the same asset.
-                if v.preconfirmed
-                    && v.swept
-                    && !v.spent
-                    && !v.unrolled
-                    && !v.assets.is_empty()
-                {
+                if v.preconfirmed && v.swept && !v.spent && !v.unrolled && !v.assets.is_empty() {
                     let dominated = v.assets.iter().all(|(aid, _)| {
                         unrolled_asset_keys.contains(&(v.pubkey.clone(), aid.clone()))
                     });
