@@ -74,7 +74,10 @@ impl Sweeper {
         // Filter out dust VTXOs from automatic sweep — they're uneconomical
         // to sweep. The admin sweep endpoint can force-sweep them.
         let dust_threshold = 546u64; // Bitcoin dust limit
-        let non_dust: Vec<Vtxo> = expired.into_iter().filter(|v| v.amount >= dust_threshold).collect();
+        let non_dust: Vec<Vtxo> = expired
+            .into_iter()
+            .filter(|v| v.amount >= dust_threshold)
+            .collect();
         let expired = non_dust;
         let count = expired.len() as u32;
 
@@ -129,37 +132,36 @@ impl Sweeper {
             match self.tx_builder.build_sweep_tx(&[sweep_input]).await {
                 Ok((_preliminary_txid, psbt_hex)) => {
                     match self.signer.sign_transaction(&psbt_hex, false).await {
-                        Ok(signed) => {
-                            match self.tx_builder.finalize_and_extract(&signed).await {
-                                Ok(raw_tx) => {
-                                    match self.wallet.broadcast_transaction(vec![raw_tx]).await {
-                                        Ok(txid) => {
-                                            tracing::info!(
-                                                vtxo_id = %vtxo_id,
-                                                sweep_txid = %txid,
-                                                "Broadcast sweep transaction for expired VTXO"
-                                            );
-                                            let _ = self.events
-                                                .publish_event(ArkEvent::VtxoForfeited {
-                                                    vtxo_id,
-                                                    forfeit_txid: txid,
-                                                })
-                                                .await;
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                vtxo_id = %vtxo_id,
-                                                error = %e,
-                                                "Sweep TX broadcast failed (VTXO already marked swept)"
-                                            );
-                                        }
+                        Ok(signed) => match self.tx_builder.finalize_and_extract(&signed).await {
+                            Ok(raw_tx) => {
+                                match self.wallet.broadcast_transaction(vec![raw_tx]).await {
+                                    Ok(txid) => {
+                                        tracing::info!(
+                                            vtxo_id = %vtxo_id,
+                                            sweep_txid = %txid,
+                                            "Broadcast sweep transaction for expired VTXO"
+                                        );
+                                        let _ = self
+                                            .events
+                                            .publish_event(ArkEvent::VtxoForfeited {
+                                                vtxo_id,
+                                                forfeit_txid: txid,
+                                            })
+                                            .await;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            vtxo_id = %vtxo_id,
+                                            error = %e,
+                                            "Sweep TX broadcast failed (VTXO already marked swept)"
+                                        );
                                     }
                                 }
-                                Err(e) => {
-                                    tracing::warn!(vtxo_id = %vtxo_id, error = %e, "Sweep TX finalize failed");
-                                }
                             }
-                        }
+                            Err(e) => {
+                                tracing::warn!(vtxo_id = %vtxo_id, error = %e, "Sweep TX finalize failed");
+                            }
+                        },
                         Err(e) => {
                             tracing::warn!(vtxo_id = %vtxo_id, error = %e, "Sweep TX signing failed");
                         }

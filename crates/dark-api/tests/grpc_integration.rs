@@ -923,9 +923,7 @@ async fn test_delete_intent_empty_id() {
     let mut client = start_ark_server().await;
 
     let result = client
-        .delete_intent(DeleteIntentRequest {
-            intent: None,
-        })
+        .delete_intent(DeleteIntentRequest { intent: None })
         .await;
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);

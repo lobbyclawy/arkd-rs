@@ -91,7 +91,12 @@ impl StreamRegistry {
     /// Get the topics a stream is subscribed to (for debug logging).
     pub async fn debug_get_topics(&self, stream_id: &str) -> Vec<String> {
         let streams = self.streams.read().await;
-        streams.get(stream_id).cloned().unwrap_or_default().into_iter().collect()
+        streams
+            .get(stream_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect()
     }
 
     /// Returns false if the stream_id is not found.

@@ -55,7 +55,7 @@ pub fn spawn_round_loop(core: Arc<ArkService>, mut tick_rx: mpsc::Receiver<()>) 
                         // After 10 seconds, try to complete with confirmed-only
                         // intents (dropping unconfirmed stale sessions). This runs
                         // BEFORE the full timeout to avoid SDK batch_expiry failures.
-                        if signing_elapsed >= 10 && signing_elapsed < SIGNING_TIMEOUT_SECS {
+                        if (10..SIGNING_TIMEOUT_SECS).contains(&signing_elapsed) {
                             let _ = core.try_complete_confirmed_only().await;
                         }
 
@@ -76,7 +76,8 @@ pub fn spawn_round_loop(core: Arc<ArkService>, mut tick_rx: mpsc::Receiver<()>) 
                                 // Abort the round so a new one can start
                                 if let Err(e) = core.abort_round("signing timeout").await {
                                     let msg = e.to_string();
-                                    if !msg.contains("already ended") && !msg.contains("No active") {
+                                    if !msg.contains("already ended") && !msg.contains("No active")
+                                    {
                                         error!("Failed to abort timed-out round: {e}");
                                     }
                                 }

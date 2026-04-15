@@ -687,7 +687,12 @@ impl IndexerServiceTrait for IndexerGrpcService {
         let vtxos = {
             let mut did_mark = false;
             for v in &vtxos {
-                if v.unrolled || v.swept || v.spent || v.preconfirmed || v.commitment_txids.is_empty() {
+                if v.unrolled
+                    || v.swept
+                    || v.spent
+                    || v.preconfirmed
+                    || v.commitment_txids.is_empty()
+                {
                     continue;
                 }
                 // Check if THIS VTXO's specific leaf TX is confirmed
@@ -696,23 +701,59 @@ impl IndexerServiceTrait for IndexerGrpcService {
                         outpoint = %v.outpoint,
                         "GetVtxos: leaf TX confirmed — marking VTXO as unrolled (real-time)"
                     );
-                    let _ = self.core.vtxo_repo()
+                    let _ = self
+                        .core
+                        .vtxo_repo()
                         .mark_vtxos_unrolled(std::slice::from_ref(v))
                         .await;
                     did_mark = true;
                 }
             }
             if did_mark {
-                self.core.list_vtxos(pubkey_filter).await
+                self.core
+                    .list_vtxos(pubkey_filter)
+                    .await
                     .map_err(|e| Status::internal(e.to_string()))?
             } else {
                 vtxos
             }
         };
 
+        // Build a set of (pubkey, asset_id) pairs from committed VTXOs that
+        // are already unrolled.  A preconfirmed+swept VTXO carrying the same
+        // asset for the same pubkey is a stale duplicate — the committed VTXO
+        // supersedes it — and should be hidden from clients.
+        let unrolled_asset_keys: std::collections::HashSet<(String, String)> = vtxos
+            .iter()
+            .filter(|v| !v.preconfirmed && v.unrolled && !v.assets.is_empty())
+            .flat_map(|v| {
+                v.assets
+                    .iter()
+                    .map(move |(aid, _)| (v.pubkey.clone(), aid.clone()))
+            })
+            .collect();
+
         // Apply client-requested filters.
         let filtered: Vec<IndexerVtxo> = vtxos
             .iter()
+            .filter(|v| {
+                // Hide preconfirmed+swept asset VTXOs superseded by a
+                // committed+unrolled VTXO carrying the same asset.
+                if v.preconfirmed
+                    && v.swept
+                    && !v.spent
+                    && !v.unrolled
+                    && !v.assets.is_empty()
+                {
+                    let dominated = v.assets.iter().all(|(aid, _)| {
+                        unrolled_asset_keys.contains(&(v.pubkey.clone(), aid.clone()))
+                    });
+                    if dominated {
+                        return false;
+                    }
+                }
+                true
+            })
             .filter(|v| {
                 if req.spendable_only {
                     return !v.spent && !v.swept && !v.unrolled;
@@ -1230,26 +1271,24 @@ impl IndexerServiceTrait for IndexerGrpcService {
             use base64::Engine;
             if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(psbt_b64) {
                 if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
-                    let has_witness = psbt.inputs.iter().any(|inp| {
-                        inp.final_script_witness.is_some() || inp.tap_key_sig.is_some()
-                    });
+                    let has_witness = psbt
+                        .inputs
+                        .iter()
+                        .any(|inp| inp.final_script_witness.is_some() || inp.tap_key_sig.is_some());
                     if has_witness {
                         // Finalize: set final_script_witness from tap_key_sig
                         let mut finalized = psbt.clone();
                         for inp in &mut finalized.inputs {
                             if inp.final_script_witness.is_none() {
                                 if let Some(sig) = inp.tap_key_sig {
-                                    inp.final_script_witness = Some(
-                                        bitcoin::Witness::from_slice(&[sig.serialize()])
-                                    );
+                                    inp.final_script_witness =
+                                        Some(bitcoin::Witness::from_slice(&[sig.serialize()]));
                                 }
                             }
                         }
                         let tx = finalized.extract_tx_unchecked_fee_rate();
                         let tx_hex = hex::encode(bitcoin::consensus::serialize(&tx));
-                        let _ = self.core.wallet()
-                            .broadcast_with_anchor_bump(&tx_hex)
-                            .await;
+                        let _ = self.core.wallet().broadcast_with_anchor_bump(&tx_hex).await;
                     }
                 }
             }

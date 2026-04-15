@@ -221,7 +221,7 @@ echo "→ Applying Go e2e debug logging patch..."
 # ─── Run Go e2e tests ───────────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
-echo "║           Running arkade-os/arkd Go E2E Tests              ║"
+echo "║           Running arkade-os/arkd Go E2E Tests                ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 

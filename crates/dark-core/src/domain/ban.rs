@@ -115,7 +115,11 @@ impl BanRepository for InMemoryBanRepository {
         };
 
         // Also check if any stored ban's x-only matches the query's x-only.
-        let query_xonly = if pubkey.len() == 66 { &pubkey[2..] } else { pubkey };
+        let query_xonly = if pubkey.len() == 66 {
+            &pubkey[2..]
+        } else {
+            pubkey
+        };
 
         for (stored_key, record) in bans.iter() {
             let stored_xonly = if stored_key.len() == 66 {

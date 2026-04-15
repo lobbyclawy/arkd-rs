@@ -135,8 +135,7 @@ pub async fn store_issuance_records(
                 1 => gpos += 34, // AssetRefByID
                 2 => {
                     if gpos + 2 <= pkt_data.len() {
-                        ctrl_ref =
-                            Some(u16::from_le_bytes([pkt_data[gpos], pkt_data[gpos + 1]]));
+                        ctrl_ref = Some(u16::from_le_bytes([pkt_data[gpos], pkt_data[gpos + 1]]));
                     }
                     gpos += 2;
                 }

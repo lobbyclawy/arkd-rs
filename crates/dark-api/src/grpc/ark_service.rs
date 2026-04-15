@@ -1015,10 +1015,7 @@ impl ArkServiceTrait for ArkGrpcService {
 
                     // Parse asset packet from OP_RETURN output to associate
                     // assets with VTXO outputs.
-                    let asset_map = parse_asset_packet_from_tx(
-                        &psbt.unsigned_tx,
-                        &ark_txid,
-                    );
+                    let asset_map = parse_asset_packet_from_tx(&psbt.unsigned_tx, &ark_txid);
 
                     let parsed_outputs: Vec<dark_core::domain::VtxoOutput> = psbt
                         .unsigned_tx
@@ -1047,10 +1044,7 @@ impl ArkServiceTrait for ArkGrpcService {
                             } else {
                                 hex::encode(script_bytes)
                             };
-                            let assets = asset_map
-                                .get(&(idx as u16))
-                                .cloned()
-                                .unwrap_or_default();
+                            let assets = asset_map.get(&(idx as u16)).cloned().unwrap_or_default();
                             Some(dark_core::domain::VtxoOutput {
                                 pubkey: pubkey_hex,
                                 amount_sats: amount,
@@ -1148,8 +1142,7 @@ impl ArkServiceTrait for ArkGrpcService {
                             //   [<sig1> [<sig2> ...] <script> <control_block>]
                             // The script is second-to-last.
                             let script_bytes = items[items.len() - 2];
-                            scripts_to_check
-                                .push(bitcoin::ScriptBuf::from(script_bytes.to_vec()));
+                            scripts_to_check.push(bitcoin::ScriptBuf::from(script_bytes.to_vec()));
                         }
                     }
                     // Also check tap_script_sigs keys for leaf hashes
@@ -1236,37 +1229,40 @@ impl ArkServiceTrait for ArkGrpcService {
                     // Block-height based locktime.
                     // Prefer Bitcoin Core RPC (instant) over Esplora (may lag).
                     let cfg = self.core.config();
-                    let current_height = if let (Some(ref rpc_url), Some(ref user), Some(ref pass)) =
-                        (&cfg.fee_manager_url, &cfg.fee_manager_user, &cfg.fee_manager_pass)
-                    {
-                        // Direct Bitcoin Core RPC call (getblockcount)
-                        let client = reqwest::Client::new();
-                        let body = serde_json::json!({
-                            "jsonrpc": "1.0",
-                            "id": "cltv",
-                            "method": "getblockcount",
-                            "params": []
-                        });
-                        match client
-                            .post(rpc_url)
-                            .basic_auth(user, Some(pass))
-                            .json(&body)
-                            .send()
-                            .await
-                        {
-                            Ok(resp) => {
-                                if let Ok(json) = resp.json::<serde_json::Value>().await {
-                                    json["result"].as_u64().unwrap_or(0) as u32
-                                } else {
-                                    0
+                    let current_height =
+                        if let (Some(ref rpc_url), Some(ref user), Some(ref pass)) = (
+                            &cfg.fee_manager_url,
+                            &cfg.fee_manager_user,
+                            &cfg.fee_manager_pass,
+                        ) {
+                            // Direct Bitcoin Core RPC call (getblockcount)
+                            let client = reqwest::Client::new();
+                            let body = serde_json::json!({
+                                "jsonrpc": "1.0",
+                                "id": "cltv",
+                                "method": "getblockcount",
+                                "params": []
+                            });
+                            match client
+                                .post(rpc_url)
+                                .basic_auth(user, Some(pass))
+                                .json(&body)
+                                .send()
+                                .await
+                            {
+                                Ok(resp) => {
+                                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                                        json["result"].as_u64().unwrap_or(0) as u32
+                                    } else {
+                                        0
+                                    }
                                 }
+                                Err(_) => 0,
                             }
-                            Err(_) => 0,
-                        }
-                    } else {
-                        // Fallback: Esplora scanner
-                        self.core.scanner().tip_height().await.unwrap_or(0)
-                    };
+                        } else {
+                            // Fallback: Esplora scanner
+                            self.core.scanner().tip_height().await.unwrap_or(0)
+                        };
                     if locktime > current_height {
                         return Err(Status::failed_precondition(format!(
                             "CLTV locktime {} not yet reached (current height {})",
@@ -2834,7 +2830,8 @@ fn parse_asset_packet_from_tx(
     tx: &bitcoin::Transaction,
     ark_txid: &str,
 ) -> std::collections::HashMap<u16, Vec<(String, u64)>> {
-    let mut result: std::collections::HashMap<u16, Vec<(String, u64)>> = std::collections::HashMap::new();
+    let mut result: std::collections::HashMap<u16, Vec<(String, u64)>> =
+        std::collections::HashMap::new();
 
     // Find the OP_RETURN output containing the ARK extension
     let mut ext_data: Option<&[u8]> = None;
@@ -2849,7 +2846,11 @@ fn parse_asset_packet_from_tx(
             None => continue,
         };
         // Check for "ARK" magic (0x41 0x52 0x4b)
-        if push_data.len() >= 3 && push_data[0] == 0x41 && push_data[1] == 0x52 && push_data[2] == 0x4b {
+        if push_data.len() >= 3
+            && push_data[0] == 0x41
+            && push_data[1] == 0x52
+            && push_data[2] == 0x4b
+        {
             ext_data = Some(push_data);
             break;
         }
@@ -2904,7 +2905,9 @@ fn decode_op_return_push(script: &[u8]) -> Option<&[u8]> {
         }
     } else if op == 0x4c {
         // OP_PUSHDATA1
-        if pos >= script.len() { return None; }
+        if pos >= script.len() {
+            return None;
+        }
         let len = script[pos] as usize;
         pos += 1;
         if pos + len <= script.len() {
@@ -2912,7 +2915,9 @@ fn decode_op_return_push(script: &[u8]) -> Option<&[u8]> {
         }
     } else if op == 0x4d {
         // OP_PUSHDATA2
-        if pos + 1 >= script.len() { return None; }
+        if pos + 1 >= script.len() {
+            return None;
+        }
         let len = u16::from_le_bytes([script[pos], script[pos + 1]]) as usize;
         pos += 2;
         if pos + len <= script.len() {
@@ -2920,8 +2925,15 @@ fn decode_op_return_push(script: &[u8]) -> Option<&[u8]> {
         }
     } else if op == 0x4e {
         // OP_PUSHDATA4
-        if pos + 3 >= script.len() { return None; }
-        let len = u32::from_le_bytes([script[pos], script[pos + 1], script[pos + 2], script[pos + 3]]) as usize;
+        if pos + 3 >= script.len() {
+            return None;
+        }
+        let len = u32::from_le_bytes([
+            script[pos],
+            script[pos + 1],
+            script[pos + 2],
+            script[pos + 3],
+        ]) as usize;
         pos += 4;
         if pos + len <= script.len() {
             return Some(&script[pos..pos + len]);
@@ -2964,7 +2976,9 @@ fn parse_asset_groups(
     pos += n;
 
     for group_index in 0..group_count as u16 {
-        if pos >= data.len() { break; }
+        if pos >= data.len() {
+            break;
+        }
 
         // Presence byte
         let presence = data[pos];
@@ -2980,7 +2994,9 @@ fn parse_asset_groups(
         if has_asset_id {
             // Read 34-byte asset ID: 32-byte txid (display-order) + 2-byte index LE
             // The String() format is hex(serialized_bytes)
-            if pos + 34 > data.len() { break; }
+            if pos + 34 > data.len() {
+                break;
+            }
             asset_id_str = hex::encode(&data[pos..pos + 34]);
             pos += 34;
         } else {
@@ -2997,7 +3013,9 @@ fn parse_asset_groups(
 
         // Skip control asset if present
         if has_control_asset {
-            if pos >= data.len() { break; }
+            if pos >= data.len() {
+                break;
+            }
             let ref_type = data[pos];
             pos += 1;
             match ref_type {
@@ -3037,7 +3055,9 @@ fn parse_asset_groups(
         };
         pos += n;
         for _ in 0..input_count {
-            if pos >= data.len() { break; }
+            if pos >= data.len() {
+                break;
+            }
             let input_type = data[pos];
             pos += 1;
             match input_type {
@@ -3070,10 +3090,14 @@ fn parse_asset_groups(
         };
         pos += n;
         for _ in 0..output_count {
-            if pos >= data.len() { break; }
+            if pos >= data.len() {
+                break;
+            }
             let _output_type = data[pos]; // always 1 (Local)
             pos += 1;
-            if pos + 2 > data.len() { break; }
+            if pos + 2 > data.len() {
+                break;
+            }
             let vout = u16::from_le_bytes([data[pos], data[pos + 1]]);
             pos += 2;
             let (amount, n) = match read_varint(&data[pos..]) {

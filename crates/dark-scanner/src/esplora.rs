@@ -158,7 +158,9 @@ impl EsploraScanner {
         let json: serde_json::Value = resp.json().await.ok()?;
         let result = json.get("result")?;
         let confirmations = result.get("confirmations")?.as_u64()?;
-        if confirmations == 0 { return None; }
+        if confirmations == 0 {
+            return None;
+        }
         // blockhash → getblockheader → height
         let blockhash = result.get("blockhash")?.as_str()?;
         let body2 = serde_json::json!({
@@ -169,7 +171,11 @@ impl EsploraScanner {
         });
         let resp2 = self.client.post(rpc_url).json(&body2).send().await.ok()?;
         let json2: serde_json::Value = resp2.json().await.ok()?;
-        json2.get("result")?.get("height")?.as_u64().map(|h| h as u32)
+        json2
+            .get("result")?
+            .get("height")?
+            .as_u64()
+            .map(|h| h as u32)
     }
 
     /// Return the base URL (useful for diagnostics / tests).
@@ -633,7 +639,10 @@ impl BlockchainScanner for EsploraScanner {
             match self.client.post(rpc_url).json(&body).send().await {
                 Ok(resp) => {
                     let text = resp.text().await.unwrap_or_default();
-                    if text.contains("error") && !text.contains("already in block chain") && !text.contains("already known") {
+                    if text.contains("error")
+                        && !text.contains("already in block chain")
+                        && !text.contains("already known")
+                    {
                         tracing::debug!(response = %text.chars().take(200).collect::<String>(),
                             "broadcast_raw_tx: RPC response");
                     } else {

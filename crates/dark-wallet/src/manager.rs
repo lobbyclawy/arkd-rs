@@ -472,12 +472,18 @@ impl WalletManager {
         };
         let anchor_satisfaction_weight = bitcoin::Weight::from_wu(1); // empty witness
 
-        let drain_script = wallet.reveal_next_address(bdk_wallet::KeychainKind::Internal).script_pubkey();
+        let drain_script = wallet
+            .reveal_next_address(bdk_wallet::KeychainKind::Internal)
+            .script_pubkey();
 
         let mut builder = wallet.build_tx();
         builder
             .version(3)
-            .add_foreign_utxo(anchor_outpoint, anchor_psbt_input, anchor_satisfaction_weight)
+            .add_foreign_utxo(
+                anchor_outpoint,
+                anchor_psbt_input,
+                anchor_satisfaction_weight,
+            )
             .map_err(|e| WalletError::BroadcastError(format!("Add anchor UTXO: {e}")))?;
         builder.fee_rate(FeeRate::from_sat_per_vb(2).unwrap());
         builder.drain_to(drain_script);
@@ -488,10 +494,13 @@ impl WalletManager {
             .map_err(|e| WalletError::BroadcastError(format!("Build CPFP child: {e}")))?;
 
         wallet
-            .sign(&mut psbt, bdk_wallet::SignOptions {
-                trust_witness_utxo: true,
-                ..Default::default()
-            })
+            .sign(
+                &mut psbt,
+                bdk_wallet::SignOptions {
+                    trust_witness_utxo: true,
+                    ..Default::default()
+                },
+            )
             .map_err(|e| WalletError::SigningError(format!("Sign CPFP child: {e}")))?;
 
         // Persist wallet state

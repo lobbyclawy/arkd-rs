@@ -114,7 +114,8 @@ pub trait WalletService: Send + Sync {
     /// plus a wallet UTXO to cover fees, with change back to the wallet.
     async fn broadcast_with_anchor_bump(&self, raw_tx_hex: &str) -> ArkResult<String> {
         // Default: just broadcast directly (implementations override for CPFP)
-        self.broadcast_transaction(vec![raw_tx_hex.to_string()]).await
+        self.broadcast_transaction(vec![raw_tx_hex.to_string()])
+            .await
     }
     /// Get current fee rate (sat/vB)
     async fn fee_rate(&self) -> ArkResult<u64>;

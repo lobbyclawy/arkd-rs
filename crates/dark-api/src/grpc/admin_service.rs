@@ -397,20 +397,21 @@ impl AdminServiceTrait for AdminGrpcService {
         let mut force_swept = 0u32;
         if let Ok(all) = self.core.vtxo_repo().list_all().await {
             let (spendable, spent) = all;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
             // Admin force-sweep: mark dust VTXOs as swept regardless
             // of expiry. The automatic sweep skips dust VTXOs; the admin
             // endpoint handles them explicitly.
-            let force_sweepable: Vec<dark_core::domain::Vtxo> = spendable.into_iter()
-                .chain(spent.into_iter())
+            let force_sweepable: Vec<dark_core::domain::Vtxo> = spendable
+                .into_iter()
+                .chain(spent)
                 .filter(|v| !v.swept && v.amount < 546)
                 .collect();
             force_swept = force_sweepable.len() as u32;
             if !force_sweepable.is_empty() {
-                let _ = self.core.vtxo_repo().mark_vtxos_swept(&force_sweepable).await;
+                let _ = self
+                    .core
+                    .vtxo_repo()
+                    .mark_vtxos_swept(&force_sweepable)
+                    .await;
             }
         }
 

@@ -403,7 +403,7 @@ impl Server {
                                 round_id,
                                 commitment_tx,
                                 has_boarding_inputs,
-                                has_connectors,
+                                has_connectors: _,
                                 ..
                             } => {
                                 // Always emit BatchFinalization so clients can
@@ -556,13 +556,10 @@ impl Server {
                             }),
                             // Transaction events → publish to tx_broker
                             // for GetTransactionsStream subscribers.
-                            dark_core::domain::ArkEvent::TxFinalized {
-                                ark_txid,
-                                ..
-                            } => {
+                            dark_core::domain::ArkEvent::TxFinalized { ark_txid, .. } => {
                                 use crate::proto::ark_v1::{
-                                    ArkTxEvent, TransactionEvent,
-                                    transaction_event::Event as TxEventInner,
+                                    transaction_event::Event as TxEventInner, ArkTxEvent,
+                                    TransactionEvent,
                                 };
                                 let now = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)

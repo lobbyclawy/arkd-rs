@@ -458,120 +458,6 @@ impl ArkService {
         self.scanner.is_tx_confirmed(txid).await
     }
 
-    /// Broadcast the tree node that creates a VTXO, using package relay.
-    ///
-    /// Tree nodes have zero fee (P2A anchor for CPFP). They must be broadcast
-    /// as a package with a fee-paying child. This is called during offchain tx
-    /// finalization so the tree leaf is on-chain before the checkpoint is broadcast.
-    async fn broadcast_tree_node_for_vtxo(&self, outpoint: &VtxoOutpoint) {
-        use base64::Engine;
-
-        let vtxos = match self.vtxo_repo.get_vtxos(&[outpoint.clone()]).await {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-        for vtxo in &vtxos {
-            if vtxo.preconfirmed || vtxo.commitment_txids.is_empty() {
-                continue;
-            }
-            let commit_txid = match vtxo.commitment_txids.first() {
-                Some(c) if !c.is_empty() => c,
-                _ => continue,
-            };
-            let round = match self
-                .round_repo
-                .get_round_by_commitment_txid(commit_txid)
-                .await
-            {
-                Ok(Some(r)) => r,
-                _ => continue,
-            };
-            for node in &round.vtxo_tree {
-                if node.txid != vtxo.outpoint.txid || node.tx.is_empty() {
-                    continue;
-                }
-                let psbt_bytes = match base64::engine::general_purpose::STANDARD.decode(&node.tx) {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
-                let psbt = match bitcoin::psbt::Psbt::deserialize(&psbt_bytes) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                let raw_tx = match psbt.extract_tx() {
-                    Ok(t) => t,
-                    Err(_) => continue,
-                };
-                let parent_hex = bitcoin::consensus::encode::serialize_hex(&raw_tx);
-                let parent_txid = raw_tx.compute_txid();
-
-                // Find P2A anchor output
-                let p2a_script = bitcoin::ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73]);
-                let anchor_vout = match raw_tx
-                    .output
-                    .iter()
-                    .position(|o| o.script_pubkey == p2a_script)
-                {
-                    Some(v) => v,
-                    None => continue,
-                };
-
-                // Build CPFP child spending the anchor (all value to fee)
-                let child_tx = bitcoin::Transaction {
-                    version: bitcoin::transaction::Version::TWO,
-                    lock_time: bitcoin::absolute::LockTime::ZERO,
-                    input: vec![bitcoin::TxIn {
-                        previous_output: bitcoin::OutPoint {
-                            txid: parent_txid,
-                            vout: anchor_vout as u32,
-                        },
-                        script_sig: bitcoin::ScriptBuf::new(),
-                        sequence: bitcoin::Sequence::MAX,
-                        witness: bitcoin::Witness::from_slice(&[&[]]),
-                    }],
-                    output: vec![bitcoin::TxOut {
-                        value: bitcoin::Amount::ZERO,
-                        script_pubkey: bitcoin::ScriptBuf::new_op_return([]),
-                    }],
-                };
-                let child_hex = bitcoin::consensus::encode::serialize_hex(&child_tx);
-
-                // Broadcast via Esplora /txs/package
-                let esplora_url = &self.config.explorer_url;
-                if esplora_url.is_empty() {
-                    return;
-                }
-                let pkg_url = format!("{}/txs/package", esplora_url);
-                let pkg_body =
-                    serde_json::to_string(&vec![&parent_hex, &child_hex]).unwrap_or_default();
-
-                match reqwest::Client::new()
-                    .post(&pkg_url)
-                    .header("Content-Type", "application/json")
-                    .body(pkg_body)
-                    .send()
-                    .await
-                {
-                    Ok(resp) if resp.status().is_success() => {
-                        info!(
-                            tree_txid = %parent_txid,
-                            vtxo = %vtxo.outpoint,
-                            "Broadcast tree node package for offchain tx input"
-                        );
-                    }
-                    _ => {
-                        debug!(
-                            tree_txid = %parent_txid,
-                            vtxo = %vtxo.outpoint,
-                            "Tree node package broadcast attempt (may already be on-chain)"
-                        );
-                    }
-                }
-                return;
-            }
-        }
-    }
-
     /// Compute the expiry for new VTXOs.
     ///
     /// When `vtxo_expiry_blocks` is configured, queries the scanner for the
@@ -583,7 +469,7 @@ impl ArkService {
         // CSV delay (= unilateral_exit_delay) as the VTXO tree expiry.
         // The vtxo_expiry_blocks config is ignored in favor of the actual
         // CSV timelock that controls when the ASP can sweep.
-        let expiry_blocks = self.config.unilateral_exit_delay as u32;
+        let expiry_blocks = self.config.unilateral_exit_delay;
         if expiry_blocks > 0 {
             match self.scanner.tip_height().await {
                 Ok(tip) if tip > 0 => {
@@ -1816,9 +1702,15 @@ impl ArkService {
                 // Carry over assets from the leaf PSBT's OP_RETURN extension.
                 // Find the leaf whose P2TR output matches this receiver's pubkey
                 // (not by positional index, which depends on HashMap ordering).
-                let receiver_xonly = if receiver.pubkey.len() == 66 { &receiver.pubkey[2..] } else { receiver.pubkey.as_str() };
+                let receiver_xonly = if receiver.pubkey.len() == 66 {
+                    &receiver.pubkey[2..]
+                } else {
+                    receiver.pubkey.as_str()
+                };
                 let matching_leaf = leaf_nodes.iter().find(|leaf| {
-                    if leaf.tx.is_empty() { return false; }
+                    if leaf.tx.is_empty() {
+                        return false;
+                    }
                     use base64::Engine;
                     if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&leaf.tx) {
                         if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
@@ -1827,7 +1719,9 @@ impl ArkService {
                                 let sb = out.script_pubkey.as_bytes();
                                 if sb.len() == 34 && sb[0] == 0x51 && sb[1] == 0x20 {
                                     let leaf_xonly = hex::encode(&sb[2..]);
-                                    if leaf_xonly == receiver_xonly { return true; }
+                                    if leaf_xonly == receiver_xonly {
+                                        return true;
+                                    }
                                 }
                             }
                         }
@@ -1837,31 +1731,57 @@ impl ArkService {
                 if let Some(leaf) = matching_leaf.or(leaf_nodes.get(vtxo_idx as usize)) {
                     if !leaf.tx.is_empty() {
                         use base64::Engine;
-                        if let Ok(psbt_bytes) = base64::engine::general_purpose::STANDARD.decode(&leaf.tx) {
+                        if let Ok(psbt_bytes) =
+                            base64::engine::general_purpose::STANDARD.decode(&leaf.tx)
+                        {
                             if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&psbt_bytes) {
                                 // Parse asset info from OP_RETURN outputs
                                 for out in &psbt.unsigned_tx.output {
                                     let sb = out.script_pubkey.as_bytes();
-                                    if sb.len() < 5 || sb[0] != 0x6a { continue; }
+                                    if sb.len() < 5 || sb[0] != 0x6a {
+                                        continue;
+                                    }
                                     let push = {
                                         let mut p = 1usize;
-                                        let op = sb[p]; p += 1;
+                                        let op = sb[p];
+                                        p += 1;
                                         if op <= 75 {
                                             let l = op as usize;
-                                            if p + l <= sb.len() { Some(&sb[p..p+l]) } else { None }
+                                            if p + l <= sb.len() {
+                                                Some(&sb[p..p + l])
+                                            } else {
+                                                None
+                                            }
                                         } else if op == 0x4c && p < sb.len() {
-                                            let l = sb[p] as usize; p += 1;
-                                            if p + l <= sb.len() { Some(&sb[p..p+l]) } else { None }
-                                        } else if op == 0x4d && p+1 < sb.len() {
-                                            let l = u16::from_le_bytes([sb[p], sb[p+1]]) as usize; p += 2;
-                                            if p + l <= sb.len() { Some(&sb[p..p+l]) } else { None }
-                                        } else { None }
+                                            let l = sb[p] as usize;
+                                            p += 1;
+                                            if p + l <= sb.len() {
+                                                Some(&sb[p..p + l])
+                                            } else {
+                                                None
+                                            }
+                                        } else if op == 0x4d && p + 1 < sb.len() {
+                                            let l = u16::from_le_bytes([sb[p], sb[p + 1]]) as usize;
+                                            p += 2;
+                                            if p + l <= sb.len() {
+                                                Some(&sb[p..p + l])
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
                                     };
                                     if let Some(push) = push {
-                                        if push.len() >= 4 && push[0] == 0x41 && push[1] == 0x52 && push[2] == 0x4b {
+                                        if push.len() >= 4
+                                            && push[0] == 0x41
+                                            && push[1] == 0x52
+                                            && push[2] == 0x4b
+                                        {
                                             // Found ARK extension — parse asset outputs for this vout
                                             let asset_map = Self::parse_asset_packet_static(
-                                                &psbt.unsigned_tx, &leaf.txid,
+                                                &psbt.unsigned_tx,
+                                                &leaf.txid,
                                             );
                                             // vtxo_vout is 0 for leaf outputs
                                             if let Some(assets) = asset_map.get(&0) {
@@ -1883,7 +1803,8 @@ impl ArkService {
                 if vtxo.assets.is_empty() && intents.len() == 1 {
                     let mut asset_sums: std::collections::HashMap<String, u64> =
                         std::collections::HashMap::new();
-                    let input_outpoints: Vec<VtxoOutpoint> = intent.inputs.iter().map(|i| i.outpoint.clone()).collect();
+                    let input_outpoints: Vec<VtxoOutpoint> =
+                        intent.inputs.iter().map(|i| i.outpoint.clone()).collect();
                     if let Ok(input_vtxos) = self.vtxo_repo.get_vtxos(&input_outpoints).await {
                         for iv in &input_vtxos {
                             for (aid, amt) in &iv.assets {
@@ -2088,8 +2009,11 @@ impl ArkService {
                         .get_vtxos(&outpoints)
                         .await
                         .map(|vtxos| {
-                            vtxos.iter().map(|v| v.pubkey.clone())
-                                .filter(|pk| !pk.is_empty()).collect()
+                            vtxos
+                                .iter()
+                                .map(|v| v.pubkey.clone())
+                                .filter(|pk| !pk.is_empty())
+                                .collect()
                         })
                         .unwrap_or_default();
                     for cpk in &intent.cosigners_public_keys {
@@ -2272,7 +2196,9 @@ impl ArkService {
             .collect();
 
         if unconfirmed.is_empty() {
-            return Err(ArkError::Internal("All intents confirmed — timeout is genuine".to_string()));
+            return Err(ArkError::Internal(
+                "All intents confirmed — timeout is genuine".to_string(),
+            ));
         }
 
         // Drop unconfirmed intents
@@ -2294,26 +2220,29 @@ impl ArkService {
 
             // Check if the signing session has all confirmed cosigners' nonces
             if let Ok(Some(session)) = self.signing_session_store.get_session(&round.id).await {
-                let nonce_keys: std::collections::HashSet<String> = session
-                    .tree_nonces
-                    .iter()
-                    .map(|(k, _)| k.clone())
-                    .collect();
+                let nonce_keys: std::collections::HashSet<String> =
+                    session.tree_nonces.iter().map(|(k, _)| k.clone()).collect();
 
                 // Check if all confirmed cosigners submitted nonces
                 let all_confirmed_have_nonces = confirmed_cosigners.iter().all(|ck| {
-                    let xonly = if ck.len() == 66 { &ck[2..] } else { ck.as_str() };
+                    let xonly = if ck.len() == 66 {
+                        &ck[2..]
+                    } else {
+                        ck.as_str()
+                    };
                     nonce_keys.contains(ck) || nonce_keys.contains(xonly)
                 });
 
                 if all_confirmed_have_nonces {
                     // Re-initialize signing session with correct participant count
-                    let _ = self.signing_session_store
+                    let _ = self
+                        .signing_session_store
                         .init_session(&round.id, confirmed_cosigners.len())
                         .await;
                     // Re-add nonces from confirmed cosigners
                     for (key, nonce) in &session.tree_nonces {
-                        let _ = self.signing_session_store
+                        let _ = self
+                            .signing_session_store
                             .add_nonce(&round.id, key, nonce.clone())
                             .await;
                     }
@@ -2327,7 +2256,9 @@ impl ArkService {
             }
         }
 
-        Err(ArkError::Internal("Cannot complete with confirmed-only".to_string()))
+        Err(ArkError::Internal(
+            "Cannot complete with confirmed-only".to_string(),
+        ))
     }
 
     /// Abort the current round due to timeout or other failure.
@@ -2379,9 +2310,7 @@ impl ArkService {
         // Ban participants when the round was in the signing (Finalization)
         // phase.  This covers signing timeout, invalid signatures, and any
         // other failure that causes the round to abort during tree signing.
-        if failed_round.stage.code == RoundStage::Finalization
-            || reason == "signing timeout"
-        {
+        if failed_round.stage.code == RoundStage::Finalization || reason == "signing timeout" {
             // Get all expected signers from PSBT cosigner fields in the tree.
             // Also get the ASP key so we don't ban ourselves.
             let asp_compressed_hex = self
@@ -2468,10 +2397,8 @@ impl ArkService {
                 }
             }
 
-            let all_expected: std::collections::HashSet<String> = expected_pubkeys
-                .union(&intent_cosigners)
-                .cloned()
-                .collect();
+            let all_expected: std::collections::HashSet<String> =
+                expected_pubkeys.union(&intent_cosigners).cloned().collect();
 
             if !all_expected.is_empty() {
                 let expected_pubkeys = all_expected;
@@ -2498,12 +2425,14 @@ impl ArkService {
                 // signature issues (not pure nonce timeout) — ban everyone.
                 let nonce_submitters: std::collections::HashSet<String> =
                     if reason == "signing timeout" {
-                        let session = self.signing_session_store
+                        let session = self
+                            .signing_session_store
                             .get_session(&failed_round.id)
                             .await
                             .ok()
                             .flatten();
-                        let has_any_sigs = session.as_ref()
+                        let has_any_sigs = session
+                            .as_ref()
                             .map(|s| !s.tree_signatures.is_empty())
                             .unwrap_or(false);
                         if has_any_sigs {
@@ -2512,8 +2441,10 @@ impl ArkService {
                         } else {
                             session
                                 .map(|s| {
-                                    let mut keys: std::collections::HashSet<String> = s.tree_nonces.iter().map(|(k, _)| k.clone()).collect();
-                                    let xonly: Vec<String> = keys.iter()
+                                    let mut keys: std::collections::HashSet<String> =
+                                        s.tree_nonces.iter().map(|(k, _)| k.clone()).collect();
+                                    let xonly: Vec<String> = keys
+                                        .iter()
                                         .filter(|k| k.len() == 66)
                                         .map(|k| k[2..].to_string())
                                         .collect();
@@ -2541,8 +2472,14 @@ impl ArkService {
                     }
                     // For signing timeouts, skip banning participants that submitted nonces
                     if reason == "signing timeout" {
-                        let pk_xonly = if expected_pk.len() == 66 { &expected_pk[2..] } else { expected_pk.as_str() };
-                        if nonce_submitters.contains(expected_pk) || nonce_submitters.contains(pk_xonly) {
+                        let pk_xonly = if expected_pk.len() == 66 {
+                            &expected_pk[2..]
+                        } else {
+                            expected_pk.as_str()
+                        };
+                        if nonce_submitters.contains(expected_pk)
+                            || nonce_submitters.contains(pk_xonly)
+                        {
                             info!(
                                 pubkey = %expected_pk,
                                 round_id = %failed_round.id,
@@ -2572,17 +2509,16 @@ impl ArkService {
                     // Unconfirmed intents are from stale SDK sessions (cross-test
                     // collision). Their owner keys are innocent and shouldn't be
                     // banned, otherwise the ban cascades to later tests.
-                    let cosigner_was_confirmed = failed_round
-                        .intents
-                        .values()
-                        .any(|i| {
-                            i.cosigners_public_keys.contains(&expected_pk.to_string())
-                                && failed_round
-                                    .confirmation_status
-                                    .get(&i.id)
-                                    .map(|s| matches!(s, crate::domain::ConfirmationStatus::Confirmed { .. }))
-                                    .unwrap_or(false)
-                        });
+                    let cosigner_was_confirmed = failed_round.intents.values().any(|i| {
+                        i.cosigners_public_keys.contains(&expected_pk.to_string())
+                            && failed_round
+                                .confirmation_status
+                                .get(&i.id)
+                                .map(|s| {
+                                    matches!(s, crate::domain::ConfirmationStatus::Confirmed { .. })
+                                })
+                                .unwrap_or(false)
+                    });
                     if cosigner_was_confirmed {
                         if let Some(owners) = cosigner_to_owner.get(expected_pk) {
                             for owner_pk in owners {
@@ -3162,7 +3098,9 @@ impl ArkService {
                                 stage = ?r.stage.code,
                                 "Force-ending stuck round to allow new registration"
                             );
-                            r.fail("Force-ended: stuck round replaced by new registration".to_string());
+                            r.fail(
+                                "Force-ended: stuck round replaced by new registration".to_string(),
+                            );
                         }
                     }
                 }
@@ -3236,12 +3174,20 @@ impl ArkService {
         // intents always have at least one input (VTXO or boarding).
         let is_note_only = intent.inputs.is_empty();
         if is_note_only && !round.intents.is_empty() {
-            let my_owner = intent.receivers.first().map(|r| r.pubkey.as_str()).unwrap_or("");
+            let my_owner = intent
+                .receivers
+                .first()
+                .map(|r| r.pubkey.as_str())
+                .unwrap_or("");
             // Only isolate if the round has a non-note intent from a different
             // user. If ALL existing intents are also notes, share the round
             // (this is the normal batch note redemption case like redeem_notes test).
             let has_non_note_other_user = round.intents.values().any(|existing| {
-                let other_owner = existing.receivers.first().map(|r| r.pubkey.as_str()).unwrap_or("");
+                let other_owner = existing
+                    .receivers
+                    .first()
+                    .map(|r| r.pubkey.as_str())
+                    .unwrap_or("");
                 let other_is_note = existing.inputs.is_empty();
                 other_owner != my_owner && !other_is_note
             });
@@ -3255,8 +3201,9 @@ impl ArkService {
                 drop(guard);
                 let _ = self.start_round().await;
                 guard = self.current_round.write().await;
-                let round = guard.as_mut()
-                    .ok_or_else(|| ArkError::Internal("No active round after restart".to_string()))?;
+                let round = guard.as_mut().ok_or_else(|| {
+                    ArkError::Internal("No active round after restart".to_string())
+                })?;
                 // Re-register in the fresh round
                 round.intents.insert(intent.id.clone(), intent);
                 let intent_id = round.intents.keys().last().unwrap().clone();
@@ -3271,8 +3218,10 @@ impl ArkService {
             let input_op = format!("{}:{}", input.outpoint.txid, input.outpoint.vout);
             for existing_intent in round.intents.values() {
                 for existing_input in &existing_intent.inputs {
-                    let existing_op =
-                        format!("{}:{}", existing_input.outpoint.txid, existing_input.outpoint.vout);
+                    let existing_op = format!(
+                        "{}:{}",
+                        existing_input.outpoint.txid, existing_input.outpoint.vout
+                    );
                     if input_op == existing_op {
                         return Err(ArkError::Internal(format!(
                             "VTXO {} is already registered in intent {}",
@@ -3760,10 +3709,8 @@ impl ArkService {
                         .and_then(|bytes| bitcoin::psbt::Psbt::deserialize(&bytes).ok())
                         .map(|psbt| psbt.unsigned_tx.compute_txid().to_string())
                     {
-                        if let Ok(Some(conf_height)) = self
-                            .scanner
-                            .get_tx_confirmation_height(&ckpt_txid)
-                            .await
+                        if let Ok(Some(conf_height)) =
+                            self.scanner.get_tx_confirmation_height(&ckpt_txid).await
                         {
                             let new_expiry_block = conf_height + csv_delay;
                             if vtxo.expires_at_block != new_expiry_block {
@@ -3792,10 +3739,8 @@ impl ArkService {
                         .and_then(|bytes| bitcoin::psbt::Psbt::deserialize(&bytes).ok())
                         .map(|psbt| psbt.unsigned_tx.compute_txid().to_string())
                     {
-                        if let Ok(Some(conf_height)) = self
-                            .scanner
-                            .get_tx_confirmation_height(&btc_txid)
-                            .await
+                        if let Ok(Some(conf_height)) =
+                            self.scanner.get_tx_confirmation_height(&btc_txid).await
                         {
                             let new_expiry_block = conf_height + csv_delay;
                             let mut updated = (*vtxo).clone();
@@ -3921,7 +3866,9 @@ impl ArkService {
                                         let mut updated = (*vtxo).clone();
                                         if updated.expires_at_block != new_expiry_block {
                                             updated.expires_at_block = new_expiry_block;
-                                            if let Err(e) = self.vtxo_repo.add_vtxos(&[updated]).await {
+                                            if let Err(e) =
+                                                self.vtxo_repo.add_vtxos(&[updated]).await
+                                            {
                                                 warn!(outpoint = %vtxo.outpoint, error = %e,
                                                     "Failed to update expiry for ancestor-confirmed VTXO");
                                             } else {
@@ -4073,7 +4020,10 @@ impl ArkService {
         // Filter out dust VTXOs from automatic sweep — they're uneconomical
         // to sweep on-chain. The admin sweep endpoint can force-sweep them.
         let dust_threshold = 546u64;
-        let expired: Vec<Vtxo> = expired.into_iter().filter(|v| v.amount >= dust_threshold).collect();
+        let expired: Vec<Vtxo> = expired
+            .into_iter()
+            .filter(|v| v.amount >= dust_threshold)
+            .collect();
 
         if expired.is_empty() {
             return Ok(0);
@@ -4299,6 +4249,7 @@ impl ArkService {
     /// Mirrors Go's `reactToFraud`:
     /// - If the VTXO was settled (re-committed in a new round) → broadcast forfeit tx
     /// - If the VTXO was only spent offchain (not settled) → broadcast checkpoint tx
+    ///
     /// Returns Ok(true) if action was taken, Ok(false) if deferred.
     async fn react_to_fraud(&self, vtxo: &Vtxo) -> ArkResult<bool> {
         let outpoint_str = format!("{}:{}", vtxo.outpoint.txid, vtxo.outpoint.vout);
@@ -4432,10 +4383,8 @@ impl ArkService {
 
             // Build a map of signed connector txs so leaf connectors can
             // look up their parent's outputs for witness_utxo.
-            let mut signed_tx_map: std::collections::HashMap<
-                String,
-                bitcoin::Transaction,
-            > = std::collections::HashMap::new();
+            let mut signed_tx_map: std::collections::HashMap<String, bitcoin::Transaction> =
+                std::collections::HashMap::new();
 
             // Process connectors in reverse order (root last in the flat list).
             // We process root first (has children), then leaves (no children).
@@ -4454,12 +4403,11 @@ impl ArkService {
 
             // Sign root connectors first, then leaves.
             for connector_node in root_nodes.iter().chain(leaf_nodes.iter()) {
-                let psbt_bytes = match base64::engine::general_purpose::STANDARD
-                    .decode(&connector_node.tx)
-                {
-                    Ok(b) => b,
-                    Err(_) => continue,
-                };
+                let psbt_bytes =
+                    match base64::engine::general_purpose::STANDARD.decode(&connector_node.tx) {
+                        Ok(b) => b,
+                        Err(_) => continue,
+                    };
                 let mut psbt = match bitcoin::psbt::Psbt::deserialize(&psbt_bytes) {
                     Ok(p) => p,
                     Err(_) => continue,
@@ -4492,8 +4440,7 @@ impl ArkService {
                         bitcoin::TapSighashType::Default,
                     ) {
                         use bitcoin::hashes::Hash;
-                        let msg =
-                            bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array());
+                        let msg = bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array());
                         let sig = secp.sign_schnorr(&msg, &asp_kp_tweaked);
                         let tap_sig = bitcoin::taproot::Signature {
                             signature: sig,
@@ -4534,16 +4481,11 @@ impl ArkService {
                 let psbt_bytes = base64::engine::general_purpose::STANDARD
                     .decode(&signed_psbt_b64)
                     .map_err(|e| {
-                        ArkError::Internal(format!(
-                            "Failed to decode signed forfeit PSBT: {e}"
-                        ))
+                        ArkError::Internal(format!("Failed to decode signed forfeit PSBT: {e}"))
                     })?;
-                let mut psbt =
-                    bitcoin::psbt::Psbt::deserialize(&psbt_bytes).map_err(|e| {
-                        ArkError::Internal(format!(
-                            "Failed to deserialize signed forfeit PSBT: {e}"
-                        ))
-                    })?;
+                let mut psbt = bitcoin::psbt::Psbt::deserialize(&psbt_bytes).map_err(|e| {
+                    ArkError::Internal(format!("Failed to deserialize signed forfeit PSBT: {e}"))
+                })?;
 
                 // The forfeit closure is a 2-of-2 multisig (VTXO owner + ASP).
                 // The Go SDK signed with the owner's key; we must add the ASP's
@@ -4579,7 +4521,7 @@ impl ArkService {
 
                         // Find the leaf and add ASP's signature.
                         let tap_scripts_clone = input.tap_scripts.clone();
-                        for (_cb, (script, leaf_ver)) in &tap_scripts_clone {
+                        for (script, leaf_ver) in tap_scripts_clone.values() {
                             let leaf_hash =
                                 bitcoin::taproot::TapLeafHash::from_script(script, *leaf_ver);
                             let asp_key_for_leaf = (asp_xonly, leaf_hash);
@@ -4596,8 +4538,7 @@ impl ArkService {
                                 continue;
                             }
 
-                            let mut cache =
-                                bitcoin::sighash::SighashCache::new(&psbt.unsigned_tx);
+                            let mut cache = bitcoin::sighash::SighashCache::new(&psbt.unsigned_tx);
                             if let Ok(sighash) = cache.taproot_script_spend_signature_hash(
                                 input_idx,
                                 &bitcoin::sighash::Prevouts::All(&prevouts),
@@ -4642,17 +4583,15 @@ impl ArkService {
                             continue;
                         }
 
-                        let mut cache =
-                            bitcoin::sighash::SighashCache::new(&psbt.unsigned_tx);
+                        let mut cache = bitcoin::sighash::SighashCache::new(&psbt.unsigned_tx);
                         if let Ok(sighash) = cache.taproot_key_spend_signature_hash(
                             input_idx,
                             &bitcoin::sighash::Prevouts::All(&prevouts),
                             bitcoin::TapSighashType::Default,
                         ) {
                             use bitcoin::hashes::Hash;
-                            let msg = bitcoin::secp256k1::Message::from_digest(
-                                sighash.to_byte_array(),
-                            );
+                            let msg =
+                                bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array());
                             let sig = secp.sign_schnorr(&msg, &asp_kp_tweaked);
                             let tap_sig = bitcoin::taproot::Signature {
                                 signature: sig,
@@ -4705,14 +4644,10 @@ impl ArkService {
                         let mut i_byte = 0;
                         while i_byte < script_bytes.len() {
                             // 0x20 = push 32 bytes
-                            if script_bytes[i_byte] == 0x20
-                                && i_byte + 33 <= script_bytes.len()
-                            {
-                                if let Ok(pk) =
-                                    bitcoin::secp256k1::XOnlyPublicKey::from_slice(
-                                        &script_bytes[i_byte + 1..i_byte + 33],
-                                    )
-                                {
+                            if script_bytes[i_byte] == 0x20 && i_byte + 33 <= script_bytes.len() {
+                                if let Ok(pk) = bitcoin::secp256k1::XOnlyPublicKey::from_slice(
+                                    &script_bytes[i_byte + 1..i_byte + 33],
+                                ) {
                                     pubkeys_in_script.push(pk);
                                 }
                                 i_byte += 33;
@@ -4806,13 +4741,19 @@ impl ArkService {
         // The commitment TX must be confirmed for connector inputs to be valid.
         {
             use base64::Engine;
-            if let Ok(psbt_bytes) = base64::engine::general_purpose::STANDARD.decode(&round.commitment_tx) {
+            if let Ok(psbt_bytes) =
+                base64::engine::general_purpose::STANDARD.decode(&round.commitment_tx)
+            {
                 if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&psbt_bytes) {
                     let raw_tx = psbt.extract_tx_unchecked_fee_rate();
                     let tx_hex = hex::encode(bitcoin::consensus::serialize(&raw_tx));
                     match self.wallet.broadcast_transaction(vec![tx_hex]).await {
-                        Ok(txid) => info!(txid = %txid, "Commitment TX broadcast for fraud reaction"),
-                        Err(e) => debug!(error = %e, "Commitment TX broadcast failed (may already be on-chain)"),
+                        Ok(txid) => {
+                            info!(txid = %txid, "Commitment TX broadcast for fraud reaction")
+                        }
+                        Err(e) => {
+                            debug!(error = %e, "Commitment TX broadcast failed (may already be on-chain)")
+                        }
                     }
                 }
             }
@@ -4822,20 +4763,36 @@ impl ArkService {
         // Connectors have P2A dust outputs that require 0-fee, so they must
         // be broadcast as CPFP packages (connector + fee-paying child).
         for (i, connector_hex) in signed_connector_hexes.iter().enumerate() {
-            match self.wallet.broadcast_forfeit_with_anchor(&[connector_hex.clone()]).await {
+            match self
+                .wallet
+                .broadcast_forfeit_with_anchor(std::slice::from_ref(connector_hex))
+                .await
+            {
                 Ok(txid) => info!(connector_idx = i, txid = %txid, "Connector TX broadcast (CPFP)"),
                 Err(e) => {
                     // Try raw broadcast as fallback (connector might already be on-chain)
-                    match self.wallet.broadcast_transaction(vec![connector_hex.clone()]).await {
-                        Ok(txid) => info!(connector_idx = i, txid = %txid, "Connector TX broadcast (raw)"),
-                        Err(e2) => debug!(connector_idx = i, error = %e, fallback = %e2, "Connector TX broadcast failed"),
+                    match self
+                        .wallet
+                        .broadcast_transaction(vec![connector_hex.clone()])
+                        .await
+                    {
+                        Ok(txid) => {
+                            info!(connector_idx = i, txid = %txid, "Connector TX broadcast (raw)")
+                        }
+                        Err(e2) => {
+                            debug!(connector_idx = i, error = %e, fallback = %e2, "Connector TX broadcast failed")
+                        }
                     }
                 }
             }
         }
 
         // Step 3: Broadcast the forfeit TX with CPFP anchor.
-        match self.wallet.broadcast_forfeit_with_anchor(&[signed_tx_hex.clone()]).await {
+        match self
+            .wallet
+            .broadcast_forfeit_with_anchor(std::slice::from_ref(&signed_tx_hex))
+            .await
+        {
             Ok(txid) => {
                 info!(vtxo = %outpoint_str, forfeit_txid = %txid, "Forfeit tx broadcast successfully");
                 Ok(())
@@ -4941,7 +4898,10 @@ impl ArkService {
                 if let Ok(output_vtxos) = self.vtxo_repo.get_vtxos(&output_outpoints).await {
                     let swept: Vec<crate::domain::Vtxo> = output_vtxos
                         .into_iter()
-                        .map(|mut v| { v.swept = true; v })
+                        .map(|mut v| {
+                            v.swept = true;
+                            v
+                        })
                         .collect();
                     let _ = self.vtxo_repo.add_vtxos(&swept).await;
                     // Follow to next TX in chain
@@ -4968,7 +4928,9 @@ impl ArkService {
             if !offchain_tx.checkpoint_txs.is_empty() {
                 for (i, checkpoint_b64) in offchain_tx.checkpoint_txs.iter().enumerate() {
                     use base64::Engine;
-                    let hex_psbt = match base64::engine::general_purpose::STANDARD.decode(checkpoint_b64) {
+                    let hex_psbt = match base64::engine::general_purpose::STANDARD
+                        .decode(checkpoint_b64)
+                    {
                         Ok(bytes) => hex::encode(bytes),
                         Err(e) => {
                             warn!(otx = %tx_id, error = %e, idx = i, "Failed to decode checkpoint base64");
@@ -4976,24 +4938,25 @@ impl ArkService {
                         }
                     };
                     match self.tx_builder.finalize_and_extract(&hex_psbt).await {
-                        Ok(raw_tx) => {
-                            match self.wallet.broadcast_with_anchor_bump(&raw_tx).await {
-                                Ok(txid) => {
-                                    info!(otx = %tx_id, checkpoint_txid = %txid, idx = i,
+                        Ok(raw_tx) => match self.wallet.broadcast_with_anchor_bump(&raw_tx).await {
+                            Ok(txid) => {
+                                info!(otx = %tx_id, checkpoint_txid = %txid, idx = i,
                                         "Checkpoint tx broadcast successfully");
-                                }
-                                Err(e) => {
-                                    warn!(otx = %tx_id, error = %e, idx = i,
-                                        "Checkpoint tx broadcast failed");
-                                }
                             }
-                        }
+                            Err(e) => {
+                                warn!(otx = %tx_id, error = %e, idx = i,
+                                        "Checkpoint tx broadcast failed");
+                            }
+                        },
                         Err(e) => {
-                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(checkpoint_b64) {
+                            if let Ok(bytes) =
+                                base64::engine::general_purpose::STANDARD.decode(checkpoint_b64)
+                            {
                                 let hex_psbt = hex::encode(&bytes);
                                 match self.tx_builder.finalize_and_extract(&hex_psbt).await {
                                     Ok(raw_tx) => {
-                                        match self.wallet.broadcast_with_anchor_bump(&raw_tx).await {
+                                        match self.wallet.broadcast_with_anchor_bump(&raw_tx).await
+                                        {
                                             Ok(txid) => {
                                                 info!(otx = %tx_id, checkpoint_txid = %txid, idx = i,
                                                     "Checkpoint tx broadcast (hex path)");
@@ -5580,7 +5543,8 @@ impl ArkService {
             // from the asset extension and store issuance records.
             {
                 // Collect unique asset IDs from all output VTXOs
-                let mut seen_assets: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let mut seen_assets: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 for vtxo in &output_vtxos {
                     for (asset_id, amount) in &vtxo.assets {
                         if seen_assets.insert(asset_id.clone()) {
@@ -5698,20 +5662,46 @@ impl ArkService {
         tx: &bitcoin::Transaction,
         ark_txid: &str,
     ) -> std::collections::HashMap<u16, Vec<(String, u64)>> {
-        let mut result: std::collections::HashMap<u16, Vec<(String, u64)>> = std::collections::HashMap::new();
+        let mut result: std::collections::HashMap<u16, Vec<(String, u64)>> =
+            std::collections::HashMap::new();
 
         // Find OP_RETURN with ARK extension
         let mut ext_data: Option<&[u8]> = None;
         for out in &tx.output {
             let sb = out.script_pubkey.as_bytes();
-            if sb.len() < 5 || sb[0] != 0x6a { continue; }
+            if sb.len() < 5 || sb[0] != 0x6a {
+                continue;
+            }
             let push = {
                 let mut p = 1usize;
-                let op = sb[p]; p += 1;
-                if op <= 75 { let l = op as usize; if p+l <= sb.len() { Some(&sb[p..p+l]) } else { None } }
-                else if op == 0x4c && p < sb.len() { let l = sb[p] as usize; p += 1; if p+l <= sb.len() { Some(&sb[p..p+l]) } else { None } }
-                else if op == 0x4d && p+1 < sb.len() { let l = u16::from_le_bytes([sb[p], sb[p+1]]) as usize; p += 2; if p+l <= sb.len() { Some(&sb[p..p+l]) } else { None } }
-                else { None }
+                let op = sb[p];
+                p += 1;
+                if op <= 75 {
+                    let l = op as usize;
+                    if p + l <= sb.len() {
+                        Some(&sb[p..p + l])
+                    } else {
+                        None
+                    }
+                } else if op == 0x4c && p < sb.len() {
+                    let l = sb[p] as usize;
+                    p += 1;
+                    if p + l <= sb.len() {
+                        Some(&sb[p..p + l])
+                    } else {
+                        None
+                    }
+                } else if op == 0x4d && p + 1 < sb.len() {
+                    let l = u16::from_le_bytes([sb[p], sb[p + 1]]) as usize;
+                    p += 2;
+                    if p + l <= sb.len() {
+                        Some(&sb[p..p + l])
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             };
             if let Some(d) = push {
                 if d.len() >= 3 && d[0] == 0x41 && d[1] == 0x52 && d[2] == 0x4b {
@@ -5720,14 +5710,23 @@ impl ArkService {
                 }
             }
         }
-        let ext_data = match ext_data { Some(d) => d, None => return result };
+        let ext_data = match ext_data {
+            Some(d) => d,
+            None => return result,
+        };
         let data = &ext_data[3..];
-        if data.is_empty() { return result; }
+        if data.is_empty() {
+            return result;
+        }
 
         let mut pos = 0;
         while pos < data.len() {
-            let pkt_type = data[pos]; pos += 1;
-            let (pkt_len, n) = match Self::read_varint_static(&data[pos..]) { Some(v) => v, None => break };
+            let pkt_type = data[pos];
+            pos += 1;
+            let (pkt_len, n) = match Self::read_varint_static(&data[pos..]) {
+                Some(v) => v,
+                None => break,
+            };
             pos += n;
             if pkt_type == 0x00 {
                 let end = std::cmp::min(pos + pkt_len as usize, data.len());
@@ -5740,46 +5739,122 @@ impl ArkService {
 
     /// Parse asset groups from packet body, populate vout → assets map.
     fn parse_asset_groups_static(
-        data: &[u8], ark_txid: &str,
+        data: &[u8],
+        ark_txid: &str,
         result: &mut std::collections::HashMap<u16, Vec<(String, u64)>>,
     ) {
         let mut pos = 0;
-        let (group_count, n) = match Self::read_varint_static(&data[pos..]) { Some(v) => v, None => return };
+        let (group_count, n) = match Self::read_varint_static(&data[pos..]) {
+            Some(v) => v,
+            None => return,
+        };
         pos += n;
 
         for gidx in 0..group_count as u16 {
-            if pos >= data.len() { break; }
-            let presence = data[pos]; pos += 1;
+            if pos >= data.len() {
+                break;
+            }
+            let presence = data[pos];
+            pos += 1;
             let has_aid = (presence & 0x01) != 0;
             let has_ctrl = (presence & 0x02) != 0;
             let has_meta = (presence & 0x04) != 0;
 
             let aid = if has_aid {
-                if pos + 34 > data.len() { break; }
-                let s = hex::encode(&data[pos..pos+34]); pos += 34; s
+                if pos + 34 > data.len() {
+                    break;
+                }
+                let s = hex::encode(&data[pos..pos + 34]);
+                pos += 34;
+                s
             } else {
                 format!("{}{}", ark_txid, hex::encode(gidx.to_le_bytes()))
             };
 
-            if has_ctrl { if pos >= data.len() { break; } let rt = data[pos]; pos += 1; match rt { 1 => pos += 34, 2 => pos += 2, _ => break } }
+            if has_ctrl {
+                if pos >= data.len() {
+                    break;
+                }
+                let rt = data[pos];
+                pos += 1;
+                match rt {
+                    1 => pos += 34,
+                    2 => pos += 2,
+                    _ => break,
+                }
+            }
             if has_meta {
-                let (mc, n) = match Self::read_varint_static(&data[pos..]) { Some(v) => v, None => break }; pos += n;
+                let (mc, n) = match Self::read_varint_static(&data[pos..]) {
+                    Some(v) => v,
+                    None => break,
+                };
+                pos += n;
                 for _ in 0..mc {
-                    let (kl, n) = match Self::read_varint_static(&data[pos..]) { Some(v) => v, None => return }; pos += n + kl as usize;
-                    let (vl, n) = match Self::read_varint_static(&data[pos..]) { Some(v) => v, None => return }; pos += n + vl as usize;
+                    let (kl, n) = match Self::read_varint_static(&data[pos..]) {
+                        Some(v) => v,
+                        None => return,
+                    };
+                    pos += n + kl as usize;
+                    let (vl, n) = match Self::read_varint_static(&data[pos..]) {
+                        Some(v) => v,
+                        None => return,
+                    };
+                    pos += n + vl as usize;
                 }
             }
             // Skip inputs
-            let (ic, n) = match Self::read_varint_static(&data[pos..]) { Some(v) => v, None => break }; pos += n;
-            for _ in 0..ic { if pos >= data.len() { break; } let it = data[pos]; pos += 1; match it { 1 => { pos += 2; let (_, n) = match Self::read_varint_static(&data[pos..]) { Some(v) => v, None => return }; pos += n; } 2 => { pos += 34; let (_, n) = match Self::read_varint_static(&data[pos..]) { Some(v) => v, None => return }; pos += n; } _ => return } }
+            let (ic, n) = match Self::read_varint_static(&data[pos..]) {
+                Some(v) => v,
+                None => break,
+            };
+            pos += n;
+            for _ in 0..ic {
+                if pos >= data.len() {
+                    break;
+                }
+                let it = data[pos];
+                pos += 1;
+                match it {
+                    1 => {
+                        pos += 2;
+                        let (_, n) = match Self::read_varint_static(&data[pos..]) {
+                            Some(v) => v,
+                            None => return,
+                        };
+                        pos += n;
+                    }
+                    2 => {
+                        pos += 34;
+                        let (_, n) = match Self::read_varint_static(&data[pos..]) {
+                            Some(v) => v,
+                            None => return,
+                        };
+                        pos += n;
+                    }
+                    _ => return,
+                }
+            }
             // Read outputs
-            let (oc, n) = match Self::read_varint_static(&data[pos..]) { Some(v) => v, None => break }; pos += n;
+            let (oc, n) = match Self::read_varint_static(&data[pos..]) {
+                Some(v) => v,
+                None => break,
+            };
+            pos += n;
             for _ in 0..oc {
-                if pos >= data.len() { break; }
+                if pos >= data.len() {
+                    break;
+                }
                 pos += 1; // type
-                if pos + 2 > data.len() { break; }
-                let vout = u16::from_le_bytes([data[pos], data[pos+1]]); pos += 2;
-                let (amount, n) = match Self::read_varint_static(&data[pos..]) { Some(v) => v, None => break }; pos += n;
+                if pos + 2 > data.len() {
+                    break;
+                }
+                let vout = u16::from_le_bytes([data[pos], data[pos + 1]]);
+                pos += 2;
+                let (amount, n) = match Self::read_varint_static(&data[pos..]) {
+                    Some(v) => v,
+                    None => break,
+                };
+                pos += n;
                 result.entry(vout).or_default().push((aid.clone(), amount));
             }
         }
@@ -5800,7 +5875,9 @@ impl ArkService {
         // Find OP_RETURN with ARK extension
         for out in &psbt.unsigned_tx.output {
             let sb = out.script_pubkey.as_bytes();
-            if sb.len() < 5 || sb[0] != 0x6a { continue; }
+            if sb.len() < 5 || sb[0] != 0x6a {
+                continue;
+            }
             // Decode push data
             let push = {
                 let mut pos = 1usize;
@@ -5808,28 +5885,55 @@ impl ArkService {
                 pos += 1;
                 if op <= 75 {
                     let len = op as usize;
-                    if pos + len <= sb.len() { Some(&sb[pos..pos + len]) } else { None }
+                    if pos + len <= sb.len() {
+                        Some(&sb[pos..pos + len])
+                    } else {
+                        None
+                    }
                 } else if op == 0x4c && pos < sb.len() {
                     let len = sb[pos] as usize;
                     pos += 1;
-                    if pos + len <= sb.len() { Some(&sb[pos..pos + len]) } else { None }
+                    if pos + len <= sb.len() {
+                        Some(&sb[pos..pos + len])
+                    } else {
+                        None
+                    }
                 } else if op == 0x4d && pos + 1 < sb.len() {
                     let len = u16::from_le_bytes([sb[pos], sb[pos + 1]]) as usize;
                     pos += 2;
-                    if pos + len <= sb.len() { Some(&sb[pos..pos + len]) } else { None }
-                } else { None }
+                    if pos + len <= sb.len() {
+                        Some(&sb[pos..pos + len])
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             };
-            let push = match push { Some(d) => d, None => continue };
-            if push.len() < 4 || push[0] != 0x41 || push[1] != 0x52 || push[2] != 0x4b { continue; }
+            let push = match push {
+                Some(d) => d,
+                None => continue,
+            };
+            if push.len() < 4 || push[0] != 0x41 || push[1] != 0x52 || push[2] != 0x4b {
+                continue;
+            }
             // Parse extension packets
             let data = &push[3..];
-            if data.is_empty() { break; }
+            if data.is_empty() {
+                break;
+            }
             let pkt_type = data[0];
-            if pkt_type != 0x00 { break; } // only asset packets
-            let (pkt_len, n) = match Self::read_varint_static(&data[1..]) { Some(v) => v, None => break };
+            if pkt_type != 0x00 {
+                break;
+            } // only asset packets
+            let (pkt_len, n) = match Self::read_varint_static(&data[1..]) {
+                Some(v) => v,
+                None => break,
+            };
             let pkt_start = 1 + n;
             let pkt_end = std::cmp::min(pkt_start + pkt_len as usize, data.len());
-            self.parse_and_store_issuances(&data[pkt_start..pkt_end], ark_txid).await;
+            self.parse_and_store_issuances(&data[pkt_start..pkt_end], ark_txid)
+                .await;
             break;
         }
     }
@@ -5839,10 +5943,14 @@ impl ArkService {
         let mut value: u64 = 0;
         let mut shift: u32 = 0;
         for (i, &byte) in data.iter().enumerate() {
-            if shift >= 64 { return None; }
+            if shift >= 64 {
+                return None;
+            }
             value |= ((byte & 0x7f) as u64) << shift;
             shift += 7;
-            if byte & 0x80 == 0 { return Some((value, i + 1)); }
+            if byte & 0x80 == 0 {
+                return Some((value, i + 1));
+            }
         }
         None
     }
@@ -5850,60 +5958,121 @@ impl ArkService {
     /// Parse asset groups from packet body and store issuance records.
     async fn parse_and_store_issuances(&self, pkt_data: &[u8], ark_txid: &str) {
         let mut pos = 0;
-        let (group_count, n) = match Self::read_varint_static(pkt_data) { Some(v) => v, None => return };
+        let (group_count, n) = match Self::read_varint_static(pkt_data) {
+            Some(v) => v,
+            None => return,
+        };
         pos += n;
 
         let mut group_ids: Vec<String> = Vec::new();
         let mut control_refs: Vec<Option<u16>> = Vec::new();
 
         for gidx in 0..group_count as u16 {
-            if pos >= pkt_data.len() { break; }
-            let presence = pkt_data[pos]; pos += 1;
+            if pos >= pkt_data.len() {
+                break;
+            }
+            let presence = pkt_data[pos];
+            pos += 1;
             let has_aid = (presence & 0x01) != 0;
             let has_ctrl = (presence & 0x02) != 0;
             let has_meta = (presence & 0x04) != 0;
 
             let aid = if has_aid {
-                if pos + 34 > pkt_data.len() { break; }
-                let s = hex::encode(&pkt_data[pos..pos + 34]); pos += 34; s
+                if pos + 34 > pkt_data.len() {
+                    break;
+                }
+                let s = hex::encode(&pkt_data[pos..pos + 34]);
+                pos += 34;
+                s
             } else {
                 format!("{}{}", ark_txid, hex::encode(gidx.to_le_bytes()))
             };
 
             let mut cref: Option<u16> = None;
             if has_ctrl {
-                if pos >= pkt_data.len() { break; }
-                let rt = pkt_data[pos]; pos += 1;
+                if pos >= pkt_data.len() {
+                    break;
+                }
+                let rt = pkt_data[pos];
+                pos += 1;
                 match rt {
                     1 => pos += 34,
-                    2 => { if pos + 2 <= pkt_data.len() { cref = Some(u16::from_le_bytes([pkt_data[pos], pkt_data[pos+1]])); } pos += 2; }
+                    2 => {
+                        if pos + 2 <= pkt_data.len() {
+                            cref = Some(u16::from_le_bytes([pkt_data[pos], pkt_data[pos + 1]]));
+                        }
+                        pos += 2;
+                    }
                     _ => break,
                 }
             }
             if has_meta {
-                let (mc, n) = match Self::read_varint_static(&pkt_data[pos..]) { Some(v) => v, None => break }; pos += n;
+                let (mc, n) = match Self::read_varint_static(&pkt_data[pos..]) {
+                    Some(v) => v,
+                    None => break,
+                };
+                pos += n;
                 for _ in 0..mc {
-                    let (kl, n) = match Self::read_varint_static(&pkt_data[pos..]) { Some(v) => v, None => return }; pos += n + kl as usize;
-                    let (vl, n) = match Self::read_varint_static(&pkt_data[pos..]) { Some(v) => v, None => return }; pos += n + vl as usize;
+                    let (kl, n) = match Self::read_varint_static(&pkt_data[pos..]) {
+                        Some(v) => v,
+                        None => return,
+                    };
+                    pos += n + kl as usize;
+                    let (vl, n) = match Self::read_varint_static(&pkt_data[pos..]) {
+                        Some(v) => v,
+                        None => return,
+                    };
+                    pos += n + vl as usize;
                 }
             }
             // Skip inputs
-            let (ic, n) = match Self::read_varint_static(&pkt_data[pos..]) { Some(v) => v, None => break }; pos += n;
+            let (ic, n) = match Self::read_varint_static(&pkt_data[pos..]) {
+                Some(v) => v,
+                None => break,
+            };
+            pos += n;
             for _ in 0..ic {
-                if pos >= pkt_data.len() { break; }
-                let it = pkt_data[pos]; pos += 1;
+                if pos >= pkt_data.len() {
+                    break;
+                }
+                let it = pkt_data[pos];
+                pos += 1;
                 match it {
-                    1 => { pos += 2; let (_, n) = match Self::read_varint_static(&pkt_data[pos..]) { Some(v) => v, None => return }; pos += n; }
-                    2 => { pos += 34; let (_, n) = match Self::read_varint_static(&pkt_data[pos..]) { Some(v) => v, None => return }; pos += n; }
+                    1 => {
+                        pos += 2;
+                        let (_, n) = match Self::read_varint_static(&pkt_data[pos..]) {
+                            Some(v) => v,
+                            None => return,
+                        };
+                        pos += n;
+                    }
+                    2 => {
+                        pos += 34;
+                        let (_, n) = match Self::read_varint_static(&pkt_data[pos..]) {
+                            Some(v) => v,
+                            None => return,
+                        };
+                        pos += n;
+                    }
                     _ => return,
                 }
             }
             // Skip outputs
-            let (oc, n) = match Self::read_varint_static(&pkt_data[pos..]) { Some(v) => v, None => break }; pos += n;
+            let (oc, n) = match Self::read_varint_static(&pkt_data[pos..]) {
+                Some(v) => v,
+                None => break,
+            };
+            pos += n;
             for _ in 0..oc {
-                if pos >= pkt_data.len() { break; }
+                if pos >= pkt_data.len() {
+                    break;
+                }
                 pos += 3; // type + vout
-                let (_, n) = match Self::read_varint_static(&pkt_data[pos..]) { Some(v) => v, None => break }; pos += n;
+                let (_, n) = match Self::read_varint_static(&pkt_data[pos..]) {
+                    Some(v) => v,
+                    None => break,
+                };
+                pos += n;
             }
             group_ids.push(aid);
             control_refs.push(cref);
@@ -5911,7 +6080,9 @@ impl ArkService {
 
         // Store issuance records
         for (i, aid) in group_ids.iter().enumerate() {
-            let ctrl = control_refs.get(i).and_then(|c| *c)
+            let ctrl = control_refs
+                .get(i)
+                .and_then(|c| *c)
                 .and_then(|ci| group_ids.get(ci as usize).cloned());
             let issuance = crate::domain::AssetIssuance {
                 txid: ark_txid.to_string(),
@@ -6014,9 +6185,10 @@ impl ArkService {
             .intents
             .iter()
             .filter(|(_, intent)| {
-                intent.inputs.iter().any(|inp| {
-                    input_set.contains(&(inp.outpoint.txid.clone(), inp.outpoint.vout))
-                })
+                intent
+                    .inputs
+                    .iter()
+                    .any(|inp| input_set.contains(&(inp.outpoint.txid.clone(), inp.outpoint.vout)))
             })
             .map(|(id, _)| id.clone())
             .collect();
@@ -6095,7 +6267,6 @@ impl ArkService {
             // Each participant's nonce blob is a JSON-serialized map<txid, nonce_hex>.
             // Build map<txid, map<x_only_pubkey, nonce_hex>> to emit one event per txid.
             let session = self.signing_session_store.get_session(batch_id).await?;
-
 
             // nonces_by_txid: txid -> { x_only_pubkey -> nonce_hex }
             let mut nonces_by_txid: std::collections::HashMap<
@@ -6292,7 +6463,7 @@ impl ArkService {
                 error!(error = %e, "Failed to aggregate tree signatures — aborting round and banning participants");
                 // Invalid signatures → abort the round and ban all non-ASP
                 // cosigners immediately (don't wait for the 10s signing timeout).
-                self.abort_round(batch_id).await;
+                let _ = self.abort_round(batch_id).await;
                 return Err(e);
             }
 
@@ -7313,10 +7484,9 @@ impl ArkService {
         // Emit RoundBroadcast to trigger BatchFinalized in the event bridge.
         // This completes the BatchFinalization → forfeit submission → BatchFinalized
         // pipeline.  The commitment txid is extracted from the round's stored tx.
-        if let Ok(Some(round)) = self.round_repo.get_round_with_id(&effective_batch_id).await
-        {
-            let commitment_txid = Self::extract_txid_from_psbt(&round.commitment_tx)
-                .unwrap_or_default();
+        if let Ok(Some(round)) = self.round_repo.get_round_with_id(&effective_batch_id).await {
+            let commitment_txid =
+                Self::extract_txid_from_psbt(&round.commitment_tx).unwrap_or_default();
             self.events
                 .publish_event(ArkEvent::RoundBroadcast {
                     round_id: effective_batch_id.to_string(),
@@ -7398,10 +7568,10 @@ impl ArkService {
             std::collections::HashMap::new();
 
         for node in tree {
-            let real_txid = Self::compute_txid_from_psbt(&node.tx)
-                .unwrap_or_else(|| node.txid.clone());
+            let real_txid =
+                Self::compute_txid_from_psbt(&node.tx).unwrap_or_else(|| node.txid.clone());
             real_txids.insert(node.txid.clone(), real_txid.clone());
-            for (_vout, child_txid) in &node.children {
+            for child_txid in node.children.values() {
                 // The child_txid in the map refers to another node's .txid field
                 child_to_parent.insert(child_txid.clone(), node.txid.clone());
             }
@@ -7409,12 +7579,8 @@ impl ArkService {
 
         // Walk from the leaf up toward the root, checking each ancestor
         let mut current = leaf_txid.to_string();
-        loop {
-            // Check if there's a parent node whose child matches `current`
-            let parent_stored_txid = match child_to_parent.get(&current) {
-                Some(p) => p.clone(),
-                None => break, // reached root or not found
-            };
+        while let Some(p) = child_to_parent.get(&current) {
+            let parent_stored_txid = p.clone();
             let parent_real_txid = real_txids
                 .get(&parent_stored_txid)
                 .cloned()
@@ -7695,7 +7861,11 @@ impl ArkService {
         let sweep_merkle_root = asp_state.sweep_merkle_root;
 
         // Log tree structure for debugging nonce mismatches
-        let tree_txids: Vec<&str> = tree_nodes.iter().filter(|n| !n.tx.is_empty()).map(|n| n.txid.as_str()).collect();
+        let tree_txids: Vec<&str> = tree_nodes
+            .iter()
+            .filter(|n| !n.tx.is_empty())
+            .map(|n| n.txid.as_str())
+            .collect();
         let nonce_txids: Vec<&String> = nonces_by_txid.keys().collect();
         info!(
             tree_node_count = tree_txids.len(),

@@ -598,7 +598,7 @@ impl ArkClient {
 
         client
             .delete_intent(DeleteIntentRequest {
-                intent: Some(crate::proto::ark_v1::Intent {
+                intent: Some(ProtoIntent {
                     message: intent_id.to_string(),
                     proof: String::new(),
                     delegate: String::new(),
