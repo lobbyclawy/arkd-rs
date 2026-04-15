@@ -331,6 +331,7 @@ mod tests {
                     timestamp: 200,
                     vtxo_count: 5,
                     has_boarding_inputs: false,
+                    has_connectors: false,
                 },
                 "round.finalized",
             ),
