@@ -1009,7 +1009,11 @@ async fn test_get_pending_tx_not_found() {
     let mut client = start_ark_server().await;
     let resp = client
         .get_pending_tx(GetPendingTxRequest {
-            identifier: "nonexistent-id".to_string(),
+            identifier: Some(
+                dark_api::proto::ark_v1::get_pending_tx_request::Identifier::TxId(
+                    "nonexistent-id".to_string(),
+                ),
+            ),
         })
         .await;
     assert_eq!(resp.unwrap_err().code(), tonic::Code::NotFound);
@@ -1032,7 +1036,9 @@ async fn test_offchain_tx_submit_and_get() {
     // GetPendingTx with the submit-generated txid — behavior may vary
     let _ = client
         .get_pending_tx(GetPendingTxRequest {
-            identifier: tx_id.clone(),
+            identifier: Some(
+                dark_api::proto::ark_v1::get_pending_tx_request::Identifier::TxId(tx_id.clone()),
+            ),
         })
         .await; // OK either way
 }
