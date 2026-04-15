@@ -939,7 +939,7 @@ async fn test_delete_intent_empty_proof() {
             intent: Some(Intent {
                 message: "some-intent-id".to_string(),
                 proof: String::new(),
-                delegate: String::new(),
+                delegate_pubkey: String::new(),
             }),
         })
         .await;
@@ -956,7 +956,7 @@ async fn test_delete_intent_not_found() {
             intent: Some(Intent {
                 message: "nonexistent-intent".to_string(),
                 proof: "proof".to_string(),
-                delegate: String::new(),
+                delegate_pubkey: String::new(),
             }),
         })
         .await;
@@ -1009,7 +1009,7 @@ async fn test_get_pending_tx_not_found() {
     let mut client = start_ark_server().await;
     let resp = client
         .get_pending_tx(GetPendingTxRequest {
-            tx_id: "nonexistent-id".to_string(),
+            identifier: "nonexistent-id".to_string(),
         })
         .await;
     assert_eq!(resp.unwrap_err().code(), tonic::Code::NotFound);
@@ -1032,7 +1032,7 @@ async fn test_offchain_tx_submit_and_get() {
     // GetPendingTx with the submit-generated txid — behavior may vary
     let _ = client
         .get_pending_tx(GetPendingTxRequest {
-            tx_id: tx_id.clone(),
+            identifier: tx_id.clone(),
         })
         .await; // OK either way
 }
