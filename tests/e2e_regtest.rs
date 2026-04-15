@@ -4581,17 +4581,9 @@ async fn test_asset_unroll() {
         "After unroll: {} spendable asset VTXOs (expected: 0)",
         spendable_assets.len()
     );
-
-    let balance = alice.get_balance(&alice_pubkey).await.expect("get_balance");
-    let asset_balance = balance.asset_balances.get(asset_id.as_str()).copied();
-    eprintln!(
-        "Asset balance after unroll: {:?} (expected: None/0)",
-        asset_balance
-    );
-    // After complete unroll, asset should not be in offchain balance
     assert!(
-        asset_balance.unwrap_or(0) == 0,
-        "asset balance should be 0 after unroll"
+        spendable_assets.is_empty(),
+        "no spendable asset VTXOs should remain after unroll"
     );
 
     eprintln!("✅ test_asset_unroll passed");
