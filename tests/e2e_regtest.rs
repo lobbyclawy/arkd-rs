@@ -4112,7 +4112,8 @@ async fn test_ban_invalid_tree_signatures() {
                     cosigner_pubkeys.len()
                 );
                 // Submit dummy nonces
-                let nonces = std::collections::HashMap::new();
+                let mut nonces = std::collections::HashMap::new();
+                nonces.insert("dummy".to_string(), "00".repeat(66));
                 let _ = eve.submit_tree_nonces(&round_id, &eve_pubkey, nonces).await;
             }
             Ok(Some(dark_client::BatchEvent::TreeNoncesAggregated { round_id, .. })) => {
@@ -4210,15 +4211,17 @@ async fn test_ban_failed_forfeit_signatures() {
                     round_id,
                     cosigner_pubkeys.len()
                 );
-                let nonces = std::collections::HashMap::new();
+                let mut nonces = std::collections::HashMap::new();
+                nonces.insert("dummy".to_string(), "00".repeat(66));
                 let _ = eve.submit_tree_nonces(&round_id, &eve_pubkey, nonces).await;
             }
             Ok(Some(dark_client::BatchEvent::TreeNoncesAggregated { round_id, .. })) => {
                 eprintln!("🔔 TreeNoncesAggregated round={}", round_id);
                 // Submit empty signatures to proceed to finalization
-                let empty_sigs = std::collections::HashMap::new();
+                let mut sigs = std::collections::HashMap::new();
+                sigs.insert("dummy".to_string(), vec![0u8; 32]);
                 let _ = eve
-                    .submit_tree_signatures(&round_id, &eve_pubkey, empty_sigs)
+                    .submit_tree_signatures(&round_id, &eve_pubkey, sigs)
                     .await;
             }
             Ok(Some(dark_client::BatchEvent::BatchFinalization { round_id, .. })) => {
@@ -4247,15 +4250,6 @@ async fn test_ban_failed_forfeit_signatures() {
         "saw_finalization={} round_aborted={}",
         saw_finalization, round_aborted
     );
-
-    if !saw_finalization {
-        // Round failed at signing phase before reaching finalization —
-        // Eve never got to skip forfeits, so the forfeit ban won't trigger.
-        // This happens on slower CI machines where MuSig2 signing times out.
-        eprintln!("⚠️  Skipping forfeit ban check — round never reached finalization");
-        return;
-    }
-
     assert!(
         round_aborted,
         "round must abort when forfeit txs not submitted"
@@ -4324,14 +4318,16 @@ async fn test_ban_invalid_forfeit_signatures() {
                     round_id,
                     cosigner_pubkeys.len()
                 );
-                let nonces = std::collections::HashMap::new();
+                let mut nonces = std::collections::HashMap::new();
+                nonces.insert("dummy".to_string(), "00".repeat(66));
                 let _ = eve.submit_tree_nonces(&round_id, &eve_pubkey, nonces).await;
             }
             Ok(Some(dark_client::BatchEvent::TreeNoncesAggregated { round_id, .. })) => {
                 eprintln!("🔔 TreeNoncesAggregated round={}", round_id);
-                let empty_sigs = std::collections::HashMap::new();
+                let mut sigs = std::collections::HashMap::new();
+                sigs.insert("dummy".to_string(), vec![0u8; 32]);
                 let _ = eve
-                    .submit_tree_signatures(&round_id, &eve_pubkey, empty_sigs)
+                    .submit_tree_signatures(&round_id, &eve_pubkey, sigs)
                     .await;
             }
             Ok(Some(dark_client::BatchEvent::BatchFinalization { round_id, .. })) => {
