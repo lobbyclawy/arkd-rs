@@ -1721,7 +1721,12 @@ async fn test_offchain_tx_concurrent_submit() {
     assert!(!spendable.is_empty(), "must have spendable VTXOs");
 
     let vtxo = &spendable[0];
-    let ark_tx_json = serde_json::json!({"inputs": [{"vtxo_id": format!("{}:{}", vtxo.txid, vtxo.vout), "amount": vtxo.amount}], "outputs": [{"pubkey": "02aabbcc", "amount": 10_000u64}]}).to_string();
+    // Output amount must equal input amount (server enforces balance check).
+    let ark_tx_json = serde_json::json!({
+        "inputs": [{"vtxo_id": format!("{}:{}", vtxo.txid, vtxo.vout), "amount": vtxo.amount}],
+        "outputs": [{"pubkey": "02aabbcc", "amount": vtxo.amount}]
+    })
+    .to_string();
 
     let (r1, r2) = tokio::join!(
         alice1.submit_tx(&ark_tx_json),
