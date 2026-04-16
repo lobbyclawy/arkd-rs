@@ -4754,15 +4754,49 @@ impl ArkService {
         }
 
         // Step 2: Broadcast each connector TX with CPFP anchor.
-        // Connectors have P2A dust outputs that require 0-fee, so they must
-        // be broadcast as CPFP packages (connector + fee-paying child).
+        // Connectors are 0-fee TRUC v3 transactions, so they must be broadcast
+        // as CPFP packages (connector + fee-paying child).
+        //
+        // Following the Go reference server (broadcastConnectorBranch), we wait
+        // for each connector to be confirmed before proceeding. This prevents
+        // TRUC v3 descendant-count violations when broadcasting the forfeit,
+        // which spends a connector output.
         for (i, connector_hex) in signed_connector_hexes.iter().enumerate() {
+            // Parse connector txid for confirmation checking.
+            let connector_txid = hex::decode(connector_hex).ok().and_then(|b| {
+                bitcoin::consensus::deserialize::<bitcoin::Transaction>(&b)
+                    .ok()
+                    .map(|tx| tx.compute_txid().to_string())
+            });
+
+            // Check if connector is already on-chain (skip if so).
+            if let Some(ref txid) = connector_txid {
+                if self.scanner.is_tx_confirmed(txid).await.unwrap_or(false) {
+                    info!(connector_idx = i, txid = %txid, "Connector already confirmed, skipping");
+                    continue;
+                }
+            }
+
             match self
                 .wallet
                 .broadcast_forfeit_with_anchor(std::slice::from_ref(connector_hex))
                 .await
             {
-                Ok(txid) => info!(connector_idx = i, txid = %txid, "Connector TX broadcast (CPFP)"),
+                Ok(txid) => {
+                    info!(connector_idx = i, txid = %txid, "Connector TX broadcast (CPFP)");
+                    // Wait for confirmation before proceeding (matches Go's waitForConfirmation).
+                    // broadcast_forfeit_with_anchor already mines a regtest block on success,
+                    // but the Esplora index may lag. Poll until confirmed.
+                    if let Some(ref ctxid) = connector_txid {
+                        for _attempt in 0..10 {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            if self.scanner.is_tx_confirmed(ctxid).await.unwrap_or(false) {
+                                info!(connector_idx = i, "Connector confirmed");
+                                break;
+                            }
+                        }
+                    }
+                }
                 Err(e) => {
                     // Try raw broadcast as fallback (connector might already be on-chain)
                     match self
@@ -6244,6 +6278,10 @@ impl ArkService {
         Ok(())
     }
 
+    /// Delete intents whose inputs match the given outpoints.
+    ///
+    /// Used for proof-based deletion (BIP-322 PSBT): extracts input outpoints
+    /// from the proof and removes any registered intents that spend them.
     pub async fn delete_intents_by_inputs(
         &self,
         input_outpoints: &[(String, u32)],

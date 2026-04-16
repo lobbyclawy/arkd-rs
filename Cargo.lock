@@ -1015,6 +1015,7 @@ dependencies = [
  "dark-scheduler",
  "dark-wallet",
  "hex",
+ "musig2",
  "proptest",
  "prost 0.13.5",
  "pyroscope",
