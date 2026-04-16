@@ -125,7 +125,7 @@ impl WalletService for WalletServiceImpl {
 
         // Simple largest-first selection
         let mut sorted_utxos = utxos;
-        sorted_utxos.sort_by(|a, b| b.amount.cmp(&a.amount));
+        sorted_utxos.sort_by_key(|b| std::cmp::Reverse(b.amount));
 
         for utxo in sorted_utxos {
             if total >= amount {

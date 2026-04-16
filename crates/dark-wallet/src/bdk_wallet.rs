@@ -221,7 +221,7 @@ impl WalletService for BdkWalletService {
             })
             .collect();
 
-        utxos.sort_by(|a, b| b.txout.value.cmp(&a.txout.value));
+        utxos.sort_by_key(|b| std::cmp::Reverse(b.txout.value));
 
         let mut selected = Vec::new();
         let mut total: u64 = 0;
