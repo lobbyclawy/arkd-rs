@@ -979,9 +979,16 @@ impl ArkClient {
                 script_pubkey: change_script,
             });
         }
+        // P2A anchor output (TRUC v3) — required for CPFP-based unilateral
+        // exit broadcast.  The anchor is a 0-value OP_1 + 0x4e73 output that
+        // anyone can spend to bump fees for this 0-fee ark tx.
+        outputs.push(TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73]),
+        });
 
         let unsigned_tx = Transaction {
-            version: Version::TWO,
+            version: Version(3),
             lock_time: LockTime::ZERO,
             input: inputs,
             output: outputs,

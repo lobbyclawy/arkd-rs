@@ -2890,28 +2890,33 @@ async fn test_react_to_fraud_forfeited_vtxo() {
         unroll_result.as_ref().map(|v| v.len()).unwrap_or(0)
     );
 
-    // If unroll produced broadcast-ready txs, mine them and wait for server reaction.
+    // If unroll produced broadcast-ready txs, broadcast each and mine,
+    // then wait for server reaction.
     if let Ok(ref txs) = unroll_result {
         if !txs.is_empty() {
-            mine_blocks(1).await;
-            // Give the server time to detect the fraud and broadcast forfeit tx.
-            tokio::time::sleep(Duration::from_secs(8)).await;
-            mine_blocks(1).await;
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            for tx_hex in txs {
+                let txid = broadcast_tree_tx(tx_hex).await;
+                eprintln!("  broadcast unroll tx: {}", txid);
+            }
+            // Poll: mine a block, wait, check — repeat until balance settles
+            // or we time out.  The server's fraud detection runs on block
+            // events; with many accumulated VTXOs in the DB, it may take
+            // several maintenance cycles before it detects and reacts.
+            let mut final_balance = 0u64;
+            for _ in 0..15 {
+                mine_blocks(1).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let balance = alice.get_balance(&alice_pubkey).await.expect("get_balance");
+                final_balance = balance.offchain.total;
+                if final_balance == 0 {
+                    break;
+                }
+            }
 
-            // Verify: the offchain balance should be zero after unrolling.
-            // Commitment B's VTXOs may appear as on-chain locked (legitimate
-            // unilateral exit with timelock), but no offchain balance should
-            // remain and no asset balance should remain.
-            let balance = alice.get_balance(&alice_pubkey).await.expect("get_balance");
-            eprintln!(
-                "Alice balance after fraud detection: offchain={} onchain_locked={}",
-                balance.offchain.total,
-                balance.onchain.locked_amount.len()
-            );
+            eprintln!("Alice final offchain balance: {}", final_balance);
             assert_eq!(
-                balance.offchain.total, 0,
-                "offchain balance should be 0 after unroll"
+                final_balance, 0,
+                "offchain balance should be 0 after unroll (server must detect fraud)"
             );
         }
     }
