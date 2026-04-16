@@ -3080,14 +3080,28 @@ async fn test_react_to_fraud_spent_vtxo() {
         if !txs.is_empty() {
             // Broadcast the unrolled txs and mine them.
             mine_blocks(30).await;
-            // Give the server time to detect and react.
-            tokio::time::sleep(Duration::from_secs(5)).await;
 
-            let balance = alice.get_balance(&alice_pubkey).await.expect("get_balance");
-            eprintln!(
-                "Alice onchain locked after fraud: {}",
-                balance.onchain.locked_amount.len()
-            );
+            // Poll for the server's maintenance loop to detect the unroll
+            // and mark the VTXO accordingly. Using a bounded poll loop
+            // instead of a fixed sleep makes this robust to CI timing
+            // variance (slower runners, higher load) without changing the
+            // expected behavior.
+            let mut final_balance = None;
+            for attempt in 0..30 {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                let balance = alice.get_balance(&alice_pubkey).await.expect("get_balance");
+                if balance.offchain.total == 0 {
+                    eprintln!(
+                        "Alice onchain locked after fraud: {} (after {}s)",
+                        balance.onchain.locked_amount.len(),
+                        attempt + 1
+                    );
+                    final_balance = Some(balance);
+                    break;
+                }
+            }
+            let balance = final_balance
+                .expect("server should mark spent VTXO unrolled within 30s after fraud");
             assert_eq!(
                 balance.offchain.total, 0,
                 "offchain balance should be 0 after unroll"
