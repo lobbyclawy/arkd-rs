@@ -353,6 +353,7 @@ impl Server {
     /// between the spawned task scheduling and events being published.
     async fn spawn_event_bridge(&self) {
         let broker = Arc::clone(&self.broker);
+        let tx_broker = Arc::clone(&self.tx_broker);
         let note_store = Arc::clone(&self.note_store);
         let batch_expiry = self.core.config().unilateral_exit_delay as i64;
 
@@ -402,6 +403,7 @@ impl Server {
                                 round_id,
                                 commitment_tx,
                                 has_boarding_inputs,
+                                has_connectors: _,
                                 ..
                             } => {
                                 // Always emit BatchFinalization so clients can
@@ -425,6 +427,12 @@ impl Server {
                                 if !has_boarding_inputs {
                                     // Round succeeded without boarding — confirm pending notes.
                                     note_store.confirm_pending(round_id).await;
+
+                                    // Yield to ensure clients have time to process
+                                    // BatchFinalization before BatchFinalized is published.
+                                    // This prevents race conditions where rapid back-to-back
+                                    // events cause clients to lag and miss BatchFinalized.
+                                    tokio::task::yield_now().await;
 
                                     let txid = {
                                         use base64::Engine;
@@ -489,11 +497,12 @@ impl Server {
                                 tx,
                                 cosigners,
                                 children,
+                                batch_index,
                             } => Some(RoundEvent {
                                 event: Some(round_event::Event::TreeTx(TreeTxEvent {
                                     id: round_id.clone(),
                                     topic: cosigners.clone(),
-                                    batch_index: 0, // vtxo tree
+                                    batch_index: *batch_index,
                                     txid: txid.clone(),
                                     tx: tx.clone(),
                                     children: children
@@ -534,6 +543,39 @@ impl Server {
                                     })),
                                 })
                             }
+                            dark_core::domain::ArkEvent::TreeNoncesCollected {
+                                round_id,
+                                aggregated_nonces,
+                            } => Some(RoundEvent {
+                                event: Some(round_event::Event::TreeNoncesAggregated(
+                                    TreeNoncesAggregatedEvent {
+                                        id: round_id.clone(),
+                                        tree_nonces: aggregated_nonces.clone(),
+                                    },
+                                )),
+                            }),
+                            // Transaction events → publish to tx_broker
+                            // for GetTransactionsStream subscribers.
+                            dark_core::domain::ArkEvent::TxFinalized { ark_txid, .. } => {
+                                use crate::proto::ark_v1::{
+                                    transaction_event::Event as TxEventInner, ArkTxEvent,
+                                    TransactionEvent,
+                                };
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs() as i64;
+                                tx_broker.publish(TransactionEvent {
+                                    event: Some(TxEventInner::ArkTx(ArkTxEvent {
+                                        txid: ark_txid.clone(),
+                                        from_script: String::new(),
+                                        to_script: String::new(),
+                                        amount: 0,
+                                        timestamp: now,
+                                    })),
+                                });
+                                None // No round event for this
+                            }
                             _ => None,
                         };
 
@@ -550,6 +592,9 @@ impl Server {
                                     "TreeSigningStarted"
                                 }
                                 Some(round_event::Event::TreeNonces(_)) => "TreeNonces",
+                                Some(round_event::Event::TreeNoncesAggregated(_)) => {
+                                    "TreeNoncesAggregated"
+                                }
                                 _ => "Other",
                             };
                             let subs = broker.publish(event);
@@ -586,6 +631,7 @@ impl Server {
             Arc::clone(&self.tx_broker),
             Arc::clone(&self.offchain_tx_repo),
             Arc::clone(&self.note_store),
+            Arc::clone(&self.cel_fee_store),
         );
 
         // Create auth interceptor

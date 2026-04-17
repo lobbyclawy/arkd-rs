@@ -2,6 +2,7 @@
 
 pub mod admin_service;
 pub mod ark_service;
+pub mod ark_service_helpers;
 pub mod broker;
 pub mod convert;
 pub mod indexer_service;

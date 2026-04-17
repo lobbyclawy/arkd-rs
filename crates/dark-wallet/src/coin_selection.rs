@@ -130,7 +130,7 @@ impl CoinSelector {
         num_outputs: usize,
     ) -> WalletResult<CoinSelectionResult> {
         let mut sorted = utxos.to_vec();
-        sorted.sort_by(|a, b| b.amount.cmp(&a.amount));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.amount));
 
         let mut selected = Vec::new();
         let mut total_value = Amount::ZERO;

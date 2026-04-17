@@ -125,7 +125,7 @@ impl WalletService for WalletServiceImpl {
 
         // Simple largest-first selection
         let mut sorted_utxos = utxos;
-        sorted_utxos.sort_by(|a, b| b.amount.cmp(&a.amount));
+        sorted_utxos.sort_by_key(|b| std::cmp::Reverse(b.amount));
 
         for utxo in sorted_utxos {
             if total >= amount {
@@ -157,6 +157,48 @@ impl WalletService for WalletServiceImpl {
     }
 
     async fn broadcast_transaction(&self, txs: Vec<String>) -> ArkResult<String> {
+        if txs.len() > 1 {
+            // Package broadcast: use Esplora/Chopsticks /txs/package endpoint.
+            // This handles TRUC v3 parent+child packages where the child is 0-fee.
+            let esplora_url = self.manager.config().esplora_url();
+            let url = format!("{}/txs/package", esplora_url.trim_end_matches('/'));
+            let resp = reqwest::Client::new()
+                .post(&url)
+                .json(&txs)
+                .send()
+                .await
+                .map_err(|e| map_wallet_err(format!("Package broadcast HTTP error: {e}")))?;
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if !status.is_success() {
+                return Err(map_wallet_err(format!(
+                    "Package broadcast failed ({}): {body}",
+                    status
+                )));
+            }
+            // submitpackage returns 200 even when txs are rejected — check
+            // the JSON body for "package_msg" != "success".
+            if body.contains("\"package_msg\"") && !body.contains("\"package_msg\":\"success\"") {
+                info!(body = %body, "Package broadcast rejected by node");
+                return Err(map_wallet_err(format!(
+                    "Package broadcast rejected: {body}"
+                )));
+            }
+            let last_hex = txs.last().unwrap();
+            let tx_bytes =
+                hex::decode(last_hex).map_err(|e| map_wallet_err(format!("Invalid hex: {e}")))?;
+            let tx: bitcoin::Transaction = bitcoin::consensus::deserialize(&tx_bytes)
+                .map_err(|e| map_wallet_err(format!("Invalid tx: {e}")))?;
+            let txid = tx.compute_txid().to_string();
+            info!(%txid, tx_count = txs.len(), "Broadcast transaction package");
+            // Mine a regtest block so the package txs are confirmed and
+            // Esplora indexes the spent outputs.
+            if self.manager.config().network == bitcoin::Network::Regtest {
+                self.manager.mine_regtest_block_public().await;
+            }
+            return Ok(txid);
+        }
+
         let mut last_txid = String::new();
         for raw_hex in &txs {
             let tx_bytes = hex::decode(raw_hex)
@@ -174,6 +216,196 @@ impl WalletService for WalletServiceImpl {
         Ok(last_txid)
     }
 
+    async fn broadcast_forfeit_with_anchor(&self, txs: &[String]) -> ArkResult<String> {
+        use bitcoin::consensus::deserialize;
+
+        // Package: [connector_hexes..., forfeit_hex].
+        // 1. Broadcast connectors individually (each has its own fee).
+        // 2. Create a CPFP child spending the forfeit's P2A anchor output.
+        // 3. Broadcast [forfeit, cpfp_child] as a package via submitpackage.
+        let forfeit_hex = txs
+            .last()
+            .ok_or_else(|| map_wallet_err(String::from("Empty tx list")))?;
+        let connector_hexes = &txs[..txs.len() - 1];
+
+        // Step 1: broadcast connectors individually.
+        // Broadcast connectors via Esplora without mining a block.
+        // The CPFP package broadcast handles block mining at the end.
+        let esplora_url = self.manager.config().esplora_url();
+        for hex_str in connector_hexes {
+            let url = format!("{}/tx", esplora_url.trim_end_matches('/'));
+            match reqwest::Client::new()
+                .post(&url)
+                .body(hex_str.clone())
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    info!("Connector tx broadcast via Esplora");
+                }
+                Ok(resp) => {
+                    let body = resp.text().await.unwrap_or_default();
+                    info!(error = %body, "Connector broadcast failed (may already be in mempool)");
+                }
+                Err(e) => {
+                    info!(error = %e, "Connector broadcast HTTP error");
+                }
+            }
+        }
+
+        // Sync wallet so UTXOs are up-to-date after connector broadcast.
+        let _ = self.manager.sync().await;
+
+        // Step 2: parse forfeit tx, find P2A anchor output.
+        let forfeit_bytes = hex::decode(forfeit_hex)
+            .map_err(|e| map_wallet_err(format!("Invalid forfeit hex: {e}")))?;
+        let forfeit_tx: bitcoin::Transaction = deserialize(&forfeit_bytes)
+            .map_err(|e| map_wallet_err(format!("Invalid forfeit tx: {e}")))?;
+        let forfeit_txid = forfeit_tx.compute_txid();
+
+        let p2a_script = bitcoin::ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73]);
+        let anchor_vout = forfeit_tx
+            .output
+            .iter()
+            .position(|o| o.script_pubkey == p2a_script);
+
+        if let Some(anchor_vout) = anchor_vout {
+            // Step 3: build CPFP child via BDK TxBuilder (proper signing).
+            let anchor_outpoint = bitcoin::OutPoint {
+                txid: forfeit_txid,
+                vout: anchor_vout as u32,
+            };
+            let parent_vbytes = forfeit_tx.vsize() as u64;
+            let child_raw = self
+                .manager
+                .build_anchor_bump_tx(anchor_outpoint, parent_vbytes)
+                .await
+                .map_err(map_wallet_err)?;
+            let child_hex = hex::encode(bitcoin::consensus::serialize(&child_raw));
+
+            info!(
+                forfeit_txid = %forfeit_txid,
+                child_txid = %child_raw.compute_txid(),
+                "Broadcasting forfeit + CPFP child as package"
+            );
+
+            // Broadcast [forfeit, cpfp_child] as a 2-tx TRUC v3 package.
+            // The forfeit (0-fee, v3) can't be accepted individually. The
+            // CPFP child (v3, has fee) provides the fee for both.
+            let esplora_url = self.manager.config().esplora_url();
+            let url = format!("{}/txs/package", esplora_url.trim_end_matches('/'));
+            let package = vec![forfeit_hex.clone(), child_hex];
+            let resp = reqwest::Client::new()
+                .post(&url)
+                .json(&package)
+                .send()
+                .await
+                .map_err(|e| map_wallet_err(format!("Package HTTP error: {e}")))?;
+
+            let body = resp.text().await.unwrap_or_default();
+            info!(body = %body.chars().take(500).collect::<String>(), "CPFP package response");
+
+            if body.contains("\"package_msg\":\"success\"") {
+                info!(%forfeit_txid, "Forfeit broadcast success");
+                if self.manager.config().network == bitcoin::Network::Regtest {
+                    self.manager.mine_regtest_block_public().await;
+                    // Sync wallet after mining so the next broadcast
+                    // sees confirmed UTXOs instead of reusing unconfirmed
+                    // outputs (avoids TRUC descendant count violations).
+                    let _ = self.manager.sync().await;
+                }
+                return Ok(forfeit_txid.to_string());
+            }
+
+            return Err(map_wallet_err(format!("CPFP package rejected: {body}")));
+        }
+
+        // Fallback: no anchor or no UTXOs
+        self.broadcast_transaction(vec![forfeit_hex.clone()]).await
+    }
+
+    async fn broadcast_with_anchor_bump(&self, raw_tx_hex: &str) -> ArkResult<String> {
+        use bitcoin::consensus::deserialize;
+
+        // Parse the TX, find P2A anchor output
+        let tx_bytes =
+            hex::decode(raw_tx_hex).map_err(|e| map_wallet_err(format!("Invalid TX hex: {e}")))?;
+        let tx: bitcoin::Transaction =
+            deserialize(&tx_bytes).map_err(|e| map_wallet_err(format!("Invalid TX: {e}")))?;
+        let txid = tx.compute_txid();
+
+        let p2a_script = bitcoin::ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73]);
+        let anchor_vout = tx.output.iter().position(|o| o.script_pubkey == p2a_script);
+
+        if let Some(anchor_vout) = anchor_vout {
+            // Sync wallet so UTXOs are up-to-date
+            let _ = self.manager.sync().await;
+
+            // Build CPFP child via BDK TxBuilder
+            let anchor_outpoint = bitcoin::OutPoint {
+                txid,
+                vout: anchor_vout as u32,
+            };
+            let parent_vbytes = tx.vsize() as u64;
+            let child_raw = self
+                .manager
+                .build_anchor_bump_tx(anchor_outpoint, parent_vbytes)
+                .await
+                .map_err(map_wallet_err)?;
+            let child_hex = hex::encode(bitcoin::consensus::serialize(&child_raw));
+
+            info!(
+                parent_txid = %txid,
+                parent_vbytes = parent_vbytes,
+                child_txid = %child_raw.compute_txid(),
+                child_version = child_raw.version.0,
+                "Broadcasting TX + CPFP child as package"
+            );
+
+            // Broadcast [parent, cpfp_child] as a 2-tx TRUC v3 package
+            let esplora_url = self.manager.config().esplora_url();
+            let url = format!("{}/txs/package", esplora_url.trim_end_matches('/'));
+            let package = vec![raw_tx_hex.to_string(), child_hex];
+            let resp = reqwest::Client::new()
+                .post(&url)
+                .json(&package)
+                .send()
+                .await
+                .map_err(|e| map_wallet_err(format!("Package HTTP error: {e}")))?;
+
+            let body = resp.text().await.unwrap_or_default();
+            info!(body = %body.chars().take(500).collect::<String>(), "CPFP package response");
+
+            // Bitcoin Core's submitpackage returns a JSON object with package_msg.
+            // Only "success" indicates all txs were accepted. Any other value
+            // (including "transaction failed") means at least one tx was
+            // rejected — reported in tx-results[<wtxid>].error.
+            // Proxies may also return a bare JSON array of txids (no error).
+            let bitcoin_core_success = body.contains("\"package_msg\":\"success\"");
+            let proxy_array_success =
+                body.starts_with('[') && !body.contains("\"error\"") && !body.contains("error\":");
+            if bitcoin_core_success || proxy_array_success {
+                info!(%txid, "Anchor-bumped broadcast success");
+                // Apply the CPFP child to the wallet graph so subsequent
+                // broadcasts don't re-select the wallet UTXOs it spent.
+                // Without this, BDK's `drain_wallet()` would pick the same
+                // (now unconfirmed-spent) UTXO and produce an invalid tx
+                // with `bad-txns-inputs-missingorspent`.
+                self.manager.apply_unconfirmed_tx(&child_raw).await;
+                if self.manager.config().network == bitcoin::Network::Regtest {
+                    self.manager.mine_regtest_block_public().await;
+                }
+                return Ok(txid.to_string());
+            }
+
+            return Err(map_wallet_err(format!("CPFP package rejected: {body}")));
+        }
+
+        // No anchor output — broadcast directly
+        self.broadcast_transaction(vec![raw_tx_hex.to_string()])
+            .await
+    }
+
     async fn fee_rate(&self) -> ArkResult<u64> {
         // Default fee rate — in production, query from Esplora mempool
         Ok(1)
@@ -188,8 +420,11 @@ impl WalletService for WalletServiceImpl {
     }
 
     async fn get_dust_amount(&self) -> ArkResult<u64> {
-        // Standard dust limit for Taproot outputs
-        Ok(546)
+        // Dust limit for Taproot (segwit v1) outputs.
+        // P2TR outputs: 34 bytes scriptPubKey × 3 + overhead = 330 sats.
+        // This matches Bitcoin Core's GetDustThreshold for witness v1 outputs.
+        // The Go reference server returns the same value via wallet.GetDustAmount().
+        Ok(330)
     }
 
     async fn get_outpoint_status(&self, outpoint: &VtxoOutpoint) -> ArkResult<bool> {
@@ -431,7 +666,7 @@ mod tests {
     async fn test_wallet_dust_amount() {
         let (svc, _tmp) = make_test_service().await;
         let dust = svc.get_dust_amount().await.expect("dust");
-        assert_eq!(dust, 546);
+        assert_eq!(dust, 330);
     }
 
     #[tokio::test]

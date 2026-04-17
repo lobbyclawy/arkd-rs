@@ -15,11 +15,11 @@ use crate::domain::RoundStage;
 /// before being aborted. This prevents the round loop from getting stuck when
 /// cosigners fail to submit nonces/signatures.
 ///
-/// Set to 10 seconds — enough time for responsive cosigners to submit nonces,
-/// short enough to quickly recover from unresponsive ones. If cosigners need
-/// longer, they should be submitting nonces within the first few seconds of
-/// the signing phase.
-const SIGNING_TIMEOUT_SECS: i64 = 10;
+/// Set to 60 seconds to match the Go reference server's behavior: the server
+/// waits a full round cycle for cosigners to respond. This is long enough for
+/// clients on slow connections or busy test environments, while still recovering
+/// from truly unresponsive cosigners within a reasonable time.
+const SIGNING_TIMEOUT_SECS: i64 = 60;
 
 /// Spawn a background task that calls `core.start_round()` on every tick.
 ///
@@ -52,17 +52,34 @@ pub fn spawn_round_loop(core: Arc<ArkService>, mut tick_rx: mpsc::Receiver<()>) 
                             .entered_at
                             .map_or(elapsed, |entered| chrono::Utc::now().timestamp() - entered);
 
+                        // After 10 seconds, try to complete with confirmed-only
+                        // intents (dropping unconfirmed stale sessions). This runs
+                        // BEFORE the full timeout to avoid SDK batch_expiry failures.
+                        if (10..SIGNING_TIMEOUT_SECS).contains(&signing_elapsed) {
+                            let _ = core.try_complete_confirmed_only().await;
+                        }
+
                         if signing_elapsed >= SIGNING_TIMEOUT_SECS {
-                            warn!(
-                                round_id = %round.id,
-                                signing_elapsed_secs = signing_elapsed,
-                                "Round stuck in Finalization stage — aborting (signing timeout)"
-                            );
-                            // Abort the round so a new one can start
-                            if let Err(e) = core.abort_round("signing timeout").await {
-                                let msg = e.to_string();
-                                if !msg.contains("already ended") && !msg.contains("No active") {
-                                    error!("Failed to abort timed-out round: {e}");
+                            // Final attempt before aborting.
+                            let try_partial = core.try_complete_confirmed_only().await;
+                            if try_partial.is_ok() {
+                                info!(
+                                    round_id = %round.id,
+                                    "Round completed with confirmed-only intents (dropped unconfirmed)"
+                                );
+                            } else {
+                                warn!(
+                                    round_id = %round.id,
+                                    signing_elapsed_secs = signing_elapsed,
+                                    "Round stuck in Finalization stage — aborting (signing timeout)"
+                                );
+                                // Abort the round so a new one can start
+                                if let Err(e) = core.abort_round("signing timeout").await {
+                                    let msg = e.to_string();
+                                    if !msg.contains("already ended") && !msg.contains("No active")
+                                    {
+                                        error!("Failed to abort timed-out round: {e}");
+                                    }
                                 }
                             }
                         } else {

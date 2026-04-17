@@ -100,6 +100,23 @@ pub trait WalletService: Send + Sync {
     ) -> ArkResult<(Vec<TxInput>, u64)>;
     /// Broadcast a transaction
     async fn broadcast_transaction(&self, txs: Vec<String>) -> ArkResult<String>;
+
+    /// Broadcast a forfeit tx package (connector + forfeit) via submitpackage.
+    /// Tolerates partial acceptance (connector accepted but forfeit pending).
+    async fn broadcast_forfeit_with_anchor(&self, txs: &[String]) -> ArkResult<String> {
+        self.broadcast_transaction(txs.to_vec()).await
+    }
+
+    /// Broadcast a 0-fee P2A transaction by creating a CPFP child that spends
+    /// the anchor output and pays the package fee. Returns the parent txid.
+    ///
+    /// The child TX spends the P2A anchor (OP_1 0x4e73) output of the parent
+    /// plus a wallet UTXO to cover fees, with change back to the wallet.
+    async fn broadcast_with_anchor_bump(&self, raw_tx_hex: &str) -> ArkResult<String> {
+        // Default: just broadcast directly (implementations override for CPFP)
+        self.broadcast_transaction(vec![raw_tx_hex.to_string()])
+            .await
+    }
     /// Get current fee rate (sat/vB)
     async fn fee_rate(&self) -> ArkResult<u64>;
     /// Get the current block timestamp
@@ -284,6 +301,8 @@ pub struct SweepInput {
     pub amount: u64,
     /// Tapscript paths for spending
     pub tapscripts: Vec<String>,
+    /// Owner's public key (hex-encoded x-only) — used to derive witness_utxo
+    pub pubkey: String,
 }
 
 /// A sweepable batch output from a VTXO tree.
@@ -427,8 +446,23 @@ pub trait VtxoRepository: Send + Sync {
     async fn get_vtxos(&self, outpoints: &[VtxoOutpoint]) -> ArkResult<Vec<Vtxo>>;
     /// Get all for pubkey
     async fn get_all_vtxos_for_pubkey(&self, pubkey: &str) -> ArkResult<(Vec<Vtxo>, Vec<Vtxo>)>;
-    /// Spend VTXOs
+    /// Spend VTXOs (marks spent_by only, for offchain tx finalization)
     async fn spend_vtxos(&self, spent: &[(VtxoOutpoint, String)], ark_txid: &str) -> ArkResult<()>;
+    /// Settle VTXOs in a round (marks both spent_by AND settled_by atomically).
+    ///
+    /// Used during round completion to record which round re-settled
+    /// (forfeited) the VTXOs. Unlike `spend_vtxos`, this also sets
+    /// `settled_by` which persists even if `spent_by` is later
+    /// overwritten by an offchain tx from a different context.
+    /// Matches Go's `SettleVtxos` which atomically updates both fields.
+    async fn settle_vtxos(
+        &self,
+        spent: &[(VtxoOutpoint, String)],
+        commitment_txid: &str,
+    ) -> ArkResult<()> {
+        // Default: delegate to spend_vtxos (concrete repos override for atomicity)
+        self.spend_vtxos(spent, commitment_txid).await
+    }
     /// Find time-expired VTXOs eligible for sweep
     ///
     /// Returns VTXOs where expires_at < before_timestamp and not spent/swept/unrolled.
@@ -565,6 +599,9 @@ pub trait OffchainTxRepository: Send + Sync {
     async fn set_signed_ark_tx(&self, id: &str, signed_ark_tx: &str) -> ArkResult<()>;
     /// Store the final checkpoint tx PSBTs (base64) for an offchain transaction
     async fn set_checkpoint_txs(&self, id: &str, checkpoint_txs: &[String]) -> ArkResult<()>;
+    /// Check if a VTXO (by vtxo_id "txid:vout") is already used as input by any pending offchain tx.
+    /// Used for double-spend detection in SubmitTx.
+    async fn is_input_spent(&self, vtxo_id: &str) -> ArkResult<bool>;
 }
 
 /// Fee estimation strategy
@@ -803,6 +840,36 @@ pub trait BlockchainScanner: Send + Sync {
         Ok(false)
     }
 
+    /// Get the block height at which a transaction was confirmed.
+    ///
+    /// Returns `Ok(Some(height))` if the tx is confirmed, `Ok(None)` if
+    /// unconfirmed or not found. Used for calculating CSV expiry of
+    /// on-chain tree outputs.
+    async fn get_tx_confirmation_height(&self, _txid: &str) -> ArkResult<Option<u32>> {
+        Ok(None)
+    }
+
+    /// Find a confirmed transaction that pays to a given script with the
+    /// expected amount.  Used to resolve the actual on-chain txid for a
+    /// VTXO whose PSBT-computed txid differs from the finalized on-chain
+    /// txid (e.g. after tree unrolling with CPFP anchors).
+    ///
+    /// Returns `Ok(Some(txid))` if found, `Ok(None)` if not.
+    async fn find_confirmed_tx_for_script(
+        &self,
+        _script_hex: &str,
+        _amount: u64,
+    ) -> ArkResult<Option<String>> {
+        Ok(None)
+    }
+
+    /// Broadcast a raw transaction hex directly via Bitcoin Core RPC.
+    /// Bypasses Esplora/chopsticks for zero relay lag.
+    /// Default implementation is a no-op.
+    async fn broadcast_raw_tx(&self, _tx_hex: &str) -> ArkResult<()> {
+        Ok(())
+    }
+
     /// Get a receiver for new-block notifications.
     ///
     /// Emits a [`NewBlockEvent`] whenever the scanner detects a new chain tip.
@@ -867,6 +934,8 @@ pub trait AssetRepository: Send + Sync {
     async fn list_assets(&self) -> ArkResult<Vec<Asset>>;
     /// Store an asset issuance record.
     async fn store_issuance(&self, issuance: &AssetIssuance) -> ArkResult<()>;
+    /// Get the control asset ID for a given asset (from issuance records).
+    async fn get_control_asset_id(&self, asset_id: &str) -> ArkResult<String>;
 }
 
 /// No-op asset repository (for testing / stubs).
@@ -885,6 +954,9 @@ impl AssetRepository for NoopAssetRepository {
     }
     async fn store_issuance(&self, _issuance: &AssetIssuance) -> ArkResult<()> {
         Ok(())
+    }
+    async fn get_control_asset_id(&self, _asset_id: &str) -> ArkResult<String> {
+        Ok(String::new())
     }
 }
 
@@ -980,6 +1052,9 @@ impl OffchainTxRepository for NoopOffchainTxRepository {
     }
     async fn set_checkpoint_txs(&self, _id: &str, _checkpoint_txs: &[String]) -> ArkResult<()> {
         Ok(())
+    }
+    async fn is_input_spent(&self, _vtxo_id: &str) -> ArkResult<bool> {
+        Ok(false)
     }
 }
 

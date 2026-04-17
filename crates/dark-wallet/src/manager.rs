@@ -430,6 +430,99 @@ impl WalletManager {
         self.asp_keypair.x_only_public_key().0
     }
 
+    /// Build and sign a CPFP child tx that spends a P2A anchor output.
+    ///
+    /// `parent_vbytes` is the parent tx's virtual size. The child's fee rate
+    /// is scaled so the combined package rate (parent + child) clears the
+    /// mempool's min relay rate — critical because the parent has 0 fee
+    /// (TRUC v3) and relies entirely on the child to pay for both.
+    pub async fn build_anchor_bump_tx(
+        &self,
+        anchor_outpoint: bitcoin::OutPoint,
+        parent_vbytes: u64,
+    ) -> WalletResult<Transaction> {
+        use bdk_wallet::bitcoin::FeeRate;
+
+        let mut wallet = self.wallet.write().await;
+
+        // Use BDK's TxBuilder to create a tx that spends the anchor
+        // as a "foreign UTXO" (anyone-can-spend) plus wallet UTXOs for fees.
+        let p2a_script = bitcoin::ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73]);
+        // BDK requires non_witness_utxo for foreign UTXOs. Since the anchor
+        // is from an unbroadcast tx, we provide a minimal non_witness_utxo
+        // that satisfies BDK's check.
+        let anchor_psbt_input = bitcoin::psbt::Input {
+            witness_utxo: Some(bitcoin::TxOut {
+                value: bitcoin::Amount::ZERO,
+                script_pubkey: p2a_script.clone(),
+            }),
+            // Provide a minimal non_witness_utxo with just the anchor output
+            non_witness_utxo: Some(bitcoin::Transaction {
+                version: bitcoin::transaction::Version(3),
+                lock_time: bitcoin::locktime::absolute::LockTime::ZERO,
+                input: vec![],
+                output: {
+                    let mut outs = Vec::new();
+                    for _ in 0..=anchor_outpoint.vout {
+                        outs.push(bitcoin::TxOut {
+                            value: bitcoin::Amount::ZERO,
+                            script_pubkey: p2a_script.clone(),
+                        });
+                    }
+                    outs
+                },
+            }),
+            final_script_witness: Some(bitcoin::Witness::new()),
+            ..Default::default()
+        };
+        let anchor_satisfaction_weight = bitcoin::Weight::from_wu(1); // empty witness
+
+        let drain_script = wallet
+            .reveal_next_address(bdk_wallet::KeychainKind::Internal)
+            .script_pubkey();
+
+        // Target package rate: 5 sat/vb (well above the 3 sat/vb regtest min
+        // relay and typical testnet/mainnet rates). The child must pay for
+        // parent (0-fee) + child at this rate. Estimate child vbytes ~150
+        // (one anchor input + one wallet input + one change output).
+        const TARGET_RATE: u64 = 5;
+        const EST_CHILD_VB: u64 = 150;
+        let package_vb = parent_vbytes + EST_CHILD_VB;
+        let child_fee_rate = (TARGET_RATE * package_vb).div_ceil(EST_CHILD_VB);
+
+        let mut builder = wallet.build_tx();
+        builder
+            .version(3)
+            .add_foreign_utxo(
+                anchor_outpoint,
+                anchor_psbt_input,
+                anchor_satisfaction_weight,
+            )
+            .map_err(|e| WalletError::BroadcastError(format!("Add anchor UTXO: {e}")))?;
+        builder.fee_rate(FeeRate::from_sat_per_vb(child_fee_rate).unwrap());
+        builder.drain_to(drain_script);
+        builder.drain_wallet();
+
+        let mut psbt = builder
+            .finish()
+            .map_err(|e| WalletError::BroadcastError(format!("Build CPFP child: {e}")))?;
+
+        wallet
+            .sign(
+                &mut psbt,
+                bdk_wallet::SignOptions {
+                    trust_witness_utxo: true,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| WalletError::SigningError(format!("Sign CPFP child: {e}")))?;
+
+        // Persist wallet state
+        Self::persist_wallet_static(&mut wallet, &self.config.database_path)?;
+
+        Ok(psbt.extract_tx_unchecked_fee_rate())
+    }
+
     /// Broadcast a transaction via Esplora
     pub async fn broadcast_transaction(&self, tx: &Transaction) -> WalletResult<Txid> {
         let txid = tx.compute_txid();
@@ -503,6 +596,30 @@ impl WalletManager {
             Err(e) => {
                 warn!(error = %e, "Regtest block mining failed (non-fatal)");
             }
+        }
+    }
+
+    /// Public wrapper for regtest block mining (used by package broadcast).
+    pub async fn mine_regtest_block_public(&self) {
+        self.mine_regtest_block().await;
+    }
+
+    /// Apply an already-broadcast transaction to the local wallet graph as
+    /// unconfirmed. Used after CPFP package broadcast to mark the wallet
+    /// UTXOs spent by the child as no longer available — otherwise the next
+    /// `drain_wallet()` call would reselect them and produce an invalid tx.
+    pub async fn apply_unconfirmed_tx(&self, tx: &Transaction) {
+        let seen_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut wallet = self.wallet.write().await;
+        wallet.apply_unconfirmed_txs([(std::sync::Arc::new(tx.clone()), seen_at)]);
+        if let Err(e) = Self::persist_wallet_static(&mut wallet, &self.config.database_path) {
+            warn!(
+                ?e,
+                "Failed to persist wallet after CPFP broadcast (non-fatal)"
+            );
         }
     }
 

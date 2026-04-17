@@ -564,16 +564,16 @@ pub(crate) async fn wait_for_batch_finalized(
                 batch_session_id = e.id.clone();
             }
 
-            round_event::Event::BatchFinalized(e) => {
-                if !batch_session_id.is_empty() && e.id == batch_session_id {
-                    return Ok(e.commitment_txid);
-                }
+            round_event::Event::BatchFinalized(e)
+                if !batch_session_id.is_empty() && e.id == batch_session_id =>
+            {
+                return Ok(e.commitment_txid);
             }
 
-            round_event::Event::BatchFailed(e) => {
-                if !batch_session_id.is_empty() && e.id == batch_session_id {
-                    return Err(ClientError::Rpc(format!("Batch failed: {}", e.reason)));
-                }
+            round_event::Event::BatchFailed(e)
+                if !batch_session_id.is_empty() && e.id == batch_session_id =>
+            {
+                return Err(ClientError::Rpc(format!("Batch failed: {}", e.reason)));
             }
 
             // Ignore all other events (TreeTx, TreeSigningStarted, etc.)

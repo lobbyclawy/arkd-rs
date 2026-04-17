@@ -148,6 +148,18 @@ impl AssetRepository for SqliteAssetRepository {
 
         Ok(())
     }
+
+    async fn get_control_asset_id(&self, asset_id: &str) -> ArkResult<String> {
+        let row = sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT control_asset_id FROM asset_issuances WHERE asset_id = ?",
+        )
+        .bind(asset_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| dark_core::ArkError::Internal(format!("Get control asset: {e}")))?;
+
+        Ok(row.and_then(|(c,)| c).unwrap_or_default())
+    }
 }
 
 #[cfg(test)]

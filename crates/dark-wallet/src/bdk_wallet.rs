@@ -34,6 +34,7 @@ use dark_core::VtxoOutpoint;
 pub struct BdkWalletService {
     wallet: Arc<Mutex<Wallet>>,
     esplora: Arc<AsyncClient>,
+    esplora_url: String,
     network: Network,
     /// Whether the wallet is currently locked.
     locked: AtomicBool,
@@ -64,6 +65,7 @@ impl BdkWalletService {
         Ok(Self {
             wallet: Arc::new(Mutex::new(wallet)),
             esplora: Arc::new(esplora),
+            esplora_url: esplora_url.trim_end_matches('/').to_string(),
             network,
             locked: AtomicBool::new(false),
         })
@@ -219,7 +221,7 @@ impl WalletService for BdkWalletService {
             })
             .collect();
 
-        utxos.sort_by(|a, b| b.txout.value.cmp(&a.txout.value));
+        utxos.sort_by_key(|b| std::cmp::Reverse(b.txout.value));
 
         let mut selected = Vec::new();
         let mut total: u64 = 0;
@@ -247,6 +249,30 @@ impl WalletService for BdkWalletService {
     }
 
     async fn broadcast_transaction(&self, txs: Vec<String>) -> ArkResult<String> {
+        if txs.len() > 1 {
+            // Package broadcast: use Esplora/Chopsticks /txs/package endpoint.
+            // This handles TRUC v3 parent+child packages where the parent is 0-fee.
+            let url = format!("{}/txs/package", self.esplora_url);
+            let resp = reqwest::Client::new()
+                .post(&url)
+                .json(&txs)
+                .send()
+                .await
+                .map_err(|e| map_err(format!("Package broadcast HTTP error: {e}")))?;
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(map_err(format!("Package broadcast failed: {body}")));
+            }
+            let last_hex = txs.last().unwrap();
+            let tx_bytes =
+                hex::decode(last_hex).map_err(|e| map_err(format!("Invalid hex: {e}")))?;
+            let tx: bitcoin::Transaction = bitcoin::consensus::deserialize(&tx_bytes)
+                .map_err(|e| map_err(format!("Invalid tx: {e}")))?;
+            let txid = tx.compute_txid().to_string();
+            info!(%txid, tx_count = txs.len(), "Broadcast transaction package");
+            return Ok(txid);
+        }
+
         let mut last_txid = String::new();
         for raw_hex in &txs {
             let tx_bytes =

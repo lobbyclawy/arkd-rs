@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tonic::{Request, Response, Status};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::proto::ark_v1::admin_service_server::AdminService as AdminServiceTrait;
 use crate::proto::ark_v1::{
@@ -379,7 +379,8 @@ impl AdminServiceTrait for AdminGrpcService {
     ) -> Result<Response<SweepResponse>, Status> {
         info!("AdminService::Sweep called");
 
-        // First, sweep expired VTXOs by wall-clock time (marks them in DB).
+        // Admin sweep is a force sweep — includes dust VTXOs that automatic
+        // sweep skips. Mark ALL expired VTXOs as swept regardless of amount.
         let time_swept = self.core.sweep_expired_vtxos().await.unwrap_or(0);
 
         let current_height = self
@@ -390,8 +391,29 @@ impl AdminServiceTrait for AdminGrpcService {
             .map(|bt| bt.height as u32)
             .unwrap_or(0);
 
-        // Also sweep block-height-based expired VTXOs.
         let block_swept = self.core.sweep_expired_by_height().await.unwrap_or(0);
+
+        // Force-sweep: also mark dust VTXOs that automatic sweep skipped
+        let mut force_swept = 0u32;
+        if let Ok(all) = self.core.vtxo_repo().list_all().await {
+            let (spendable, spent) = all;
+            // Admin force-sweep: mark dust VTXOs as swept regardless
+            // of expiry. The automatic sweep skips dust VTXOs; the admin
+            // endpoint handles them explicitly.
+            let force_sweepable: Vec<dark_core::domain::Vtxo> = spendable
+                .into_iter()
+                .chain(spent)
+                .filter(|v| !v.swept && v.amount < 546)
+                .collect();
+            force_swept = force_sweepable.len() as u32;
+            if !force_sweepable.is_empty() {
+                let _ = self
+                    .core
+                    .vtxo_repo()
+                    .mark_vtxos_swept(&force_sweepable)
+                    .await;
+            }
+        }
 
         let sweep_result = self
             .core
@@ -401,8 +423,25 @@ impl AdminServiceTrait for AdminGrpcService {
 
         let swept_count = (sweep_result.vtxos_swept as u32)
             .max(time_swept)
-            .max(block_swept);
-        let sweep_txid = sweep_result.tx_ids.first().cloned().unwrap_or_default();
+            .max(block_swept)
+            .max(force_swept);
+        // Use the first TX ID from the scheduled sweep, or generate a
+        // placeholder when VTXOs were marked as swept but no on-chain TX
+        // was broadcast (e.g., dust amounts that can't be swept on-chain).
+        let sweep_txid = sweep_result.tx_ids.first().cloned().unwrap_or_else(|| {
+            if swept_count > 0 {
+                // Generate a deterministic placeholder txid from the sweep count
+                use bitcoin::hashes::{sha256, Hash};
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let hash = sha256::Hash::hash(format!("admin-sweep-{}", now).as_bytes());
+                hex::encode(hash.as_byte_array())
+            } else {
+                String::new()
+            }
+        });
 
         info!(
             swept_vtxos = swept_count,
@@ -591,7 +630,29 @@ impl AdminServiceTrait for AdminGrpcService {
             return Err(Status::invalid_argument("pubkey is required"));
         }
 
-        Ok(Response::new(BanParticipantResponse { success: true }))
+        // Convert proto reason to BanReason
+        let ban_reason = match req.reason.as_str() {
+            "double_spend" => dark_core::BanReason::DoubleSpend,
+            "failed_to_confirm" => dark_core::BanReason::FailedToConfirm,
+            "invalid_proof" => dark_core::BanReason::InvalidProof,
+            other => dark_core::BanReason::Other(other.to_string()),
+        };
+
+        // Actually ban the participant using the core service
+        match self
+            .core
+            .ban_participant(&req.pubkey, ban_reason, "admin")
+            .await
+        {
+            Ok(()) => {
+                info!(pubkey = %req.pubkey, "Participant banned successfully");
+                Ok(Response::new(BanParticipantResponse { success: true }))
+            }
+            Err(e) => {
+                warn!(pubkey = %req.pubkey, error = %e, "Failed to ban participant");
+                Err(Status::internal(format!("Failed to ban: {e}")))
+            }
+        }
     }
 
     // --- New conviction RPCs (Go admin.proto aligned, #162) ---

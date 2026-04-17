@@ -49,6 +49,29 @@ impl TxBuilder for LocalTxBuilder {
                     })
                     .collect(),
                 cosigners_public_keys: i.cosigners_public_keys.clone(),
+                num_forfeitable_inputs: {
+                    let count = i.inputs.iter().filter(|v| v.needs_connector()).count();
+                    for v in &i.inputs {
+                        tracing::info!(
+                            outpoint = %format!("{}:{}", v.outpoint.txid, v.outpoint.vout),
+                            needs_connector = v.needs_connector(),
+                            is_note = v.is_note(),
+                            swept = v.swept,
+                            preconfirmed = v.preconfirmed,
+                            ark_txid_empty = v.ark_txid.is_empty(),
+                            commitment_txids_empty = v.commitment_txids.is_empty(),
+                            "build_commitment_tx: intent input detail"
+                        );
+                    }
+                    tracing::info!(
+                        intent_id = %i.id,
+                        total_inputs = i.inputs.len(),
+                        forfeitable = count,
+                        "build_commitment_tx: intent connector count"
+                    );
+                    count
+                },
+                leaf_tx_asset_packet: i.leaf_tx_asset_packet.clone(),
             })
             .collect();
 
@@ -160,8 +183,29 @@ impl TxBuilder for LocalTxBuilder {
 
         let unsigned_txid = tx.compute_txid().to_string();
 
-        let psbt = Psbt::from_unsigned_tx(tx)
+        let mut psbt = Psbt::from_unsigned_tx(tx)
             .map_err(|e| ArkError::Internal(format!("failed to create sweep PSBT: {e}")))?;
+
+        // Populate witness_utxo for each input so the signer can compute
+        // taproot sighashes.  The VTXO output script is P2TR derived from the
+        // owner's x-only public key.
+        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+        for (i, si) in inputs.iter().enumerate() {
+            if si.pubkey.is_empty() {
+                continue; // connector outputs — path currently unreachable
+            }
+            let pubkey_bytes = hex::decode(&si.pubkey)
+                .map_err(|e| ArkError::Internal(format!("invalid sweep input pubkey hex: {e}")))?;
+            let xonly = XOnlyPublicKey::from_slice(&pubkey_bytes).map_err(|e| {
+                ArkError::Internal(format!("invalid sweep input x-only pubkey: {e}"))
+            })?;
+            let script_pubkey = ScriptBuf::new_p2tr(&secp, xonly, None);
+            psbt.inputs[i].witness_utxo = Some(TxOut {
+                value: Amount::from_sat(si.amount),
+                script_pubkey,
+            });
+        }
+
         let psbt_hex = hex::encode(psbt.serialize());
 
         Ok((unsigned_txid, psbt_hex))
@@ -212,12 +256,25 @@ fn collect_connector_outpoints(connectors: &FlatTxTree) -> HashSet<String> {
     let mut set = HashSet::new();
     for node in connectors {
         let mut found = false;
+        // Try hex-encoded raw transaction first
         if let Ok(raw) = hex::decode(&node.tx) {
             if let Ok(tx) = deserialize::<Transaction>(&raw) {
                 for vout in 0..tx.output.len() as u32 {
                     set.insert(format!("{}:{}", node.txid, vout));
                 }
                 found = true;
+            }
+        }
+        // Try base64-encoded PSBT (used by Rust tx_builder)
+        if !found {
+            use base64::Engine;
+            if let Ok(psbt_bytes) = base64::engine::general_purpose::STANDARD.decode(&node.tx) {
+                if let Ok(psbt) = Psbt::deserialize(&psbt_bytes) {
+                    for vout in 0..psbt.unsigned_tx.output.len() as u32 {
+                        set.insert(format!("{}:{}", node.txid, vout));
+                    }
+                    found = true;
+                }
             }
         }
         if !found {

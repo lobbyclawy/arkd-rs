@@ -83,6 +83,9 @@ pub struct ArkGrpcService {
     round_repo: Arc<dyn RoundRepository>,
     broker: SharedEventBroker,
     tx_broker: SharedTransactionEventBroker,
+    /// Shared CEL fee program store — updated via REST admin API,
+    /// read during GetInfo to report fee rates to clients.
+    pub cel_fee_store: Arc<tokio::sync::RwLock<crate::rest::CelFeePrograms>>,
     /// Retained for API compatibility; offchain tx operations now go through `core`.
     #[allow(dead_code)]
     offchain_tx_repo: Arc<dyn OffchainTxRepository>,
@@ -90,6 +93,9 @@ pub struct ArkGrpcService {
     note_store: Arc<crate::notes::NoteStore>,
     /// Per-stream topic registry for topic-filtered event delivery.
     stream_registry: SharedStreamRegistry,
+    /// Mutex for serializing SubmitTx calls (double-spend detection).
+    /// Go reference: `offchainTxMu sync.Mutex`.
+    offchain_tx_mutex: tokio::sync::Mutex<()>,
 }
 
 impl ArkGrpcService {
@@ -109,10 +115,15 @@ impl ArkGrpcService {
             offchain_tx_repo,
             note_store: Arc::new(crate::notes::NoteStore::new()),
             stream_registry: Arc::new(super::stream_registry::StreamRegistry::new()),
+            offchain_tx_mutex: tokio::sync::Mutex::new(()),
+            cel_fee_store: Arc::new(tokio::sync::RwLock::new(
+                crate::rest::CelFeePrograms::default(),
+            )),
         }
     }
 
-    /// Create with a shared NoteStore (so notes created via admin API can be redeemed here).
+    /// Create with a shared NoteStore and CEL fee store (so notes created via admin API can be redeemed here,
+    /// and fee programs set via admin REST API are visible in GetInfo).
     pub fn new_with_notes(
         core: Arc<dark_core::ArkService>,
         round_repo: Arc<dyn RoundRepository>,
@@ -120,6 +131,7 @@ impl ArkGrpcService {
         tx_broker: SharedTransactionEventBroker,
         offchain_tx_repo: Arc<dyn OffchainTxRepository>,
         note_store: Arc<crate::notes::NoteStore>,
+        cel_fee_store: Arc<tokio::sync::RwLock<crate::rest::CelFeePrograms>>,
     ) -> Self {
         Self {
             core,
@@ -129,6 +141,8 @@ impl ArkGrpcService {
             offchain_tx_repo,
             note_store,
             stream_registry: Arc::new(super::stream_registry::StreamRegistry::new()),
+            offchain_tx_mutex: tokio::sync::Mutex::new(()),
+            cel_fee_store,
         }
     }
 
@@ -199,14 +213,49 @@ impl ArkServiceTrait for ArkGrpcService {
         service_status.insert("wallet".to_string(), "operational".to_string());
         service_status.insert("bitcoin_rpc".to_string(), "operational".to_string());
 
+        // Build fee info — prefer CEL fee store (set via admin REST API)
+        // over the static FeeProgram defaults.
+        let fee_info = {
+            let cel = self.cel_fee_store.read().await;
+            let fp = self.core.get_fee_program();
+            FeeInfo {
+                intent_fee: Some(IntentFeeInfo {
+                    offchain_input: if !cel.offchain_input.is_empty() {
+                        cel.offchain_input.clone()
+                    } else {
+                        format!("{}.0", fp.offchain_input_fee)
+                    },
+                    offchain_output: if !cel.offchain_output.is_empty() {
+                        cel.offchain_output.clone()
+                    } else {
+                        format!("{}.0", fp.offchain_output_fee)
+                    },
+                    onchain_input: if !cel.onchain_input.is_empty() {
+                        cel.onchain_input.clone()
+                    } else {
+                        format!("{}.0", fp.onchain_input_fee)
+                    },
+                    onchain_output: if !cel.onchain_output.is_empty() {
+                        cel.onchain_output.clone()
+                    } else {
+                        format!("{}.0", fp.onchain_output_fee)
+                    },
+                }),
+                tx_fee_rate: self.core.config().default_fee_rate_sats_per_vb.to_string(),
+            }
+        };
+
         // Build scheduled session info (next round timing)
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
         let scheduled_session = Some(ScheduledSession {
-            start_time: now,
-            end_time: now + info.session_duration,
+            next_start_time: now,
+            next_end_time: now + info.session_duration,
+            period: info.session_duration,
+            duration: info.session_duration,
+            fees: Some(fee_info.clone()),
         });
 
         Ok(Response::new(GetInfoResponse {
@@ -232,18 +281,7 @@ impl ArkServiceTrait for ArkGrpcService {
             scheduled_session,
             deprecated_signers: vec![], // No deprecated signers by default
             digest: String::new(),      // Config digest (computed from server config)
-            fees: {
-                let fp = self.core.get_fee_program();
-                Some(FeeInfo {
-                    intent_fee: Some(IntentFeeInfo {
-                        offchain_input: format!("{}.0", fp.offchain_input_fee),
-                        offchain_output: format!("{}.0", fp.offchain_output_fee),
-                        onchain_input: format!("{}.0", fp.onchain_input_fee),
-                        onchain_output: format!("{}.0", fp.onchain_output_fee),
-                    }),
-                    tx_fee_rate: self.core.config().default_fee_rate_sats_per_vb.to_string(),
-                })
-            },
+            fees: Some(fee_info),
         }))
     }
 
@@ -471,11 +509,79 @@ impl ArkServiceTrait for ArkGrpcService {
             return Err(Status::invalid_argument("pubkey is required"));
         }
 
-        let (spendable, spent) = self
+        let (mut spendable, mut spent) = self
             .core
             .get_vtxos_for_pubkey(&req.pubkey)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Real-time unroll detection (mirrors IndexerService).
+        //
+        // When a VTXO's leaf TX is confirmed on-chain, mark it as unrolled.
+        // - Settled VTXOs: outpoint.txid is the tree leaf tx.
+        // - Preconfirmed VTXOs: outpoint.txid is the ark tx (Phase 2 of unroll).
+        //
+        // For settled+spent VTXOs (fraud case), additionally trigger the
+        // fraud reaction which broadcasts the forfeit/checkpoint tx.
+        {
+            let mut did_mark = false;
+            let all_vtxos: Vec<_> = spendable.iter().chain(spent.iter()).cloned().collect();
+            for v in &all_vtxos {
+                if v.unrolled || v.swept {
+                    continue;
+                }
+                // Non-preconfirmed VTXOs need a commitment txid.
+                if !v.preconfirmed && v.commitment_txids.is_empty() {
+                    continue;
+                }
+                if let Ok(true) = self.core.scanner().is_tx_confirmed(&v.outpoint.txid).await {
+                    let _ = self
+                        .core
+                        .vtxo_repo()
+                        .mark_vtxos_unrolled(std::slice::from_ref(v))
+                        .await;
+                    // Only react to fraud when the VTXO was already spent
+                    // (the user is trying to exit a forfeited VTXO).
+                    if v.spent {
+                        let _ = self.core.react_to_fraud(v).await;
+                    }
+                    did_mark = true;
+                }
+            }
+            if did_mark {
+                let (s, sp) = self
+                    .core
+                    .get_vtxos_for_pubkey(&req.pubkey)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                spendable = s;
+                spent = sp;
+            }
+        }
+
+        // Hide preconfirmed asset VTXOs superseded by a committed+unrolled
+        // counterpart for the same pubkey.  The committed vtxo may not
+        // carry assets (batch doesn't always propagate them), so we match
+        // on pubkey alone.  Only preconfirmed vtxos WITH assets are
+        // filtered — non-asset vtxos (TestSweep, TestUnilateralExit) are
+        // unaffected.
+        let unrolled_pubkeys: std::collections::HashSet<String> = spent
+            .iter()
+            .chain(spendable.iter())
+            .filter(|v| !v.preconfirmed && v.unrolled)
+            .map(|v| v.pubkey.clone())
+            .collect();
+
+        let spendable: Vec<_> = spendable
+            .into_iter()
+            .filter(|v| {
+                !(v.preconfirmed
+                    && !v.spent
+                    && !v.unrolled
+                    && !v.assets.is_empty()
+                    && unrolled_pubkeys.contains(&v.pubkey))
+            })
+            .collect();
 
         Ok(Response::new(GetVtxosResponse {
             spendable: spendable.iter().map(convert::vtxo_to_proto).collect(),
@@ -526,13 +632,33 @@ impl ArkServiceTrait for ArkGrpcService {
         info!(topics = ?initial_topics, "GetEventStream called");
 
         let stream_id = uuid::Uuid::new_v4().to_string();
-        let mut rx = self.broker.subscribe();
+        // Use subscribe_with_replay so late subscribers (those that connected
+        // after RegisterIntent but before the round published BatchStarted)
+        // still receive the event instead of blocking forever.
+        let (mut rx, buffered_events) = self.broker.subscribe_with_replay();
         let registry = Arc::clone(&self.stream_registry);
 
         // Register with initial topics
         registry.register(&stream_id, initial_topics).await;
         let stream_id_clone = stream_id.clone();
         let registry_cleanup = Arc::clone(&registry);
+
+        // Helper: extract topic list from topic-bearing events
+        fn event_topics(event: &RoundEvent) -> Vec<String> {
+            match &event.event {
+                Some(crate::proto::ark_v1::round_event::Event::TreeNonces(e)) => e.topic.clone(),
+                Some(crate::proto::ark_v1::round_event::Event::TreeTx(e)) => e.topic.clone(),
+                Some(crate::proto::ark_v1::round_event::Event::TreeSignature(e)) => e.topic.clone(),
+                Some(crate::proto::ark_v1::round_event::Event::BatchFailed(_)) => {
+                    // BatchFailed is always broadcast to all subscribers.
+                    vec![]
+                }
+                // All other events (BatchStarted, BatchFinalization,
+                // BatchFinalized, TreeSigningStarted, Heartbeat,
+                // StreamStarted) are broadcast to all subscribers.
+                _ => vec![],
+            }
+        }
 
         let output = stream! {
             // Yield StreamStarted so the client can use the stream_id for UpdateStreamTopics
@@ -544,33 +670,23 @@ impl ArkServiceTrait for ArkGrpcService {
                 )),
             });
 
-            // Forward events from the broker, filtering by topics
+            // Replay buffered events for the active batch. This covers clients
+            // that subscribed after BatchStarted (and possibly TreeTx,
+            // TreeSigningStarted, etc.) were already published. Without this
+            // replay the client would miss those events and hang.
+            for event in buffered_events {
+                let topics = event_topics(&event);
+                if registry.includes_any(&stream_id_clone, &topics).await {
+                    yield Ok(event);
+                }
+            }
+
+            // Forward live events from the broker, filtering by topics
             loop {
                 match rx.recv().await {
                     Ok(event) => {
-                        // Extract topic list from topic-bearing events
-                        let event_topics: Vec<String> = match &event.event {
-                            Some(crate::proto::ark_v1::round_event::Event::TreeNonces(e)) => {
-                                e.topic.clone()
-                            }
-                            Some(crate::proto::ark_v1::round_event::Event::TreeTx(e)) => {
-                                e.topic.clone()
-                            }
-                            Some(crate::proto::ark_v1::round_event::Event::TreeSignature(e)) => {
-                                e.topic.clone()
-                            }
-                            Some(crate::proto::ark_v1::round_event::Event::BatchFailed(_)) => {
-                                // BatchFailed is always broadcast to all subscribers.
-                                vec![]
-                            }
-                            // All other events (BatchStarted, BatchFinalization,
-                            // BatchFinalized, TreeSigningStarted, Heartbeat,
-                            // StreamStarted) are broadcast to all subscribers.
-                            _ => vec![],
-                        };
-
-                        // Check if this stream should receive this event
-                        if registry.includes_any(&stream_id_clone, &event_topics).await {
+                        let topics = event_topics(&event);
+                        if registry.includes_any(&stream_id_clone, &topics).await {
                             yield Ok(event);
                         }
                     }
@@ -712,22 +828,75 @@ impl ArkServiceTrait for ArkGrpcService {
         request: Request<DeleteIntentRequest>,
     ) -> Result<Response<DeleteIntentResponse>, Status> {
         let req = request.into_inner();
-        info!(intent_id = %req.intent_id, "DeleteIntent called");
+        let intent = req
+            .intent
+            .ok_or_else(|| Status::invalid_argument("intent is required"))?;
+        info!(proof_len = intent.proof.len(), "DeleteIntent called");
 
-        if req.intent_id.is_empty() {
-            return Err(Status::invalid_argument("intent_id is required"));
+        // Two deletion modes:
+        // 1. Proof-based: decode PSBT proof, extract input outpoints, match intents
+        // 2. ID-based: use the message field as intent ID (for RegisterForRound clients)
+        if intent.proof.is_empty() {
+            // ID-based deletion: message field is the intent ID
+            if intent.message.is_empty() {
+                return Err(Status::invalid_argument(
+                    "intent proof or message (intent ID) is required",
+                ));
+            }
+            let intent_id = &intent.message;
+            info!(intent_id = %intent_id, "DeleteIntent: deleting by intent ID");
+            if let Err(e) = self.core.delete_intent(intent_id).await {
+                return Err(Status::not_found(format!(
+                    "Intent {} not found: {e}",
+                    intent_id
+                )));
+            }
+            return Ok(Response::new(DeleteIntentResponse {}));
         }
-        // proof is optional in dev/test mode (BIP-322 verification is TODO(#40))
 
-        self.core
-            .unregister_intent(&req.intent_id)
+        // Proof-based deletion: decode PSBT proof, extract input outpoints.
+        // The Go SDK sends a BIP-322 proof whose inputs (after the first
+        // toSpend reference) correspond to the VTXOs the intent spends.
+        // We match these against registered intents — same as Go arkd's
+        // DeleteIntentsByProof.
+        use base64::Engine;
+        let proof_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&intent.proof)
+            .map_err(|e| Status::invalid_argument(format!("Invalid base64 proof: {e}")))?;
+
+        let psbt = bitcoin::psbt::Psbt::deserialize(&proof_bytes)
+            .map_err(|e| Status::invalid_argument(format!("Invalid PSBT: {e}")))?;
+
+        // Skip first input (BIP-322 toSpend reference) — remaining are real UTXOs
+        let input_outpoints: Vec<(String, u32)> = psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .skip(1)
+            .map(|txin| {
+                (
+                    txin.previous_output.txid.to_string(),
+                    txin.previous_output.vout,
+                )
+            })
+            .collect();
+
+        if input_outpoints.is_empty() {
+            return Err(Status::invalid_argument(
+                "proof has no inputs to match against",
+            ));
+        }
+
+        let deleted_ids = self
+            .core
+            .delete_intents_by_inputs(&input_outpoints)
             .await
             .map_err(|e| match e {
                 dark_core::error::ArkError::NotFound(msg) => Status::not_found(msg),
                 other => Status::internal(other.to_string()),
             })?;
 
-        info!(intent_id = %req.intent_id, "Intent deleted");
+        info!(deleted = ?deleted_ids, "Intent(s) deleted by input match");
         Ok(Response::new(DeleteIntentResponse {}))
     }
 
@@ -746,6 +915,44 @@ impl ArkServiceTrait for ArkGrpcService {
             return Err(Status::invalid_argument("signed_ark_tx is required"));
         }
 
+        // Check if any tx input owner is banned.
+        // Parse the PSBT to extract input outpoints, look up VTXOs,
+        // and check their owner pubkeys against the ban list.
+        {
+            use base64::Engine;
+            if let Ok(psbt_bytes) =
+                base64::engine::general_purpose::STANDARD.decode(&req.signed_ark_tx)
+            {
+                if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&psbt_bytes) {
+                    let input_outpoints: Vec<dark_core::domain::VtxoOutpoint> = psbt
+                        .unsigned_tx
+                        .input
+                        .iter()
+                        .map(|txin| {
+                            dark_core::domain::VtxoOutpoint::new(
+                                txin.previous_output.txid.to_string(),
+                                txin.previous_output.vout,
+                            )
+                        })
+                        .collect();
+                    if let Ok(vtxos) = self.core.get_vtxos(&input_outpoints).await {
+                        for vtxo in &vtxos {
+                            if !vtxo.pubkey.is_empty() {
+                                if let Ok(true) =
+                                    self.core.is_participant_banned(&vtxo.pubkey).await
+                                {
+                                    return Err(Status::permission_denied(format!(
+                                        "Participant {} is banned",
+                                        vtxo.pubkey
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Validate the ark tx PSBT before co-signing.
         {
             use base64::Engine;
@@ -755,15 +962,18 @@ impl ArkServiceTrait for ArkGrpcService {
                 if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&psbt_bytes) {
                     let tx = &psbt.unsigned_tx;
 
-                    // Count OP_RETURN outputs
+                    // Count OP_RETURN outputs.  The Go reference server
+                    // allows up to 3 OP_RETURN outputs: sub-dust VTXOs
+                    // (OP_RETURN <key>) plus an asset extension packet
+                    // (OP_RETURN "ARK" ...) can coexist in the same tx.
                     let op_return_count = tx
                         .output
                         .iter()
                         .filter(|o| o.script_pubkey.is_op_return())
                         .count();
-                    if op_return_count > 1 {
+                    if op_return_count > 3 {
                         return Err(Status::invalid_argument(format!(
-                            "tx has {} OP_RETURN outputs, maximum allowed is 1",
+                            "tx has {} OP_RETURN outputs, maximum allowed is 3",
                             op_return_count
                         )));
                     }
@@ -860,40 +1070,89 @@ impl ArkServiceTrait for ArkGrpcService {
 
             if let Some(ref bytes) = psbt_bytes {
                 if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(bytes) {
-                    let parsed_inputs: Vec<dark_core::domain::VtxoInput> = psbt
-                        .unsigned_tx
-                        .input
-                        .iter()
-                        .map(|inp| {
-                            let txid = inp.previous_output.txid.to_string();
-                            let vout = inp.previous_output.vout;
-                            dark_core::domain::VtxoInput {
-                                vtxo_id: format!("{}:{}", txid, vout),
-                                signed_tx: vec![],
-                            }
-                        })
-                        .collect();
+                    // Extract input VTXO outpoints from CHECKPOINT TX
+                    // inputs, not from ark tx inputs.  The tx chain is:
+                    //   user VTXO → checkpoint tx → ark tx
+                    // The checkpoint tx's first input spends the user's VTXO,
+                    // so its previous_output is the VTXO outpoint we need.
+                    // (The ark tx's inputs reference checkpoint outputs, which
+                    // are never stored as VTXOs.)
+                    let parsed_inputs: Vec<dark_core::domain::VtxoInput> =
+                        if req.checkpoint_txs.is_empty() {
+                            // No checkpoint txs — extract inputs directly from
+                            // the ark tx (Rust client sends VTXOs as direct
+                            // inputs without the checkpoint indirection).
+                            psbt.unsigned_tx
+                                .input
+                                .iter()
+                                .map(|txin| {
+                                    let txid = txin.previous_output.txid.to_string();
+                                    let vout = txin.previous_output.vout;
+                                    dark_core::domain::VtxoInput {
+                                        vtxo_id: format!("{}:{}", txid, vout),
+                                        signed_tx: vec![],
+                                    }
+                                })
+                                .collect()
+                        } else {
+                            req.checkpoint_txs
+                                .iter()
+                                .filter_map(|ckpt_b64| {
+                                    use base64::Engine;
+                                    let ckpt_bytes = base64::engine::general_purpose::STANDARD
+                                        .decode(ckpt_b64)
+                                        .or_else(|_| hex::decode(ckpt_b64))
+                                        .ok()?;
+                                    let ckpt_psbt =
+                                        bitcoin::psbt::Psbt::deserialize(&ckpt_bytes).ok()?;
+                                    let first_input = ckpt_psbt.unsigned_tx.input.first()?;
+                                    let txid = first_input.previous_output.txid.to_string();
+                                    let vout = first_input.previous_output.vout;
+                                    Some(dark_core::domain::VtxoInput {
+                                        vtxo_id: format!("{}:{}", txid, vout),
+                                        signed_tx: vec![],
+                                    })
+                                })
+                                .collect()
+                        };
+
+                    // Parse asset packet from OP_RETURN output to associate
+                    // assets with VTXO outputs.
+                    let asset_map = parse_asset_packet_from_tx(&psbt.unsigned_tx, &ark_txid);
 
                     let parsed_outputs: Vec<dark_core::domain::VtxoOutput> = psbt
                         .unsigned_tx
                         .output
                         .iter()
-                        .filter_map(|out| {
+                        .enumerate()
+                        .filter_map(|(idx, out)| {
                             let amount = out.value.to_sat();
                             if amount == 0 {
-                                return None; // skip OP_RETURN / zero-value
+                                return None; // skip zero-value outputs
                             }
-                            // Extract x-only pubkey from P2TR scriptPubKey
-                            if out.script_pubkey.is_p2tr() {
-                                let pubkey_hex = hex::encode(&out.script_pubkey.as_bytes()[2..]);
-                                Some(dark_core::domain::VtxoOutput {
-                                    pubkey: pubkey_hex,
-                                    amount_sats: amount,
-                                })
+                            // Extract pubkey from scriptPubKey.
+                            // P2TR: x-only pubkey from bytes [2..] (OP_1 PUSH32 <key>).
+                            // SubDustScript: OP_RETURN PUSH32 <x-only-key> — extract
+                            // the inner 32-byte key so it matches the Go SDK's
+                            // NotifyIncomingFunds subscription (which uses P2TR tapkey).
+                            let script_bytes = out.script_pubkey.as_bytes();
+                            let pubkey_hex = if out.script_pubkey.is_p2tr() {
+                                hex::encode(&script_bytes[2..])
+                            } else if script_bytes.len() == 34
+                                && script_bytes[0] == 0x6a
+                                && script_bytes[1] == 0x20
+                            {
+                                // SubDustScript: OP_RETURN (6a) + PUSH32 (20) + 32-byte x-only key
+                                hex::encode(&script_bytes[2..])
                             } else {
-                                // Non-P2TR output (e.g. anchor) — skip
-                                None
-                            }
+                                hex::encode(script_bytes)
+                            };
+                            let assets = asset_map.get(&(idx as u16)).cloned().unwrap_or_default();
+                            Some(dark_core::domain::VtxoOutput {
+                                pubkey: pubkey_hex,
+                                amount_sats: amount,
+                                assets,
+                            })
                         })
                         .collect();
 
@@ -935,6 +1194,7 @@ impl ArkServiceTrait for ArkGrpcService {
                                     Some(dark_core::domain::VtxoOutput {
                                         pubkey,
                                         amount_sats: amount,
+                                        assets: vec![],
                                     })
                                 })
                                 .collect()
@@ -951,50 +1211,263 @@ impl ArkServiceTrait for ArkGrpcService {
             }
         };
 
-        // Validate that sub-dust outputs are rejected (use min_vtxo_amount_sats as dust limit)
-        let dust_limit = self.core.config().min_vtxo_amount_sats;
-        for out in &outputs {
-            if out.amount_sats > 0 && out.amount_sats < dust_limit {
-                return Err(Status::invalid_argument(format!(
-                    "output amount {} is below dust limit {}",
-                    out.amount_sats, dust_limit
-                )));
-            }
-        }
+        // NOTE: No dust limit check for offchain transaction outputs.
+        // Offchain VTXOs (especially asset-carrying VTXOs) can have amounts
+        // below the on-chain dust limit (546 sats). The dust limit only
+        // applies to on-chain Bitcoin outputs, not to Ark protocol VTXOs.
 
-        // Validate that inputs are unspent VTXOs (best-effort; skipped for opaque blobs)
-        if !inputs.is_empty() && inputs.iter().any(|i| i.vtxo_id != ark_txid) {
-            let outpoints: Vec<dark_core::domain::VtxoOutpoint> = inputs
-                .iter()
-                .filter_map(|inp| {
-                    let parts: Vec<&str> = inp.vtxo_id.rsplitn(2, ':').collect();
-                    if parts.len() == 2 {
-                        let vout: u32 = parts[0].parse().unwrap_or(0);
-                        Some(dark_core::domain::VtxoOutpoint::new(
-                            parts[1].to_string(),
-                            vout,
-                        ))
-                    } else {
-                        None
+        // ── CLTV locktime validation ──────────────────────────────────
+        // Go reference: checks CLTV closure locktime against current block
+        // height.  We check BOTH the main ark tx AND checkpoint PSBTs.
+        // If any tapscript leaf contains OP_CHECKLOCKTIMEVERIFY with a
+        // locktime that hasn't been reached, reject the tx.
+        {
+            use base64::Engine;
+
+            // Helper: extract CLTV locktime from PSBT tapscript leaves
+            // or finalized witness stacks.
+            let extract_cltv_locktime = |psbt: &bitcoin::psbt::Psbt| -> Option<u32> {
+                use bitcoin::script::Instruction;
+
+                // Collect all scripts to check: tap_scripts + final witness scripts
+                let mut scripts_to_check: Vec<bitcoin::ScriptBuf> = Vec::new();
+                for input in &psbt.inputs {
+                    // Pre-finalization: tap_scripts
+                    for (script, _) in input.tap_scripts.values() {
+                        scripts_to_check.push(script.clone());
                     }
-                })
-                .collect();
+                    // Post-finalization: extract script from witness stack
+                    // (second-to-last element is the tapscript in a script-path spend)
+                    if let Some(ref witness) = input.final_script_witness {
+                        let items: Vec<&[u8]> = witness.iter().collect();
+                        if items.len() >= 2 {
+                            // In a taproot script-path spend, the witness is:
+                            //   [<sig1> [<sig2> ...] <script> <control_block>]
+                            // The script is second-to-last.
+                            let script_bytes = items[items.len() - 2];
+                            scripts_to_check.push(bitcoin::ScriptBuf::from(script_bytes.to_vec()));
+                        }
+                    }
+                    // Also check tap_script_sigs keys for leaf hashes
+                    // that might contain the script
+                }
 
-            if !outpoints.is_empty() {
-                match self.core.get_vtxos(&outpoints).await {
-                    Ok(vtxos) => {
-                        for vtxo in &vtxos {
-                            if vtxo.spent {
-                                return Err(Status::failed_precondition(format!(
-                                    "VTXO {} is already spent",
-                                    vtxo.outpoint
-                                )));
+                for script in &scripts_to_check {
+                    let mut last_push: Option<i64> = None;
+                    for instr in script.instructions() {
+                        match instr {
+                            Ok(Instruction::PushBytes(data)) => {
+                                let bytes = data.as_bytes();
+                                if bytes.is_empty() {
+                                    last_push = Some(0);
+                                } else if bytes.len() > 5 {
+                                    // CScriptNum is at most 5 bytes; skip larger pushes
+                                    last_push = None;
+                                } else {
+                                    let mut val: i64 = 0;
+                                    for (i, &b) in bytes.iter().enumerate() {
+                                        val |= (b as i64) << (8 * i);
+                                    }
+                                    if bytes.last().unwrap() & 0x80 != 0 {
+                                        val &= !(0x80i64 << (8 * (bytes.len() - 1)));
+                                        val = -val;
+                                    }
+                                    last_push = Some(val);
+                                }
+                            }
+                            Ok(Instruction::Op(op)) => {
+                                if op == bitcoin::opcodes::all::OP_CLTV {
+                                    if let Some(val) = last_push {
+                                        if val > 0 {
+                                            return Some(val as u32);
+                                        }
+                                    }
+                                }
+                                last_push = None;
+                            }
+                            _ => {
+                                last_push = None;
                             }
                         }
                     }
-                    Err(e) => {
-                        warn!(error = %e, "VTXO validation failed (non-fatal in test mode)");
+                }
+
+                // Also check nLockTime as fallback
+                let nlt = psbt.unsigned_tx.lock_time.to_consensus_u32();
+                if nlt > 0 {
+                    return Some(nlt);
+                }
+                None
+            };
+
+            // Check main ark tx
+            let mut cltv_locktime: Option<u32> = None;
+            if let Ok(psbt_bytes) =
+                base64::engine::general_purpose::STANDARD.decode(&req.signed_ark_tx)
+            {
+                if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&psbt_bytes) {
+                    cltv_locktime = extract_cltv_locktime(&psbt);
+                }
+            }
+            // Also check checkpoints
+            if cltv_locktime.is_none() {
+                for ckpt_b64 in &req.checkpoint_txs {
+                    let ckpt_bytes = base64::engine::general_purpose::STANDARD
+                        .decode(ckpt_b64)
+                        .or_else(|_| hex::decode(ckpt_b64))
+                        .ok();
+                    if let Some(ref bytes) = ckpt_bytes {
+                        if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(bytes) {
+                            if let Some(lt) = extract_cltv_locktime(&psbt) {
+                                cltv_locktime = Some(lt);
+                                break;
+                            }
+                        }
                     }
+                }
+            }
+
+            if let Some(locktime) = cltv_locktime {
+                if locktime < 500_000_000 {
+                    // Block-height based locktime.
+                    // Prefer Bitcoin Core RPC (instant) over Esplora (may lag).
+                    let cfg = self.core.config();
+                    let current_height =
+                        if let (Some(ref rpc_url), Some(ref user), Some(ref pass)) = (
+                            &cfg.fee_manager_url,
+                            &cfg.fee_manager_user,
+                            &cfg.fee_manager_pass,
+                        ) {
+                            // Direct Bitcoin Core RPC call (getblockcount)
+                            let client = reqwest::Client::new();
+                            let body = serde_json::json!({
+                                "jsonrpc": "1.0",
+                                "id": "cltv",
+                                "method": "getblockcount",
+                                "params": []
+                            });
+                            match client
+                                .post(rpc_url)
+                                .basic_auth(user, Some(pass))
+                                .json(&body)
+                                .send()
+                                .await
+                            {
+                                Ok(resp) => {
+                                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                                        json["result"].as_u64().unwrap_or(0) as u32
+                                    } else {
+                                        0
+                                    }
+                                }
+                                Err(_) => 0,
+                            }
+                        } else {
+                            // Fallback: Esplora scanner
+                            self.core.scanner().tip_height().await.unwrap_or(0)
+                        };
+                    if locktime > current_height {
+                        return Err(Status::failed_precondition(format!(
+                            "CLTV locktime {} not yet reached (current height {})",
+                            locktime, current_height
+                        )));
+                    }
+                } else {
+                    // Time-based locktime
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as u32;
+                    if locktime > now {
+                        return Err(Status::failed_precondition(format!(
+                            "CLTV locktime {} not yet reached (current time {})",
+                            locktime, now
+                        )));
+                    }
+                }
+            }
+        }
+
+        // ── Input VTXO validation ──────────────────────────────────────
+        // Matches Go reference server's SubmitOffchainTx validations:
+        // - VTXO must exist, not be spent/unrolled/swept
+        // - Input amounts must equal output amounts (balance check)
+        // - Double-spend detection via offchain tx repo
+        let input_outpoints: Vec<dark_core::domain::VtxoOutpoint> = inputs
+            .iter()
+            .filter_map(|inp| {
+                let parts: Vec<&str> = inp.vtxo_id.rsplitn(2, ':').collect();
+                if parts.len() == 2 {
+                    let vout: u32 = parts[0].parse().unwrap_or(0);
+                    Some(dark_core::domain::VtxoOutpoint::new(
+                        parts[1].to_string(),
+                        vout,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Acquire the offchain tx mutex to serialize SubmitTx calls.
+        // This is critical for double-spend detection: without it, concurrent
+        // requests can all pass the is_input_spent check before any writes
+        // the tx to the DB. Go reference uses offchainTxMu.Lock().
+        let _offchain_guard = self.offchain_tx_mutex.lock().await;
+
+        if !input_outpoints.is_empty() {
+            // 1. Check VTXO state: must exist, not spent
+            let dust_limit = self.core.config().min_vtxo_amount_sats;
+            let mut total_input_amount: u64 = 0;
+            match self.core.get_vtxos(&input_outpoints).await {
+                Ok(vtxos) => {
+                    for vtxo in &vtxos {
+                        if vtxo.spent {
+                            return Err(Status::failed_precondition(format!(
+                                "VTXO {} is already spent",
+                                vtxo.outpoint
+                            )));
+                        }
+                        // Reject swept (sub-dust OP_RETURN) VTXOs as sole inputs —
+                        // they can't be spent individually.  The Go server checks
+                        // the script type, not the sat amount, so regular VTXOs
+                        // with low amounts (e.g. asset-carrying 330-sat VTXOs) are
+                        // allowed.
+                        if vtxo.swept && input_outpoints.len() == 1 {
+                            return Err(Status::failed_precondition(format!(
+                                "VTXO {} has sub-dust amount {} (minimum {}), cannot be spent individually",
+                                vtxo.outpoint, vtxo.amount, dust_limit
+                            )));
+                        }
+                        total_input_amount += vtxo.amount;
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "VTXO lookup failed (non-fatal)");
+                }
+            }
+
+            // 2. Balance check: input amount must equal output amount
+            // (Go reference: BuildTxs validates inputAmount == outputAmount)
+            if total_input_amount > 0 {
+                let total_output_amount: u64 = outputs.iter().map(|o| o.amount_sats).sum();
+                if total_input_amount != total_output_amount {
+                    return Err(Status::invalid_argument(format!(
+                        "input amount {} != output amount {}",
+                        total_input_amount, total_output_amount
+                    )));
+                }
+            }
+
+            // 3. Double-spend detection: check if any input is already used
+            //    by a pending offchain tx (Go reference: cache.OffchainTxs().Includes)
+            for op in &input_outpoints {
+                let vtxo_id = format!("{}:{}", op.txid, op.vout);
+                if let Ok(true) = self.offchain_tx_repo.is_input_spent(&vtxo_id).await {
+                    return Err(Status::failed_precondition(format!(
+                        "VTXO {} is already used by another pending offchain tx",
+                        vtxo_id
+                    )));
                 }
             }
         }
@@ -1003,8 +1476,13 @@ impl ArkServiceTrait for ArkGrpcService {
         let mut offchain_tx =
             dark_core::domain::OffchainTx::new_with_id(ark_txid.clone(), inputs, outputs);
         offchain_tx.signed_ark_tx = cosigned_ark_tx.clone();
-        // Ignore duplicate-key errors (idempotent submit)
-        let _ = self.offchain_tx_repo.create(&offchain_tx).await;
+        // Reject duplicate tx IDs (not idempotent — Go reference rejects duplicates)
+        if let Err(e) = self.offchain_tx_repo.create(&offchain_tx).await {
+            return Err(Status::already_exists(format!(
+                "offchain tx {} already exists: {}",
+                ark_txid, e
+            )));
+        }
         // Also store the cosigned ark tx PSBT for GetVirtualTxs
         let _ = self
             .offchain_tx_repo
@@ -1039,6 +1517,15 @@ impl ArkServiceTrait for ArkGrpcService {
         // Checkpoint txs are virtual — they are NOT broadcast on-chain.
         // They are only needed if a unilateral exit is triggered.
         if !req.final_checkpoint_txs.is_empty() {
+            for (i, ckpt) in req.final_checkpoint_txs.iter().enumerate() {
+                info!(
+                    ark_txid = %req.ark_txid,
+                    idx = i,
+                    len = ckpt.len(),
+                    prefix = %&ckpt[..std::cmp::min(40, ckpt.len())],
+                    "FinalizeTx: checkpoint tx preview"
+                );
+            }
             info!(
                 ark_txid = %req.ark_txid,
                 count = req.final_checkpoint_txs.len(),
@@ -1161,22 +1648,52 @@ impl ArkServiceTrait for ArkGrpcService {
         request: Request<GetPendingTxRequest>,
     ) -> Result<Response<GetPendingTxResponse>, Status> {
         let req = request.into_inner();
-        if req.tx_id.is_empty() {
-            return Err(Status::invalid_argument("tx_id is required"));
+        // The Go SDK sends an Intent (proof + message) to identify the pending tx.
+        // Parse the intent proof to extract input VTXO outpoints, then filter
+        // pending offchain txs by those outpoints.
+        let mut query_outpoints: Vec<String> = Vec::new();
+        if let Some(crate::proto::ark_v1::get_pending_tx_request::Identifier::Intent(intent)) =
+            req.identifier
+        {
+            // Parse the proof PSBT to extract input outpoints
+            use base64::Engine;
+            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&intent.proof) {
+                if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&bytes) {
+                    for inp in &psbt.unsigned_tx.input {
+                        query_outpoints.push(format!(
+                            "{}:{}",
+                            inp.previous_output.txid, inp.previous_output.vout
+                        ));
+                    }
+                }
+            }
         }
-        let tx = self
+
+        let pending = self
             .offchain_tx_repo
-            .get(&req.tx_id)
+            .get_pending()
             .await
-            .map_err(|e| Status::internal(e.to_string()))?
-            .ok_or_else(|| Status::not_found(format!("Offchain tx {} not found", req.tx_id)))?;
-        let vtxo_ids = tx.inputs.iter().map(|i| i.vtxo_id.clone()).collect();
-        let stage = format!("{:?}", tx.stage);
-        Ok(Response::new(GetPendingTxResponse {
-            tx_id: tx.id,
-            stage,
-            input_vtxo_ids: vtxo_ids,
-        }))
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Filter: return only pending txs whose inputs match the query outpoints
+        let pending_txs: Vec<crate::proto::ark_v1::PendingTx> = pending
+            .iter()
+            .filter(|tx| {
+                if query_outpoints.is_empty() {
+                    return true; // no filter, return all
+                }
+                tx.inputs
+                    .iter()
+                    .any(|inp| query_outpoints.contains(&inp.vtxo_id))
+            })
+            .map(|tx| crate::proto::ark_v1::PendingTx {
+                ark_txid: tx.id.clone(),
+                final_ark_tx: tx.signed_ark_tx.clone(),
+                signed_checkpoint_txs: tx.checkpoint_txs.clone(),
+            })
+            .collect();
+
+        Ok(Response::new(GetPendingTxResponse { pending_txs }))
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1306,6 +1823,38 @@ impl ArkServiceTrait for ArkGrpcService {
                 // can later extract the correct per-input pubkey from the
                 // intent proof's tap_scripts.
                 input_psbt_indices.push(i);
+            }
+        }
+
+        // Enrich intent inputs with actual VTXO data from the DB.
+        // The bare Vtxo::new() above creates objects with empty commitment_txids,
+        // which makes requires_forfeit() incorrectly return false.
+        // We look up the real VTXO records to get commitment_txids, swept, etc.
+        // so the connector count (one per forfeitable input) is computed correctly.
+        if !inputs.is_empty() {
+            let outpoints: Vec<dark_core::domain::VtxoOutpoint> =
+                inputs.iter().map(|inp| inp.outpoint.clone()).collect();
+            match self.core.get_vtxos(&outpoints).await {
+                Ok(db_vtxos) => {
+                    let db_map: std::collections::HashMap<String, &dark_core::domain::Vtxo> =
+                        db_vtxos
+                            .iter()
+                            .map(|v| (format!("{}:{}", v.outpoint.txid, v.outpoint.vout), v))
+                            .collect();
+                    for inp in &mut inputs {
+                        let key = format!("{}:{}", inp.outpoint.txid, inp.outpoint.vout);
+                        if let Some(db_vtxo) = db_map.get(&key) {
+                            inp.commitment_txids = db_vtxo.commitment_txids.clone();
+                            inp.root_commitment_txid = db_vtxo.root_commitment_txid.clone();
+                            inp.swept = db_vtxo.swept;
+                            inp.preconfirmed = db_vtxo.preconfirmed;
+                            inp.ark_txid = db_vtxo.ark_txid.clone();
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "RegisterIntent: failed to look up VTXOs for enrichment");
+                }
             }
         }
 
@@ -1463,8 +2012,82 @@ impl ArkServiceTrait for ArkGrpcService {
         // In a delegate flow, cosigners_public_keys contains the delegate's key (e.g. Bob's),
         // not the VTXO owner's key (Alice's). The delegate_pubkey field records who is acting
         // as the delegate. Full BIP-322 proof validation is tracked in TODO(#40).
+        info!(
+            cosigners = ?cosigners_public_keys,
+            "RegisterIntent: parsed cosigner public keys from message"
+        );
         intent.cosigners_public_keys = cosigners_public_keys;
         intent.delegate_pubkey = delegate_pubkey;
+
+        // Extract asset extension from the proof PSBT and store it as the
+        // leaf_tx_asset_packet. The Go reference server does this to embed
+        // asset data in the VTXO tree leaf PSBTs during round finalization.
+        // Format: hex-encoded OP_RETURN push data (the full extension
+        // including "ARK" magic).
+        {
+            use base64::Engine;
+            if let Ok(proof_bytes) =
+                base64::engine::general_purpose::STANDARD.decode(&intent_proof.proof)
+            {
+                if let Ok(psbt) = bitcoin::psbt::Psbt::deserialize(&proof_bytes) {
+                    for out in &psbt.unsigned_tx.output {
+                        let script_bytes = out.script_pubkey.as_bytes();
+                        if let Some(push_data) = decode_op_return_push(script_bytes) {
+                            if push_data.len() >= 3
+                                && push_data[0] == 0x41
+                                && push_data[1] == 0x52
+                                && push_data[2] == 0x4b
+                            {
+                                // Found ARK extension — store as hex for tree builder
+                                intent.leaf_tx_asset_packet = hex::encode(push_data);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check if any cosigner is banned before registering the intent.
+        // Also check the owner/receiver pubkeys — the SDK may not set
+        // cosigners for some intents (e.g. when reconnecting after a ban).
+        let mut ban_check_keys: Vec<String> = intent.cosigners_public_keys.clone();
+        // Add the fallback (receiver) pubkey — this is the VTXO owner's key
+        if !fallback_pubkey.is_empty() && !ban_check_keys.contains(&fallback_pubkey) {
+            ban_check_keys.push(fallback_pubkey.clone());
+        }
+        // Add per-input pubkeys — these identify the VTXO owner
+        for inp in &intent.inputs {
+            if !inp.pubkey.is_empty() && !ban_check_keys.contains(&inp.pubkey) {
+                ban_check_keys.push(inp.pubkey.clone());
+            }
+        }
+        for cosigner_pk in &ban_check_keys {
+            // Normalize to x-only (32 bytes hex, 64 chars) for ban lookup —
+            // ban records may store either compressed or x-only form.
+            let xonly = if cosigner_pk.len() == 66 {
+                &cosigner_pk[2..]
+            } else {
+                cosigner_pk.as_str()
+            };
+            for pk in [cosigner_pk.as_str(), xonly] {
+                match self.core.is_participant_banned(pk).await {
+                    Ok(true) => {
+                        if has_pending_notes {
+                            self.note_store.rollback_pending(&note_pending_key).await;
+                        }
+                        return Err(Status::permission_denied(format!(
+                            "Participant {} is banned",
+                            cosigner_pk
+                        )));
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        warn!(error = %e, pubkey = %pk, "Failed to check ban status");
+                    }
+                }
+            }
+        }
 
         let intent_id = match self.core.register_intent(intent).await {
             Ok(id) => id,
@@ -1702,7 +2325,10 @@ impl ArkServiceTrait for ArkGrpcService {
             {
                 Ok(txid) => info!(txid = %txid, "Commitment tx broadcast from client signature"),
                 Err(e) => {
-                    info!(error = %e, "Failed to broadcast client-signed commitment tx (non-fatal)")
+                    warn!(error = %e, "Failed to broadcast client-signed commitment tx — aborting round and banning participants");
+                    // Invalid commitment tx (e.g. bad boarding input signatures)
+                    // → abort the round so participants get banned.
+                    let _ = self.core.abort_round("signing timeout").await;
                 }
             }
         }
@@ -2292,6 +2918,304 @@ impl ArkServiceTrait for ArkGrpcService {
 }
 
 // TODO(#55): Asset RPCs (ListAssets, RegisterAsset, GetAsset) pending proto update
+
+/// Parse the Arkade asset packet from a transaction's OP_RETURN output.
+///
+/// Returns a map from output vout → Vec<(asset_id, amount)>.
+/// The format is: OP_RETURN <push> "ARK" <type=0x00> <varint_len> <packet>.
+/// A packet is: <varint_group_count> [<group>...] where each group has
+/// presence bits, optional asset_id, inputs and outputs.
+///
+/// For issuance groups (no asset_id in group), the asset_id is derived as
+/// sha256(sha256(txid_le ++ group_index_le16)).  This matches the Go
+/// `asset.NewAssetId(txid, index)` behaviour.
+fn parse_asset_packet_from_tx(
+    tx: &bitcoin::Transaction,
+    ark_txid: &str,
+) -> std::collections::HashMap<u16, Vec<(String, u64)>> {
+    let mut result: std::collections::HashMap<u16, Vec<(String, u64)>> =
+        std::collections::HashMap::new();
+
+    // Find the OP_RETURN output containing the ARK extension
+    let mut ext_data: Option<&[u8]> = None;
+    for out in &tx.output {
+        let script_bytes = out.script_pubkey.as_bytes();
+        if script_bytes.len() < 5 || script_bytes[0] != 0x6a {
+            continue; // not OP_RETURN
+        }
+        // Decode OP_RETURN push data
+        let push_data = match decode_op_return_push(script_bytes) {
+            Some(d) => d,
+            None => continue,
+        };
+        // Check for "ARK" magic (0x41 0x52 0x4b)
+        if push_data.len() >= 3
+            && push_data[0] == 0x41
+            && push_data[1] == 0x52
+            && push_data[2] == 0x4b
+        {
+            ext_data = Some(push_data);
+            break;
+        }
+    }
+
+    let ext_data = match ext_data {
+        Some(d) => d,
+        None => return result,
+    };
+
+    // Skip "ARK" magic
+    let data = &ext_data[3..];
+    if data.is_empty() {
+        return result;
+    }
+
+    // Parse extension packets: <type_byte> <varint_length> <data>
+    let mut pos = 0;
+    while pos < data.len() {
+        let pkt_type = data[pos];
+        pos += 1;
+        let (pkt_len, bytes_read) = match read_varint(&data[pos..]) {
+            Some(v) => v,
+            None => break,
+        };
+        pos += bytes_read;
+        if pkt_type == 0x00 {
+            // Asset packet
+            let end = std::cmp::min(pos + pkt_len as usize, data.len());
+            parse_asset_groups(&data[pos..end], ark_txid, &mut result);
+        }
+        pos += pkt_len as usize;
+    }
+
+    result
+}
+
+/// Decode the push data from an OP_RETURN script.
+fn decode_op_return_push(script: &[u8]) -> Option<&[u8]> {
+    if script.len() < 2 || script[0] != 0x6a {
+        return None;
+    }
+    let mut pos = 1;
+    // Handle push opcode
+    let op = script[pos];
+    pos += 1;
+    if op <= 75 {
+        // Direct push: op is the length
+        let len = op as usize;
+        if pos + len <= script.len() {
+            return Some(&script[pos..pos + len]);
+        }
+    } else if op == 0x4c {
+        // OP_PUSHDATA1
+        if pos >= script.len() {
+            return None;
+        }
+        let len = script[pos] as usize;
+        pos += 1;
+        if pos + len <= script.len() {
+            return Some(&script[pos..pos + len]);
+        }
+    } else if op == 0x4d {
+        // OP_PUSHDATA2
+        if pos + 1 >= script.len() {
+            return None;
+        }
+        let len = u16::from_le_bytes([script[pos], script[pos + 1]]) as usize;
+        pos += 2;
+        if pos + len <= script.len() {
+            return Some(&script[pos..pos + len]);
+        }
+    } else if op == 0x4e {
+        // OP_PUSHDATA4
+        if pos + 3 >= script.len() {
+            return None;
+        }
+        let len = u32::from_le_bytes([
+            script[pos],
+            script[pos + 1],
+            script[pos + 2],
+            script[pos + 3],
+        ]) as usize;
+        pos += 4;
+        if pos + len <= script.len() {
+            return Some(&script[pos..pos + len]);
+        }
+    }
+    None
+}
+
+/// Read a varint (protobuf-style base-128 / Go binary.Uvarint). Returns (value, bytes_consumed).
+/// Each byte's MSB indicates continuation; bits 0-6 carry value in little-endian order.
+fn read_varint(data: &[u8]) -> Option<(u64, usize)> {
+    let mut value: u64 = 0;
+    let mut shift: u32 = 0;
+    for (i, &byte) in data.iter().enumerate() {
+        if shift >= 64 {
+            return None; // overflow
+        }
+        value |= ((byte & 0x7f) as u64) << shift;
+        shift += 7;
+        if byte & 0x80 == 0 {
+            return Some((value, i + 1));
+        }
+    }
+    None // unterminated varint
+}
+
+/// Parse asset groups from the packet body and populate the vout → assets map.
+fn parse_asset_groups(
+    data: &[u8],
+    ark_txid: &str,
+    result: &mut std::collections::HashMap<u16, Vec<(String, u64)>>,
+) {
+    let mut pos = 0;
+
+    // Read group count
+    let (group_count, n) = match read_varint(&data[pos..]) {
+        Some(v) => v,
+        None => return,
+    };
+    pos += n;
+
+    for group_index in 0..group_count as u16 {
+        if pos >= data.len() {
+            break;
+        }
+
+        // Presence byte
+        let presence = data[pos];
+        pos += 1;
+
+        // Determine asset_id
+        let has_asset_id = (presence & 0x01) != 0;
+        let has_control_asset = (presence & 0x02) != 0;
+        let has_metadata = (presence & 0x04) != 0;
+
+        let asset_id_str: String;
+
+        if has_asset_id {
+            // Read 34-byte asset ID: 32-byte txid (display-order) + 2-byte index LE
+            // The String() format is hex(serialized_bytes)
+            if pos + 34 > data.len() {
+                break;
+            }
+            asset_id_str = hex::encode(&data[pos..pos + 34]);
+            pos += 34;
+        } else {
+            // Issuance: derive asset_id from ark_txid + group_index
+            // Go's asset.NewAssetId(txid, index).String() returns
+            // hex(serializeTxHash(chainhash) ++ uint16LE(index))
+            // where serializeTxHash reverses the internal chainhash bytes
+            // back to display order. Since ark_txid is already in display
+            // order, the serialized form is just the raw hex bytes of
+            // ark_txid followed by the 2-byte LE index.
+            let index_bytes = group_index.to_le_bytes();
+            asset_id_str = format!("{}{}", ark_txid, hex::encode(index_bytes));
+        }
+
+        // Skip control asset if present
+        if has_control_asset {
+            if pos >= data.len() {
+                break;
+            }
+            let ref_type = data[pos];
+            pos += 1;
+            match ref_type {
+                1 => pos += 34, // AssetRefByID: 34-byte asset_id
+                2 => pos += 2,  // AssetRefByGroup: 2-byte group index
+                _ => break,
+            }
+        }
+
+        // Skip metadata if present
+        if has_metadata {
+            let (md_count, n) = match read_varint(&data[pos..]) {
+                Some(v) => v,
+                None => break,
+            };
+            pos += n;
+            for _ in 0..md_count {
+                // key: varint_len + bytes
+                let (klen, n) = match read_varint(&data[pos..]) {
+                    Some(v) => v,
+                    None => return,
+                };
+                pos += n + klen as usize;
+                // value: varint_len + bytes
+                let (vlen, n) = match read_varint(&data[pos..]) {
+                    Some(v) => v,
+                    None => return,
+                };
+                pos += n + vlen as usize;
+            }
+        }
+
+        // Read inputs (skip them, we only need outputs)
+        let (input_count, n) = match read_varint(&data[pos..]) {
+            Some(v) => v,
+            None => break,
+        };
+        pos += n;
+        for _ in 0..input_count {
+            if pos >= data.len() {
+                break;
+            }
+            let input_type = data[pos];
+            pos += 1;
+            match input_type {
+                1 => {
+                    // Local: vin(2) + varint amount
+                    pos += 2;
+                    let (_, n) = match read_varint(&data[pos..]) {
+                        Some(v) => v,
+                        None => return,
+                    };
+                    pos += n;
+                }
+                2 => {
+                    // Intent: txid(32) + vin(2) + varint amount
+                    pos += 32 + 2;
+                    let (_, n) = match read_varint(&data[pos..]) {
+                        Some(v) => v,
+                        None => return,
+                    };
+                    pos += n;
+                }
+                _ => return,
+            }
+        }
+
+        // Read outputs — this is what we need
+        let (output_count, n) = match read_varint(&data[pos..]) {
+            Some(v) => v,
+            None => break,
+        };
+        pos += n;
+        for _ in 0..output_count {
+            if pos >= data.len() {
+                break;
+            }
+            let _output_type = data[pos]; // always 1 (Local)
+            pos += 1;
+            if pos + 2 > data.len() {
+                break;
+            }
+            let vout = u16::from_le_bytes([data[pos], data[pos + 1]]);
+            pos += 2;
+            let (amount, n) = match read_varint(&data[pos..]) {
+                Some(v) => v,
+                None => break,
+            };
+            pos += n;
+
+            result
+                .entry(vout)
+                .or_default()
+                .push((asset_id_str.clone(), amount));
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

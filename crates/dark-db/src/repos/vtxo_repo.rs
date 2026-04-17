@@ -231,7 +231,59 @@ impl VtxoRepository for SqliteVtxoRepository {
             .rows_affected();
 
             if rows_affected == 0 {
-                return Err(ArkError::VtxoNotFound(outpoint.to_string()));
+                // VTXO not found - this is an error condition
+                return Err(ArkError::NotFound(format!(
+                    "Cannot spend VTXO {}:{} - not found in database",
+                    outpoint.txid, outpoint.vout
+                )));
+            }
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| ArkError::DatabaseError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn settle_vtxos(
+        &self,
+        spent: &[(VtxoOutpoint, String)],
+        commitment_txid: &str,
+    ) -> ArkResult<()> {
+        debug!(count = spent.len(), commitment_txid = %commitment_txid, "Settling VTXOs (atomic spent_by + settled_by)");
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| ArkError::DatabaseError(e.to_string()))?;
+
+        for (outpoint, spent_by) in spent {
+            let rows_affected = sqlx::query(
+                r#"
+                UPDATE vtxos
+                SET spent = TRUE, spent_by = ?1, settled_by = ?1, ark_txid = ?2
+                WHERE txid = ?3 AND vout = ?4
+                "#,
+            )
+            .bind(spent_by)
+            .bind(commitment_txid)
+            .bind(&outpoint.txid)
+            .bind(outpoint.vout as i32)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ArkError::DatabaseError(e.to_string()))?
+            .rows_affected();
+
+            // Skip VTXOs not in DB (e.g. boarding inputs) — they don't
+            // need settled_by tracking since they have no forfeit path.
+            if rows_affected == 0 {
+                debug!(
+                    txid = %outpoint.txid,
+                    vout = outpoint.vout,
+                    "settle_vtxos: VTXO not in DB, skipping (likely boarding input)"
+                );
             }
         }
 
@@ -253,7 +305,6 @@ impl VtxoRepository for SqliteVtxoRepository {
             FROM vtxos
             WHERE expires_at > 0
               AND expires_at < ?1
-              AND spent = FALSE
               AND swept = FALSE
               AND unrolled = FALSE
             "#,
@@ -285,7 +336,6 @@ impl VtxoRepository for SqliteVtxoRepository {
             FROM vtxos
             WHERE expires_at_block > 0
               AND expires_at_block <= ?1
-              AND spent = FALSE
               AND swept = FALSE
               AND unrolled = FALSE
             "#,
@@ -562,6 +612,7 @@ mod tests {
     async fn test_spend_vtxo_not_found() {
         let (_db, repo) = setup().await;
 
+        // spend_vtxos should return an error when trying to spend non-existent VTXOs
         let result = repo
             .spend_vtxos(
                 &[(
@@ -571,7 +622,7 @@ mod tests {
                 "ark",
             )
             .await;
-        assert!(result.is_err());
+        assert!(result.is_err()); // Should fail - VTXO doesn't exist
     }
 
     #[tokio::test]

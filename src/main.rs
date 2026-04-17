@@ -155,7 +155,25 @@ async fn main() -> Result<()> {
     let scanner: Arc<dyn dark_core::ports::BlockchainScanner> =
         if let Some(ref esplora_url) = config.esplora_url {
             info!(url = %esplora_url, "Starting EsploraScanner for on-chain monitoring");
-            let scanner = Arc::new(dark_scanner::EsploraScanner::new(esplora_url, 30));
+            // Use a short poll interval on regtest for faster fraud detection
+            let poll_secs = if file_config.bitcoin.network.as_deref() == Some("regtest") {
+                1
+            } else {
+                30
+            };
+            let mut scanner = dark_scanner::EsploraScanner::new(esplora_url, poll_secs);
+            // Wire Bitcoin Core RPC for fast tx confirmation checks
+            // (bypasses Esplora/chopsticks indexing lag).
+            if let (Some(host), Some(port)) =
+                (&file_config.bitcoin.rpc_host, file_config.bitcoin.rpc_port)
+            {
+                let user = file_config.bitcoin.rpc_user.as_deref().unwrap_or("admin1");
+                let pass = file_config.bitcoin.rpc_password.as_deref().unwrap_or("123");
+                let rpc_url = format!("http://{}:{}@{}:{}", user, pass, host, port);
+                info!(rpc_url = %rpc_url, "Wiring Bitcoin RPC fallback for scanner");
+                scanner = scanner.with_rpc_url(rpc_url);
+            }
+            let scanner = Arc::new(scanner);
             Arc::clone(&scanner).start_polling();
             scanner
         } else {
@@ -179,9 +197,16 @@ async fn main() -> Result<()> {
 
         if let Some(ref esplora) = esplora_url {
             let network = file_config.wallet.parse_network();
-            let db_path = std::env::var("HOME")
-                .map(|h| std::path::PathBuf::from(h).join(".local/share/dark/wallet.db"))
-                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/dark-wallet.db"));
+            let db_path = file_config
+                .wallet
+                .database_path
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::env::var("HOME")
+                        .map(|h| std::path::PathBuf::from(h).join(".local/share/dark/wallet.db"))
+                        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/dark-wallet.db"))
+                });
 
             info!(
                 %esplora,
@@ -296,6 +321,16 @@ async fn main() -> Result<()> {
             .vtxo_expiry_secs
             .unwrap_or(exit_delay as i64),
         vtxo_expiry_blocks: file_config.ark.vtxo_expiry_blocks,
+        explorer_url: config
+            .esplora_url
+            .clone()
+            .unwrap_or_else(|| "http://localhost:3000".to_string()),
+        fee_manager_url: file_config.bitcoin.rpc_host.as_ref().map(|host| {
+            let port = file_config.bitcoin.rpc_port.unwrap_or(18443);
+            format!("http://{}:{}", host, port)
+        }),
+        fee_manager_user: file_config.bitcoin.rpc_user.clone(),
+        fee_manager_pass: file_config.bitcoin.rpc_password.clone(),
         ..Default::default()
     };
 

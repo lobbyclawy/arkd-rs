@@ -56,6 +56,12 @@ pub enum ArkEvent {
         /// actually broadcast (via `RoundBroadcast`).
         #[serde(default)]
         has_boarding_inputs: bool,
+        /// Whether the round has connectors (forfeitable inputs).  When `true`,
+        /// clients must submit forfeit txs before the round can be considered
+        /// complete.  `BatchFinalized` is deferred until forfeits are received
+        /// (or the round times out).
+        #[serde(default)]
+        has_connectors: bool,
     },
 
     /// Registration phase ended; confirmation phase has started.
@@ -189,6 +195,8 @@ pub enum ArkEvent {
     TreeNoncesCollected {
         /// Round identifier
         round_id: String,
+        /// Aggregated nonces per txid (txid → hex-encoded AggNonce).
+        aggregated_nonces: std::collections::HashMap<String, String>,
     },
 
     /// All cosigners have submitted their partial signatures.
@@ -209,6 +217,8 @@ pub enum ArkEvent {
         cosigners: Vec<String>,
         /// Maps output index → child txid (for tree structure)
         children: std::collections::HashMap<u32, String>,
+        /// 0 = vtxo tree, 1 = connector tree (Go arkd parity)
+        batch_index: i32,
     },
 
     /// Tree signing phase has started — cosigners should submit nonces.
@@ -321,6 +331,7 @@ mod tests {
                     timestamp: 200,
                     vtxo_count: 5,
                     has_boarding_inputs: false,
+                    has_connectors: false,
                 },
                 "round.finalized",
             ),
@@ -459,6 +470,7 @@ mod tests {
             timestamp: 1234567890,
             vtxo_count: 3,
             has_boarding_inputs: false,
+            has_connectors: false,
         };
 
         let json = serde_json::to_string(&event).expect("serialize");

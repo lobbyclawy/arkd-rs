@@ -79,12 +79,18 @@ impl BanRepository for InMemoryBanRepository {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        // Signing timeout bans are permanent (no expiry). The Go reference
+        // server also uses permanent bans for protocol violations.
+        let expires_at = match reason {
+            BanReason::FailedToConfirm => None,
+            _ => None,
+        };
         let record = BanRecord {
             pubkey: pubkey.to_string(),
             reason,
             round_id: round_id.to_string(),
             timestamp,
-            expires_at: None,
+            expires_at,
         };
         self.bans
             .lock()
@@ -95,20 +101,48 @@ impl BanRepository for InMemoryBanRepository {
 
     async fn is_banned(&self, pubkey: &str) -> ArkResult<bool> {
         let bans = self.bans.lock().expect("ban lock poisoned");
-        match bans.get(pubkey) {
-            None => Ok(false),
-            Some(record) => {
+
+        // Try exact match first, then cross-format matching:
+        // compressed (66 hex chars, "02"/"03" prefix) ↔ x-only (64 hex chars).
+        let candidates: Vec<&str> = if pubkey.len() == 66 {
+            // Compressed → also try x-only
+            vec![pubkey, &pubkey[2..]]
+        } else if pubkey.len() == 64 {
+            // X-only → try as-is (can't reconstruct compressed without knowing parity)
+            vec![pubkey]
+        } else {
+            vec![pubkey]
+        };
+
+        // Also check if any stored ban's x-only matches the query's x-only.
+        let query_xonly = if pubkey.len() == 66 {
+            &pubkey[2..]
+        } else {
+            pubkey
+        };
+
+        for (stored_key, record) in bans.iter() {
+            let stored_xonly = if stored_key.len() == 66 {
+                &stored_key[2..]
+            } else {
+                stored_key.as_str()
+            };
+
+            let matches = candidates.contains(&stored_key.as_str()) || stored_xonly == query_xonly;
+            if matches {
                 if let Some(expires_at) = record.expires_at {
                     let now = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs();
-                    Ok(now < expires_at)
+                    return Ok(now < expires_at);
                 } else {
-                    Ok(true) // permanent ban
+                    return Ok(true); // permanent ban
                 }
             }
         }
+
+        Ok(false) // not banned
     }
 
     async fn get_ban(&self, pubkey: &str) -> ArkResult<Option<BanRecord>> {

@@ -598,10 +598,11 @@ impl ArkClient {
 
         client
             .delete_intent(DeleteIntentRequest {
-                intent_id: intent_id.to_string(),
-                // Proof bytes are optional for dev environments; production callers should
-                // supply a valid authorization proof to prevent unauthorised cancellation.
-                proof: vec![],
+                intent: Some(ProtoIntent {
+                    message: intent_id.to_string(),
+                    proof: String::new(),
+                    delegate_pubkey: String::new(),
+                }),
             })
             .await
             .map_err(|e| ClientError::Rpc(format!("DeleteIntent failed: {}", e)))?;
@@ -766,6 +767,70 @@ impl ArkClient {
             commitment_txid: txid,
         })
     }
+    /// Full delegate refresh flow with MuSig2 signing.
+    ///
+    /// Registers a BIP-322 delegate intent and drives the batch protocol as the
+    /// delegate cosigner. This is the correct API for refreshing another party's
+    /// VTXO on their behalf: the event stream is subscribed *before* registration
+    /// so the `BatchStarted` event is never missed, and the batch protocol runs
+    /// until `BatchFinalized` (signing tree nonces/signatures as required).
+    pub async fn settle_as_delegate(
+        &mut self,
+        proof_b64: &str,
+        message_json: &str,
+        delegate_pubkey_hex: &str,
+        secret_key: &bitcoin::secp256k1::SecretKey,
+    ) -> ClientResult<BatchTxRes> {
+        let info = self.get_info().await?;
+        let asp_forfeit_pubkey = {
+            let pk_bytes = hex::decode(&info.forfeit_pubkey).map_err(|e| {
+                ClientError::InvalidResponse(format!("Invalid forfeit pubkey hex: {}", e))
+            })?;
+            let pk = bitcoin::secp256k1::PublicKey::from_slice(&pk_bytes).map_err(|e| {
+                ClientError::InvalidResponse(format!("Invalid forfeit pubkey: {}", e))
+            })?;
+            let (xonly, _parity) = pk.x_only_public_key();
+            bitcoin::XOnlyPublicKey::from_slice(&xonly.serialize()).map_err(|e| {
+                ClientError::InvalidResponse(format!("Invalid x-only forfeit pubkey: {}", e))
+            })?
+        };
+
+        let mut grpc_client = self.require_client()?.clone();
+
+        // Subscribe BEFORE registering so the BatchStarted event that includes
+        // this intent is never missed due to a registration/subscription race.
+        let stream = grpc_client
+            .get_event_stream(dark_api::proto::ark_v1::GetEventStreamRequest { topics: vec![] })
+            .await
+            .map_err(|e| ClientError::Rpc(format!("GetEventStream failed: {}", e)))?
+            .into_inner();
+
+        let intent_id = self
+            .register_intent_bip322(proof_b64, message_json, Some(delegate_pubkey_hex))
+            .await?;
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            crate::batch::run_batch_protocol_with_stream(
+                &mut grpc_client,
+                &intent_id,
+                secret_key,
+                &[],
+                Some(asp_forfeit_pubkey),
+                stream,
+            ),
+        )
+        .await
+        .map_err(|_| {
+            ClientError::Rpc(
+                "settle_as_delegate timed out after 120s waiting for batch to complete".into(),
+            )
+        })?
+        .map(|txid| BatchTxRes {
+            commitment_txid: txid,
+        })
+    }
+
     /// Submit MuSig2 tree nonces for a batch round.
     pub async fn submit_tree_nonces(
         &mut self,
@@ -914,9 +979,16 @@ impl ArkClient {
                 script_pubkey: change_script,
             });
         }
+        // P2A anchor output (TRUC v3) — required for CPFP-based unilateral
+        // exit broadcast.  The anchor is a 0-value OP_1 + 0x4e73 output that
+        // anyone can spend to bump fees for this 0-fee ark tx.
+        outputs.push(TxOut {
+            value: Amount::ZERO,
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51, 0x02, 0x4e, 0x73]),
+        });
 
         let unsigned_tx = Transaction {
-            version: Version::TWO,
+            version: Version(3),
             lock_time: LockTime::ZERO,
             input: inputs,
             output: outputs,
@@ -969,6 +1041,10 @@ impl ArkClient {
             base64::engine::general_purpose::STANDARD.encode(&psbt_bytes)
         };
         let tx_id = self.submit_tx(&psbt_b64).await?;
+
+        // Finalize immediately so the server marks input VTXOs as spent
+        // and creates output VTXOs, enabling chained offchain sends.
+        self.finalize_tx(&tx_id).await?;
 
         Ok(OffchainTxResult { txid: tx_id })
     }
@@ -1780,8 +1856,11 @@ fn proto_round_event_to_domain(event: dark_api::proto::ark_v1::RoundEvent) -> Op
         }),
         round_event::Event::Heartbeat(_e) => Some(BatchEvent::Heartbeat { timestamp: 0 }),
         // Internal MuSig2 and connection events — not exposed at this level.
-        round_event::Event::TreeTx(_)
-        | round_event::Event::TreeSignature(_)
+        round_event::Event::TreeTx(e) => Some(BatchEvent::TreeTx {
+            round_id: e.id,
+            txid: e.txid,
+        }),
+        round_event::Event::TreeSignature(_)
         | round_event::Event::TreeNonces(_)
         | round_event::Event::StreamStarted(_) => None,
     }

@@ -30,6 +30,9 @@ serde = { version = "1.0", features = ["derive"] }
 base64 = "0.22"
 hex = "0.4"
 
+# HTTP client (for package broadcast)
+reqwest = { version = "0.12", features = ["json"] }
+
 # Logging
 tracing = "0.1"
 chrono = "0.4"
