@@ -349,12 +349,6 @@ jobs:
           echo $! > /tmp/block-miner.pid
           echo "✅ Background block miner started (1 block every 2s)"
 
-      - name: Apply Go e2e debug logging patch
-        working-directory: vendor/arkd
-        run: |
-          git apply ../../.github/go-e2e-debug.patch
-          echo "✅ Debug logging patch applied"
-
       - name: Verify dark server connectivity
         run: |
           echo "=== Dark server gRPC check ==="

@@ -204,20 +204,6 @@ echo "→ Starting background block miner (1 block every 2s)..."
 MINER_PID=$!
 echo "  ✅ Background block miner started (PID ${MINER_PID})"
 
-# ─── Apply debug patch ──────────────────────────────────────────────────────
-echo ""
-echo "→ Applying Go e2e debug logging patch..."
-(
-    cd vendor/arkd
-    # Only apply if not already applied
-    if git apply --check ../../.github/go-e2e-debug.patch 2>/dev/null; then
-        git apply ../../.github/go-e2e-debug.patch
-        echo "  ✅ Debug logging patch applied"
-    else
-        echo "  ℹ️  Patch already applied or not applicable — skipping"
-    fi
-)
-
 # ─── Run Go e2e tests ───────────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
