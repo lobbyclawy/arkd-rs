@@ -9,6 +9,8 @@ repository = "https://github.com/lobbyclawy/dark"
 
 [dependencies]
 dark-client = { path = "../dark-client" }
+dark-api = { path = "../dark-api" }
+tonic = "0.12"
 
 axum = { version = "0.8", features = ["macros", "tokio", "http2", "query", "json"], default-features = false }
 tower = "0.5"
@@ -37,3 +39,7 @@ base64 = "0.22"
 [[bin]]
 name = "dark-wallet-rest"
 path = "src/bin/dark-wallet-rest.rs"
+
+[[bin]]
+name = "dump-openapi"
+path = "src/bin/dump-openapi.rs"
