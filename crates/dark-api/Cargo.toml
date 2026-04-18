@@ -45,7 +45,7 @@ sha2 = "0.10"
 bitcoin = { version = "0.32", features = ["serde"] }
 
 # HTTP client (package broadcast)
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 # Internal crates
 dark-core = { path = "../dark-core" }
@@ -58,7 +58,7 @@ profiling = []
 
 [dev-dependencies]
 async-trait = "0.1"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde_json = "1.0"
 tokio = { version = "1.42", features = ["rt-multi-thread", "macros", "net", "time"] }
 tokio-stream = { version = "0.1", features = ["net"] }

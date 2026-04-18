@@ -12,10 +12,10 @@ postgres = ["sqlx/postgres"]
 
 [dependencies]
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "macros", "uuid", "chrono"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls-ring", "macros", "uuid", "chrono"] }
 
 # Cache
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "0.27", features = ["tokio-comp", "tokio-rustls-comp", "connection-manager"] }
 
 # Async runtime
 tokio = { version = "1.42", features = ["sync"] }

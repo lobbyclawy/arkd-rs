@@ -9,7 +9,7 @@ license = "MIT"
 # Bitcoin Development Kit (BDK 1.0+)
 # NOTE: Using 1.2 series with matching chain/file_store versions
 bdk_wallet = { version = "1.2", features = ["keys-bip39", "file_store"] }
-bdk_esplora = { version = "0.20", features = ["async-https", "tokio"] }
+bdk_esplora = { version = "0.20", features = ["async-https-rustls", "tokio"] }
 
 # Bitcoin core primitives
 bitcoin = { version = "0.32", features = ["serde", "rand"] }
@@ -31,7 +31,7 @@ base64 = "0.22"
 hex = "0.4"
 
 # HTTP client (for package broadcast)
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 # Logging
 tracing = "0.1"
