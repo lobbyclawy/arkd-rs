@@ -2,9 +2,11 @@
 
 This document explains the architecture of dark, the Rust implementation of the Ark protocol server.
 
+For the *why* behind non-obvious choices, see [`docs/adr/`](adr/README.md). For the binding coding conventions every crate follows, see [`docs/conventions/`](conventions/README.md).
+
 ## Overview
 
-dark is a modular, layered system built on hexagonal architecture principles (ports and adapters). The core domain logic is isolated from infrastructure concerns like databases, gRPC, and Bitcoin nodes.
+dark is a modular, layered system built on hexagonal architecture principles (ports and adapters). The core domain logic is isolated from infrastructure concerns like databases, gRPC, and Bitcoin nodes. This separation is enforced by keeping every outbound-facing trait under `dark-core::ports`; see [ADR 0007](adr/0007-hexagonal-separation-via-ports-module.md).
 
 ```
                     ┌─────────────────────────────────────────────────────────┐
@@ -245,27 +247,37 @@ dark exposes metrics on `/metrics`:
 - `dark_vtxos_created`: Total VTXOs created
 - `dark_round_duration_seconds`: Round execution time histogram
 
-### Tracing (OpenTelemetry)
+### Tracing
 
-Distributed tracing via OpenTelemetry. Configure with:
+All instrumentation goes through the `tracing` crate (see [`docs/conventions/tracing.md`](conventions/tracing.md) for span naming and required fields). Structured JSON logging is emitted by `tracing-subscriber`.
 
-```toml
-[telemetry]
-enabled = true
-otlp_endpoint = "http://localhost:4317"
-```
+OpenTelemetry export is **not currently shipped**. The relevant dependencies are commented out in `Cargo.toml` pending issue #245; the decision to ship or delete the stub is tracked under #493.
 
 ### Logging
-
-Structured JSON logging (tracing-subscriber) with configurable levels:
 
 ```bash
 RUST_LOG=dark=debug,dark_core=trace cargo run
 ```
 
-## Further Reading
+## Boot sequence
 
-- [Ark Protocol Whitepaper](https://arkpill.me)
-- [Testing Guide](testing.md)
-- [Operational Runbook](runbook.md)
-- [Light Mode Deployment](light-mode.md)
+The `dark` binary brings up services in a fixed phase order. Once the `App` builder (#503) lands, these phases are explicit named modules; the observable ordering below is preserved.
+
+```
+1. Load + validate config (typed Config — #504)
+2. Infrastructure   — db pool, redis, bitcoin RPC, esplora, scanner, scheduler
+3. Domain           — dark-core services constructed with infra trait objects
+4. API              — gRPC server, REST gateway, macaroons, TLS
+5. Run              — start tasks, install SIGINT/SIGTERM handler, wait for shutdown, drain
+```
+
+Shutdown (SIGINT / SIGTERM) propagates through a `ShutdownCoordinator`; every long-running task holds a cancellation token and drains within a grace window (see #504).
+
+## Related documents
+
+- [Architecture Decision Records](adr/README.md) — the *why* behind non-obvious choices.
+- [Workspace conventions](conventions/README.md) — errors, tracing, repositories, null-objects, async/polling.
+- [Testing guide](testing.md)
+- [Operational runbook](runbook.md)
+- [Light mode deployment](light-mode.md)
+- [Ark Protocol whitepaper](https://arkpill.me)
