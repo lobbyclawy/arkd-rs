@@ -227,3 +227,17 @@ check-rest-openapi:
 # Run the REST wallet daemon against a locally-running dark server.
 rest *args:
     cargo run -p dark-wallet-rest --bin dark-wallet-rest -- {{args}}
+
+# Regenerate both the committed OpenAPI spec AND the downstream clients
+# (Rust `dark-rest-client` + TypeScript `web/lib/gen/dark.ts`).
+# The Rust client is hand-maintained; this target only regenerates the spec
+# and the TS types. Review `crates/dark-rest-client/src/lib.rs` by hand after
+# adding new endpoints.
+generate-rest-client: generate-rest-openapi
+    @cd web && npm install --silent && npm run --silent generate \
+        || { echo "⚠️  'openapi-typescript' not available — run 'cd web && npm install' first"; exit 1; }
+    @echo "✅ Regenerated web/lib/gen/dark.ts"
+
+# Generate just the TypeScript client (skip the OpenAPI refresh).
+generate-rest-ts-client:
+    cd web && npm install --silent && npm run --silent generate

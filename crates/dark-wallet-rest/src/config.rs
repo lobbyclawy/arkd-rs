@@ -35,8 +35,7 @@ impl Default for Config {
 /// - `None` → no key configured.
 pub fn load_root_key(spec: Option<&str>) -> anyhow::Result<Option<Vec<u8>>> {
     match spec {
-        None => Ok(None),
-        Some(s) if s.is_empty() => Ok(None),
+        None | Some("") => Ok(None),
         Some(s) if s.starts_with('@') => {
             let path = PathBuf::from(&s[1..]);
             let bytes = std::fs::read(&path)

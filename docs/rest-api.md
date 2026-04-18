@@ -118,20 +118,53 @@ file alongside your source changes.
 
 ## Typed clients
 
-The committed `openapi.json` feeds any OpenAPI-compatible generator:
+Two clients ship in this repo:
+
+- **Rust** — `crates/dark-rest-client/` (hand-maintained `reqwest` wrapper).
+  ```toml
+  # Cargo.toml
+  dark-rest-client = { path = "../dark-rest-client" }
+  ```
+  ```rust
+  use dark_rest_client::Client;
+  let client = Client::new("http://127.0.0.1:7072")?;
+  let info = client.get_info().await?;
+  ```
+- **TypeScript** — `web/` (generated types + hand-written `DarkClient`).
+  ```ts
+  import { DarkClient } from "@dark/web-client/lib/client";
+  const client = new DarkClient({ baseUrl: "http://127.0.0.1:7072" });
+  const info = await client.getInfo();
+  ```
+
+### Regenerating
 
 ```bash
-# TypeScript (one-file, no runtime deps)
-npx openapi-typescript crates/dark-wallet-rest/openapi.json \
-    -o web/lib/gen/dark.ts
-
-# Rust
-cargo install openapi-generator-cli   # first time
-openapi-generator-cli generate \
-    -i crates/dark-wallet-rest/openapi.json \
-    -g rust \
-    -o crates/dark-rest-client
+just generate-rest-openapi    # refresh openapi.json
+just generate-rest-ts-client  # refresh web/lib/gen/dark.ts (needs npm)
 ```
 
-Wiring this into CI (generated `dark-rest-client` crate + `web/lib/gen/*.ts`)
-is a follow-up; the spec itself is stable and usable today.
+CI's `rest-api.yml` workflow runs both the OpenAPI drift check and the
+Rust-side `cargo test` smoke tests on every change to
+`crates/dark-wallet-rest/` or `proto/`.
+
+## Integration tests
+
+`crates/dark-wallet-rest/tests/openapi_smoke.rs` verifies that every
+documented route + schema lands in the generated spec and that `/ping`
+carries an empty security override. These tests do **not** require a
+running dark server.
+
+For end-to-end flows against a live dark instance, launch the daemon and
+drive it with the Rust or TS client:
+
+```bash
+# Terminal 1
+cargo run -p dark --release
+
+# Terminal 2
+just rest --auth-disabled
+
+# Terminal 3 — drive it
+curl -s http://127.0.0.1:7072/v1/info | jq
+```
