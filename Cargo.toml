@@ -28,6 +28,7 @@ members = [
     "crates/dark-nostr",
     "crates/dark-signer",
     "crates/dark-wallet-bin",
+    "crates/dark-wallet-rest",
 ]
 
 [dependencies]
