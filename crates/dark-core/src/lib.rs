@@ -15,6 +15,8 @@
 pub mod alerts_manager;
 pub mod application;
 pub mod boarding;
+#[cfg(feature = "compliance-proofs")]
+pub mod compliance;
 pub mod cosigning;
 pub mod domain;
 pub mod error;
@@ -39,6 +41,11 @@ mod proptest_tests;
 pub use alerts_manager::PrometheusAlertsManager;
 pub use application::{ArkConfig, ArkService, ServiceInfo};
 pub use boarding::{BoardingConfig, BoardingService, BoardingStats};
+#[cfg(feature = "compliance-proofs")]
+pub use compliance::{
+    prove_source_chain, verify_source_chain, ProofCommitmentIndex, SourceOfFundsProof,
+    SourceProofError, SourceProofHop,
+};
 pub use cosigning::{
     CosigningManager, CosigningSession, CosigningState, ForfeitTxEntry, ForfeitTxManager,
     NonceCommitment, PartialSignature,

@@ -5,6 +5,10 @@ edition = "2021"
 description = "Core domain models and business logic for Ark protocol"
 license = "MIT"
 
+[features]
+default = []
+compliance-proofs = []
+
 [dependencies]
 # Error handling
 anyhow = "1.0"
