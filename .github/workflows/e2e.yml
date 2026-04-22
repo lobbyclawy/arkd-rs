@@ -271,6 +271,11 @@ jobs:
           utxo_max_amount = 100000000
           unilateral_exit_delay = 30
           boarding_exit_delay = 30
+          # TEST-ENV-ONLY: hold the forfeit tx in the mempool for 5 s before
+          # broadcasting, to keep a just-reacted-to fraud unconfirmed across the
+          # 5 s mempool-propagation window reserved by the upstream Go E2E.
+          # Production deployments leave this unset so fraud response is immediate.
+          fraud_reaction_delay_secs = 5
           EOF
 
       - name: Start dark server
