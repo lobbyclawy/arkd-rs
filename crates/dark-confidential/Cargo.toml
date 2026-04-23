@@ -24,3 +24,7 @@ hex = "0.4"
 [lib]
 name = "dark_confidential"
 path = "src/lib.rs"
+
+[[bench]]
+name = "balance_proof"
+harness = false

@@ -1,0 +1,7 @@
+{
+  "_comment": "Transcript domain-separation vectors for dark-confidential balance proofs (#526). The challenge and nonce tags MUST be disjoint so a nonce digest can never be mistaken for a challenge digest.",
+  "challenge_tag": "dark-confidential/balance-proof/v1",
+  "challenge_tag_hash_hex": "d3ab425ee57d2cc2082982af54d1db4e62031943c330c180f5f720db41175119",
+  "nonce_tag": "dark-confidential/balance-proof/nonce/v1",
+  "nonce_tag_hash_hex": "1ec379678867f60fd84c58205e44e67a5148925690a9d98bf5cbd51fa4f3b636"
+}
