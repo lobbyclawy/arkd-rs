@@ -12,4 +12,8 @@ pub enum ConfidentialError {
     Unsupported(&'static str),
     #[error("balance proof: {0}")]
     BalanceProof(&'static str),
+    #[error("value out of range: {0}")]
+    OutOfRange(&'static str),
+    #[error("range proof failed: {0}")]
+    RangeProof(&'static str),
 }

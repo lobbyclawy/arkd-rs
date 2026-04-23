@@ -1,0 +1,23 @@
+[package]
+name = "dark-confidential-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Out-of-workspace: cargo-fuzz manages its own Cargo.lock and pulls in
+# libfuzzer-sys which would conflict with the main workspace dep graph.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+dark-confidential = { path = ".." }
+
+[[bin]]
+name = "verify_range"
+path = "fuzz_targets/verify_range.rs"
+test = false
+doc = false
+bench = false
