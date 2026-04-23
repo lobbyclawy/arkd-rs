@@ -1,0 +1,7 @@
+{
+  "generator_derivation": {
+    "domain_separator": "dark-confidential/pedersen-h/v1",
+    "seed_hex": "8103c46e9eef959fd8a7dc11a6a3cc465d4a1a330137d84d2dfe0a485a2f7c3b",
+    "compressed_hex": "02a63d22dd8daf895fc648a4dbafc02cb03fc6a7c96d642d0cc186ae564c021cb4"
+  }
+}

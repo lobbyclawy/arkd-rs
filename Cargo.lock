@@ -1217,8 +1217,11 @@ name = "dark-confidential"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "hex",
  "proptest",
  "secp256k1 0.29.1",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
