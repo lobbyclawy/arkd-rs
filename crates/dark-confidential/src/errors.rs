@@ -10,4 +10,6 @@ pub enum ConfidentialError {
     InvalidEncoding(&'static str),
     #[error("unsupported operation: {0}")]
     Unsupported(&'static str),
+    #[error("balance proof: {0}")]
+    BalanceProof(&'static str),
 }

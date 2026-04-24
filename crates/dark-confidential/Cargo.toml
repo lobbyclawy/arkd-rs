@@ -28,3 +28,7 @@ rand = { version = "0.8", features = ["small_rng"] }
 [lib]
 name = "dark_confidential"
 path = "src/lib.rs"
+
+[[bench]]
+name = "balance_proof"
+harness = false
