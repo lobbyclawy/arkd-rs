@@ -145,6 +145,102 @@ pub static NULLIFIER_INSERT_LATENCY: Lazy<Histogram> = Lazy::new(|| {
 });
 
 // ---------------------------------------------------------------------------
+// Live VTXO store metrics (#535)
+// ---------------------------------------------------------------------------
+
+/// Number of VTXOs currently held in the in-memory live store.
+///
+/// Updated on every successful insert / remove / hydration. Combined gauge
+/// across both transparent and confidential variants — operators can
+/// disambiguate via [`LIVE_VTXOS_CONFIDENTIAL_TOTAL`] if needed.
+pub static LIVE_VTXOS_TOTAL: Lazy<IntGauge> = Lazy::new(|| {
+    IntGauge::new(
+        "live_vtxos_total",
+        "Number of VTXOs currently held in the in-memory live store",
+    )
+    .expect("metric creation failed")
+});
+
+/// Number of confidential VTXOs in the in-memory live store.
+///
+/// Subset of [`LIVE_VTXOS_TOTAL`]. The transparent count is `LIVE_VTXOS_TOTAL
+/// - LIVE_VTXOS_CONFIDENTIAL_TOTAL`.
+pub static LIVE_VTXOS_CONFIDENTIAL_TOTAL: Lazy<IntGauge> = Lazy::new(|| {
+    IntGauge::new(
+        "live_vtxos_confidential_total",
+        "Number of confidential VTXOs currently held in the in-memory live store",
+    )
+    .expect("metric creation failed")
+});
+
+/// Total lookups against the live VTXO store (by outpoint OR nullifier).
+///
+/// Pair with [`LIVE_VTXO_LOOKUP_HITS_TOTAL`] for hit rate; ratio is the
+/// "index hit rate" called out in #535.
+pub static LIVE_VTXO_LOOKUPS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    IntCounter::new(
+        "live_vtxo_lookups_total",
+        "Total live-VTXO-store lookups (by outpoint or nullifier)",
+    )
+    .expect("metric creation failed")
+});
+
+/// Lookups against the live VTXO store that returned a hit.
+pub static LIVE_VTXO_LOOKUP_HITS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    IntCounter::new(
+        "live_vtxo_lookup_hits_total",
+        "Total live-VTXO-store lookups that returned a hit",
+    )
+    .expect("metric creation failed")
+});
+
+/// Total nullifier-index lookups (subset of [`LIVE_VTXO_LOOKUPS_TOTAL`]).
+///
+/// Useful for splitting hit-rate by lookup mode without extra labels.
+pub static LIVE_VTXO_NULLIFIER_LOOKUPS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    IntCounter::new(
+        "live_vtxo_nullifier_lookups_total",
+        "Total live-VTXO-store lookups that go via the nullifier index",
+    )
+    .expect("metric creation failed")
+});
+
+/// Nullifier-index lookups that returned a hit.
+pub static LIVE_VTXO_NULLIFIER_HITS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    IntCounter::new(
+        "live_vtxo_nullifier_hits_total",
+        "Total live-VTXO-store nullifier-index lookups that returned a hit",
+    )
+    .expect("metric creation failed")
+});
+
+/// Histogram of `lookup` latency in seconds for the live VTXO store.
+///
+/// Buckets cover the in-memory hot path (1us..1ms); tail buckets to
+/// ~100ms catch a hydration / DB miss when one is wired in.
+pub static LIVE_VTXO_LOOKUP_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+    Histogram::with_opts(
+        HistogramOpts::new(
+            "live_vtxo_lookup_latency_seconds",
+            "Latency of live-VTXO-store lookups (seconds)",
+        )
+        .buckets(vec![
+            0.000_000_5,
+            0.000_001,
+            0.000_002,
+            0.000_005,
+            0.000_010,
+            0.000_050,
+            0.000_100,
+            0.001,
+            0.010,
+            0.100,
+        ]),
+    )
+    .expect("metric creation failed")
+});
+
+// ---------------------------------------------------------------------------
 // Sweep metrics
 // ---------------------------------------------------------------------------
 
@@ -179,12 +275,18 @@ fn register_all(registry: &Registry) {
         &SWEEPS_VTXOS_RECLAIMED,
         &NULLIFIER_LOOKUPS_TOTAL,
         &NULLIFIER_HITS_TOTAL,
+        &LIVE_VTXO_LOOKUPS_TOTAL,
+        &LIVE_VTXO_LOOKUP_HITS_TOTAL,
+        &LIVE_VTXO_NULLIFIER_LOOKUPS_TOTAL,
+        &LIVE_VTXO_NULLIFIER_HITS_TOTAL,
     ];
     let gauges: Vec<&IntGauge> = vec![
         &ACTIVE_ROUNDS,
         &ACTIVE_PARTICIPANTS,
         &VTXOS_ACTIVE,
         &NULLIFIERS_TOTAL,
+        &LIVE_VTXOS_TOTAL,
+        &LIVE_VTXOS_CONFIDENTIAL_TOTAL,
     ];
 
     for c in counters {
@@ -199,6 +301,9 @@ fn register_all(registry: &Registry) {
     }
     registry
         .register(Box::new(NULLIFIER_INSERT_LATENCY.clone()))
+        .expect("register histogram");
+    registry
+        .register(Box::new(LIVE_VTXO_LOOKUP_LATENCY.clone()))
         .expect("register histogram");
 }
 

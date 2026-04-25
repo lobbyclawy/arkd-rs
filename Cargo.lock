@@ -1309,6 +1309,7 @@ dependencies = [
  "criterion",
  "dark-core",
  "etcd-client",
+ "hex",
  "rand 0.8.6",
  "redis 0.25.4",
  "tokio",
