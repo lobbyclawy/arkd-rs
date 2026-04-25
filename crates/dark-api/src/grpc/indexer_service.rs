@@ -1743,6 +1743,8 @@ mod tests {
             expires_at_block: 0,
             created_at: 1000,
             assets: vec![],
+            // Transparent test fixture; confidential variant added in #530.
+            confidential: None,
         };
 
         let proto = vtxo_to_proto(&v);
@@ -1782,6 +1784,8 @@ mod tests {
             expires_at_block: 0,
             created_at: 0,
             assets: vec![],
+            // Transparent test fixture; confidential variant added in #530.
+            confidential: None,
         };
 
         let proto = vtxo_to_proto(&v);
