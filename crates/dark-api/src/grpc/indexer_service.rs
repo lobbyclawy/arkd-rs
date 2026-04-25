@@ -1141,82 +1141,17 @@ impl IndexerServiceTrait for IndexerGrpcService {
                         if matched_this_otx {
                             matched_offchain_tx_ids.push(otx.id.clone());
                         }
-                        // When the ark tx itself is requested (Phase 2 of a two-phase
-                        // unroll), the client is about to broadcast it on-chain.
-                        // Mark any preconfirmed VTXOs whose ark_txid matches this
-                        // offchain tx as unrolled immediately so the balance updates
-                        // as soon as the client finishes the unroll, without waiting
-                        // for the Esplora confirmation polling loop.
-                        if ark_tx_matched {
-                            info!(
-                                otx_id = %otx.id,
-                                "GetVirtualTxs: ark tx matched — looking for preconfirmed VTXOs to mark unrolled"
-                            );
-                            if let Ok((spendable, spent)) = self.core.vtxo_repo().list_all().await {
-                                info!(
-                                    spendable_count = spendable.len(),
-                                    spent_count = spent.len(),
-                                    "GetVirtualTxs: list_all returned"
-                                );
-                                // Search both spendable AND spent lists — the VTXO may
-                                // have been marked as "spent" (in the virtual sense) by
-                                // a subsequent offchain tx while the preconfirmed field
-                                // and ark_txid still match.
-                                let all_vtxos: Vec<_> =
-                                    spendable.iter().chain(spent.iter()).collect();
-                                let to_mark: Vec<_> = all_vtxos
-                                    .iter()
-                                    .filter(|v| v.preconfirmed && v.ark_txid == otx.id)
-                                    .collect();
-                                if to_mark.is_empty() {
-                                    // Debug: log all preconfirmed VTXOs and their ark_txids
-                                    let preconfirmed: Vec<_> = all_vtxos
-                                        .iter()
-                                        .filter(|v| v.preconfirmed)
-                                        .map(|v| {
-                                            format!(
-                                                "outpoint={}:{} ark_txid={}",
-                                                v.outpoint.txid, v.outpoint.vout, v.ark_txid
-                                            )
-                                        })
-                                        .collect();
-                                    info!(
-                                        otx_id = %otx.id,
-                                        preconfirmed_vtxos = ?preconfirmed,
-                                        "GetVirtualTxs: NO matching preconfirmed VTXOs found"
-                                    );
-                                } else {
-                                    info!(
-                                        ark_txid = %otx.id,
-                                        vtxo_count = to_mark.len(),
-                                        "GetVirtualTxs: marking preconfirmed VTXOs as unrolled \
-                                         (ark tx PSBT served — Phase 2 of unroll)"
-                                    );
-                                    for vtxo in &to_mark {
-                                        if let Err(e) = self
-                                            .core
-                                            .vtxo_repo()
-                                            .mark_vtxos_unrolled(std::slice::from_ref(vtxo))
-                                            .await
-                                        {
-                                            warn!(
-                                                outpoint = %vtxo.outpoint,
-                                                error = %e,
-                                                "Failed to mark preconfirmed VTXO as unrolled \
-                                                 in GetVirtualTxs"
-                                            );
-                                        } else {
-                                            info!(
-                                                outpoint = %vtxo.outpoint,
-                                                "GetVirtualTxs: successfully marked VTXO as unrolled"
-                                            );
-                                        }
-                                    }
-                                }
-                            } else {
-                                warn!("GetVirtualTxs: list_all() failed");
-                            }
-                        }
+                        // IMPORTANT: do not eagerly mark preconfirmed VTXOs as
+                        // unrolled when merely serving the ark tx PSBT.
+                        //
+                        // The Go fraud E2E expects a real intermediate window where
+                        // the client has the PSBT and may broadcast it, but the server
+                        // has not yet reacted as if the VTXO were unrolled until the
+                        // leaf/ark tx is actually observed confirmed on-chain by the
+                        // normal scanner flow. Marking unrolled here shortcuts that
+                        // contract and makes `TestReactToFraud/
+                        // react_to_unroll_of_forfeited_vtxos/*` fail.
+                        let _ = ark_tx_matched;
                     }
                 }
 
