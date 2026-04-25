@@ -1245,6 +1245,7 @@ dependencies = [
  "base64 0.22.1",
  "bitcoin",
  "chrono",
+ "criterion",
  "dark-bitcoin",
  "hex",
  "musig2",
