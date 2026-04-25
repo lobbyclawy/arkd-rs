@@ -1,12 +1,12 @@
 //! Live in-memory VTXO store (issue #535).
 //!
 //! Holds the ephemeral, hot-path VTXO map used during round validation. The
-//! map stores **both** [`VtxoVersion::Transparent`] and
-//! [`VtxoVersion::Confidential`] entries via the same [`Vtxo`] type — issue
-//! #530 already gave `Vtxo` a `confidential: Option<ConfidentialPayload>`
-//! field, so this store does not need a separate enum. Variant-aware
-//! accessors ([`LiveVtxoStore::amount_or_commitment`],
-//! [`LiveVtxoStore::nullifier_of`]) read the right field per variant.
+//! map stores **both** transparent and confidential entries via the same
+//! [`Vtxo`] type — issue #530 already gave `Vtxo` a
+//! `confidential: Option<ConfidentialPayload>` field, so this store does not
+//! need a separate enum. Variant-aware accessors
+//! ([`LiveVtxoStore::amount_or_commitment`], [`LiveVtxoStore::nullifier_of`])
+//! read the right field per variant.
 //!
 //! # Indexing model
 //!
@@ -32,7 +32,7 @@
 //!
 //! 1. When a confidential VTXO is first inserted (output of a round), only
 //!    the primary `outpoint -> vtxo` mapping is populated. The
-//!    [`ConfidentialPayload`] *carries* a nullifier field, but that field
+//!    `ConfidentialPayload` *carries* a nullifier field, but that field
 //!    holds the **OUTPUT-side** nullifier created by the sender — not the
 //!    nullifier that this VTXO will eventually be spent under.
 //!
