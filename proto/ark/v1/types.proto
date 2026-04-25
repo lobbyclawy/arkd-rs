@@ -41,13 +41,13 @@ message TransparentVtxoMarker {}
 // Backward compatibility
 // ----------------------
 // - Transparent VTXOs serialised under the old schema deserialise unchanged
-//   under this schema, because field numbers 1-14 are untouched and the new
-//   `vtxo_body` oneof is optional.
+//  under this schema, because field numbers 1-14 are untouched and the new
+//  `vtxo_body` oneof is optional.
 // - Old clients that do not understand `vtxo_body` simply ignore it (proto3
-//   skips unknown fields), so confidential payloads round-trip safely through
-//   transparent-only middleware.
+//  skips unknown fields), so confidential payloads round-trip safely through
+//  transparent-only middleware.
 // - New servers SHOULD set `vtxo_body = transparent { ... }` for clarity on
-//   newly-minted transparent VTXOs but are not required to backfill it.
+//  newly-minted transparent VTXOs but are not required to backfill it.
 message Vtxo {
   Outpoint outpoint = 1;
   uint64 amount = 2;
