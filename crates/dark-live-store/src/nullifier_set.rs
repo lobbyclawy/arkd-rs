@@ -65,7 +65,7 @@ pub type Nullifier = [u8; NULLIFIER_LEN];
 
 /// Number of shards for the in-memory HashSet.
 ///
-/// Must be a power of two so [`shard_index`] can use a bit mask. 16
+/// Must be a power of two so the shard index helper can use a bit mask. 16
 /// shards is a sweet spot for the 10_000-parallel-insert AC: each shard
 /// sees ~625 inserts, well below `HashSet`'s rehash threshold for the
 /// pre-sized capacity.
