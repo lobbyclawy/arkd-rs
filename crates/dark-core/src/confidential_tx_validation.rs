@@ -119,7 +119,7 @@ pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 ///
 /// This struct is the **domain** type the validator operates on. The gRPC
 /// layer (#542) is responsible for converting from the proto
-/// [`ark.v1.ConfidentialTransaction`] message into this struct, materialising
+/// `ark.v1.ConfidentialTransaction` message into this struct, materialising
 /// each output's range proof into the typed [`RangeProof`] and the balance
 /// proof into the typed [`BalanceProof`] from `dark-confidential`. Failing
 /// that conversion is a parse error and is rejected at the gRPC boundary
