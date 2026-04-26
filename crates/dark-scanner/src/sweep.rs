@@ -7,8 +7,11 @@
 use async_trait::async_trait;
 use tracing::{debug, info, warn};
 
+use dark_core::confidential_sweep::sweep_input_for_vtxo;
 use dark_core::error::{ArkError, ArkResult};
-use dark_core::ports::{SweepResult, SweepService};
+use dark_core::ports::{
+    ConfidentialOpeningProvider, NoopConfidentialOpeningProvider, SweepResult, SweepService,
+};
 
 /// An output identified as sweepable (past its CSV timelock).
 #[derive(Debug, Clone)]
@@ -70,6 +73,9 @@ pub struct EsploraSweepService {
     tx_builder: Option<Arc<dyn dark_core::ports::TxBuilder>>,
     /// Optional round repository for looking up connector trees.
     round_repo: Option<Arc<dyn dark_core::ports::RoundRepository>>,
+    /// Provider for confidential VTXO openings (#549). Defaults to a no-op
+    /// provider that skips confidential VTXOs.
+    opening_provider: Arc<dyn ConfidentialOpeningProvider>,
 }
 
 use std::sync::Arc;
@@ -84,7 +90,15 @@ impl EsploraSweepService {
             wallet: None,
             tx_builder: None,
             round_repo: None,
+            opening_provider: Arc::new(NoopConfidentialOpeningProvider),
         }
+    }
+
+    /// Plug in a confidential opening provider (#549). Without this, the
+    /// service falls back to the no-op provider and skips confidential VTXOs.
+    pub fn with_opening_provider(mut self, provider: Arc<dyn ConfidentialOpeningProvider>) -> Self {
+        self.opening_provider = provider;
+        self
     }
 
     /// Wire in the dependencies needed for actual sweep transaction building.
@@ -299,17 +313,59 @@ impl SweepService for EsploraSweepService {
             "EsploraSweepService: found expired VTXOs"
         );
 
-        // Build sweep inputs
-        let sweep_inputs: Vec<dark_core::ports::SweepInput> = expired
-            .iter()
-            .map(|v| dark_core::ports::SweepInput {
-                txid: v.outpoint.txid.clone(),
-                vout: v.outpoint.vout,
-                amount: v.amount,
-                tapscripts: vec![],
-                pubkey: v.pubkey.clone(),
-            })
-            .collect();
+        // Build sweep inputs, dispatching on confidential vs transparent (#549).
+        // Confidential VTXOs without an opening are dropped from this batch.
+        let mut sweep_inputs: Vec<dark_core::ports::SweepInput> = Vec::with_capacity(expired.len());
+        let mut included = Vec::with_capacity(expired.len());
+        for v in &expired {
+            let input = if v.is_confidential() {
+                let opening = match self.opening_provider.opening_for(v).await {
+                    Ok(Some(o)) => o,
+                    Ok(None) => {
+                        warn!(
+                            vtxo_id = %v.outpoint,
+                            "EsploraSweepService: confidential VTXO has no opening; skipping"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(
+                            vtxo_id = %v.outpoint,
+                            error = %e,
+                            "EsploraSweepService: confidential opening lookup failed; skipping"
+                        );
+                        continue;
+                    }
+                };
+                match sweep_input_for_vtxo(v, Some(&opening)) {
+                    Ok(i) => i,
+                    Err(e) => {
+                        warn!(
+                            vtxo_id = %v.outpoint,
+                            error = %e,
+                            "EsploraSweepService: failed to build confidential sweep input; skipping"
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                // Transparent path — preserved verbatim.
+                dark_core::ports::SweepInput {
+                    txid: v.outpoint.txid.clone(),
+                    vout: v.outpoint.vout,
+                    amount: v.amount,
+                    tapscripts: vec![],
+                    pubkey: v.pubkey.clone(),
+                }
+            };
+            sweep_inputs.push(input);
+            included.push(v.clone());
+        }
+
+        if sweep_inputs.is_empty() {
+            debug!("EsploraSweepService: no inputs after opening resolution; skipping");
+            return Ok(SweepResult::default());
+        }
 
         // Build sweep tx
         let (sweep_tx_hex, sweep_txid) = match tx_builder.build_sweep_tx(&sweep_inputs).await {
@@ -323,10 +379,10 @@ impl SweepService for EsploraSweepService {
         // Broadcast
         match wallet.broadcast_transaction(vec![sweep_tx_hex]).await {
             Ok(txid) => {
-                let sats: u64 = expired.iter().map(|v| v.amount).sum();
-                info!(txid = %txid, vtxos = expired.len(), sats, "EsploraSweepService: sweep tx broadcast");
+                let sats: u64 = sweep_inputs.iter().map(|i| i.amount).sum();
+                info!(txid = %txid, vtxos = included.len(), sats, "EsploraSweepService: sweep tx broadcast");
                 // Mark VTXOs as swept in the repository
-                if let Err(e) = vtxo_repo.mark_vtxos_swept(&expired).await {
+                if let Err(e) = vtxo_repo.mark_vtxos_swept(&included).await {
                     warn!(
                         error = %e,
                         txid = %txid,
@@ -334,7 +390,7 @@ impl SweepService for EsploraSweepService {
                     );
                 }
                 Ok(SweepResult {
-                    vtxos_swept: expired.len(),
+                    vtxos_swept: included.len(),
                     sats_recovered: sats,
                     tx_ids: vec![sweep_txid],
                 })
@@ -628,5 +684,367 @@ mod tests {
         let result = service.check_sweepable(txid, 0, 50_000, 144).await.unwrap();
 
         assert!(result.is_none(), "Already spent — not sweepable");
+    }
+
+    // ── Confidential VTXO sweep tests (#549) ────────────────────────
+
+    use async_trait::async_trait as test_async_trait;
+    use dark_core::confidential_sweep::ConfidentialOpening;
+    use dark_core::domain::vtxo::{ConfidentialPayload, Vtxo, VtxoOutpoint};
+    use dark_core::domain::{FlatTxTree, Intent};
+    use dark_core::ports::{
+        BlockTimestamp, BoardingInput, CommitmentTxResult, ConfidentialOpeningProvider,
+        SignedBoardingInput, SweepInput, SweepableOutput, TxBuilder, TxInput, ValidForfeitTx,
+        VtxoRepository, WalletService, WalletStatus,
+    };
+    use std::sync::Mutex;
+
+    struct MockRepo {
+        expired: Vec<Vtxo>,
+        marked: Mutex<Vec<Vtxo>>,
+    }
+
+    #[test_async_trait]
+    impl VtxoRepository for MockRepo {
+        async fn add_vtxos(&self, _vtxos: &[Vtxo]) -> dark_core::error::ArkResult<()> {
+            Ok(())
+        }
+        async fn get_vtxos(
+            &self,
+            _outpoints: &[VtxoOutpoint],
+        ) -> dark_core::error::ArkResult<Vec<Vtxo>> {
+            Ok(vec![])
+        }
+        async fn get_all_vtxos_for_pubkey(
+            &self,
+            _pubkey: &str,
+        ) -> dark_core::error::ArkResult<(Vec<Vtxo>, Vec<Vtxo>)> {
+            Ok((vec![], vec![]))
+        }
+        async fn spend_vtxos(
+            &self,
+            _spent: &[(VtxoOutpoint, String)],
+            _ark_txid: &str,
+        ) -> dark_core::error::ArkResult<()> {
+            Ok(())
+        }
+        async fn find_expired_vtxos(
+            &self,
+            _before_timestamp: i64,
+        ) -> dark_core::error::ArkResult<Vec<Vtxo>> {
+            Ok(self.expired.clone())
+        }
+        async fn mark_vtxos_swept(&self, vtxos: &[Vtxo]) -> dark_core::error::ArkResult<()> {
+            self.marked.lock().unwrap().extend_from_slice(vtxos);
+            Ok(())
+        }
+    }
+
+    struct MockTxBuilder {
+        captured: Mutex<Vec<Vec<SweepInput>>>,
+    }
+
+    #[test_async_trait]
+    impl TxBuilder for MockTxBuilder {
+        async fn build_commitment_tx(
+            &self,
+            _signer_pubkey: &bitcoin::XOnlyPublicKey,
+            _intents: &[Intent],
+            _boarding_inputs: &[BoardingInput],
+        ) -> dark_core::error::ArkResult<CommitmentTxResult> {
+            Ok(CommitmentTxResult {
+                commitment_tx: String::new(),
+                vtxo_tree: Vec::new(),
+                connector_address: String::new(),
+                connectors: Vec::new(),
+            })
+        }
+        async fn verify_forfeit_txs(
+            &self,
+            _vtxos: &[Vtxo],
+            _connectors: &FlatTxTree,
+            _txs: &[String],
+        ) -> dark_core::error::ArkResult<Vec<ValidForfeitTx>> {
+            Ok(Vec::new())
+        }
+        async fn build_sweep_tx(
+            &self,
+            inputs: &[SweepInput],
+        ) -> dark_core::error::ArkResult<(String, String)> {
+            self.captured.lock().unwrap().push(inputs.to_vec());
+            Ok((
+                "scanner_sweep_txid".to_string(),
+                "scanner_sweep_psbt".to_string(),
+            ))
+        }
+        async fn get_sweepable_batch_outputs(
+            &self,
+            _vtxo_tree: &FlatTxTree,
+        ) -> dark_core::error::ArkResult<Option<SweepableOutput>> {
+            Ok(None)
+        }
+        async fn finalize_and_extract(&self, tx: &str) -> dark_core::error::ArkResult<String> {
+            Ok(format!("final_{tx}"))
+        }
+        async fn verify_vtxo_tapscript_sigs(
+            &self,
+            _tx: &str,
+            _must_include_signer: bool,
+        ) -> dark_core::error::ArkResult<bool> {
+            Ok(true)
+        }
+        async fn verify_boarding_tapscript_sigs(
+            &self,
+            _signed_tx: &str,
+            _commitment_tx: &str,
+        ) -> dark_core::error::ArkResult<std::collections::HashMap<u32, SignedBoardingInput>>
+        {
+            Ok(std::collections::HashMap::new())
+        }
+    }
+
+    struct MockWallet;
+
+    #[test_async_trait]
+    impl WalletService for MockWallet {
+        async fn status(&self) -> dark_core::error::ArkResult<WalletStatus> {
+            Ok(WalletStatus {
+                initialized: true,
+                unlocked: true,
+                synced: true,
+            })
+        }
+        async fn get_forfeit_pubkey(&self) -> dark_core::error::ArkResult<bitcoin::XOnlyPublicKey> {
+            Ok(bitcoin::XOnlyPublicKey::from_slice(&[1u8; 32]).unwrap())
+        }
+        async fn derive_connector_address(&self) -> dark_core::error::ArkResult<String> {
+            Ok("addr".into())
+        }
+        async fn sign_transaction(
+            &self,
+            tx: &str,
+            _extract_raw: bool,
+        ) -> dark_core::error::ArkResult<String> {
+            Ok(tx.to_string())
+        }
+        async fn select_utxos(
+            &self,
+            _amount: u64,
+            _confirmed_only: bool,
+        ) -> dark_core::error::ArkResult<(Vec<TxInput>, u64)> {
+            Ok((vec![], 0))
+        }
+        async fn broadcast_transaction(
+            &self,
+            _txs: Vec<String>,
+        ) -> dark_core::error::ArkResult<String> {
+            Ok("scanner_broadcast_txid".into())
+        }
+        async fn fee_rate(&self) -> dark_core::error::ArkResult<u64> {
+            Ok(10)
+        }
+        async fn get_current_block_time(&self) -> dark_core::error::ArkResult<BlockTimestamp> {
+            Ok(BlockTimestamp {
+                height: 200,
+                timestamp: 1_700_000_000,
+            })
+        }
+        async fn get_dust_amount(&self) -> dark_core::error::ArkResult<u64> {
+            Ok(546)
+        }
+        async fn get_outpoint_status(
+            &self,
+            _outpoint: &VtxoOutpoint,
+        ) -> dark_core::error::ArkResult<bool> {
+            Ok(false)
+        }
+    }
+
+    struct FixedOpeningProvider(ConfidentialOpening);
+    #[test_async_trait]
+    impl ConfidentialOpeningProvider for FixedOpeningProvider {
+        async fn opening_for(
+            &self,
+            _vtxo: &Vtxo,
+        ) -> dark_core::error::ArkResult<Option<ConfidentialOpening>> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    fn make_payload(seed: u8) -> ConfidentialPayload {
+        let mut commitment = [0u8; 33];
+        commitment[0] = 0x02;
+        commitment[1] = seed.max(1);
+        ConfidentialPayload::new(commitment, vec![0xab; 8], [seed; 32], {
+            let mut e = [0u8; 33];
+            e[0] = 0x03;
+            e[1] = seed;
+            e
+        })
+    }
+
+    fn make_conf(seed: u8) -> Vtxo {
+        let mut v = Vtxo::new_confidential(
+            VtxoOutpoint::new(format!("conf_{seed}"), u32::from(seed)),
+            "deadbeef".to_string(),
+            make_payload(seed),
+        );
+        v.expires_at = 1;
+        v
+    }
+
+    fn make_plain(seed: u8, amount: u64) -> Vtxo {
+        let mut v = Vtxo::new(
+            VtxoOutpoint::new(format!("plain_{seed}"), u32::from(seed)),
+            amount,
+            "feedbeef".to_string(),
+        );
+        v.expires_at = 1;
+        v
+    }
+
+    /// Issue #549: confidential VTXO past CSV → sweep tx is constructed and
+    /// witness opens the commitment correctly via the EsploraSweepService.
+    #[tokio::test]
+    async fn test_esplora_confidential_sweep_attaches_witness_script() {
+        let vtxo = make_conf(7);
+        let payload = vtxo.confidential.clone().unwrap();
+        let opening = ConfidentialOpening::new(50_000, [0xcd; 32]);
+
+        let repo = Arc::new(MockRepo {
+            expired: vec![vtxo],
+            marked: Mutex::new(Vec::new()),
+        });
+        let tx_builder = Arc::new(MockTxBuilder {
+            captured: Mutex::new(Vec::new()),
+        });
+
+        let svc = EsploraSweepService::new("http://localhost:1")
+            .with_deps(repo.clone(), Arc::new(MockWallet), tx_builder.clone())
+            .with_opening_provider(Arc::new(FixedOpeningProvider(opening)));
+
+        let result = svc.sweep_expired_vtxos(200).await.unwrap();
+        assert_eq!(result.vtxos_swept, 1);
+        assert_eq!(result.sats_recovered, 50_000);
+
+        // Witness script encodes the commitment opening
+        let captured = tx_builder.captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let inputs = &captured[0];
+        assert_eq!(inputs.len(), 1);
+        assert!(
+            !inputs[0].tapscripts.is_empty(),
+            "confidential exit script attached"
+        );
+        let script = &inputs[0].tapscripts[0];
+        assert!(script.contains(&hex::encode(payload.amount_commitment)));
+        assert!(script.contains(&hex::encode(50_000u64.to_be_bytes())));
+        assert!(script.contains(&hex::encode([0xcd; 32])));
+
+        // Repo marked it
+        assert_eq!(repo.marked.lock().unwrap().len(), 1);
+    }
+
+    /// Issue #549 negative: confidential VTXO with no opening is left
+    /// unswept (no broadcast, no DB mark).
+    #[tokio::test]
+    async fn test_esplora_confidential_sweep_skips_without_opening() {
+        let vtxo = make_conf(3);
+        let repo = Arc::new(MockRepo {
+            expired: vec![vtxo],
+            marked: Mutex::new(Vec::new()),
+        });
+        let tx_builder = Arc::new(MockTxBuilder {
+            captured: Mutex::new(Vec::new()),
+        });
+
+        // No opening_provider — falls back to NoopConfidentialOpeningProvider
+        let svc = EsploraSweepService::new("http://localhost:1").with_deps(
+            repo.clone(),
+            Arc::new(MockWallet),
+            tx_builder.clone(),
+        );
+
+        let result = svc.sweep_expired_vtxos(200).await.unwrap();
+        assert_eq!(result.vtxos_swept, 0);
+        assert!(result.tx_ids.is_empty());
+        assert!(
+            tx_builder.captured.lock().unwrap().is_empty(),
+            "no sweep tx built when opening is missing"
+        );
+        assert!(
+            repo.marked.lock().unwrap().is_empty(),
+            "VTXO not marked swept"
+        );
+    }
+
+    /// Issue #549: mixed-round (transparent + confidential) sweeps cleanly.
+    #[tokio::test]
+    async fn test_esplora_mixed_round_sweep() {
+        let conf = make_conf(1);
+        let plain = make_plain(2, 30_000);
+
+        let repo = Arc::new(MockRepo {
+            expired: vec![conf, plain],
+            marked: Mutex::new(Vec::new()),
+        });
+        let tx_builder = Arc::new(MockTxBuilder {
+            captured: Mutex::new(Vec::new()),
+        });
+
+        let svc = EsploraSweepService::new("http://localhost:1")
+            .with_deps(repo.clone(), Arc::new(MockWallet), tx_builder.clone())
+            .with_opening_provider(Arc::new(FixedOpeningProvider(ConfidentialOpening::new(
+                15_000, [0xaa; 32],
+            ))));
+
+        let result = svc.sweep_expired_vtxos(200).await.unwrap();
+        assert_eq!(result.vtxos_swept, 2);
+        assert_eq!(result.sats_recovered, 45_000);
+
+        let captured = tx_builder.captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].len(), 2);
+    }
+
+    /// Regression: the legacy transparent-only path produces an identical
+    /// SweepInput shape (empty tapscripts, plaintext amount) as before #549.
+    #[tokio::test]
+    async fn test_esplora_transparent_sweep_unchanged_regression() {
+        let vtxo = make_plain(9, 50_000);
+
+        let repo = Arc::new(MockRepo {
+            expired: vec![vtxo.clone()],
+            marked: Mutex::new(Vec::new()),
+        });
+        let tx_builder = Arc::new(MockTxBuilder {
+            captured: Mutex::new(Vec::new()),
+        });
+
+        // Default no-op opening provider — transparent must work unchanged.
+        let svc = EsploraSweepService::new("http://localhost:1").with_deps(
+            repo.clone(),
+            Arc::new(MockWallet),
+            tx_builder.clone(),
+        );
+
+        let result = svc.sweep_expired_vtxos(200).await.unwrap();
+        assert_eq!(result.vtxos_swept, 1);
+        assert_eq!(result.sats_recovered, 50_000);
+
+        let captured = tx_builder.captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let inputs = &captured[0];
+        assert_eq!(inputs.len(), 1);
+        assert!(
+            inputs[0].tapscripts.is_empty(),
+            "transparent path must keep tapscripts empty (regression invariant)"
+        );
+        assert_eq!(inputs[0].amount, 50_000);
+        assert_eq!(inputs[0].txid, vtxo.outpoint.txid);
+        assert_eq!(inputs[0].vout, vtxo.outpoint.vout);
+        assert_eq!(inputs[0].pubkey, vtxo.pubkey);
+
+        assert_eq!(repo.marked.lock().unwrap().len(), 1);
     }
 }

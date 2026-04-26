@@ -9,12 +9,13 @@
 use std::sync::Arc;
 use tracing::instrument;
 
+use crate::confidential_sweep::sweep_input_for_vtxo;
 use crate::domain::events::ArkEvent;
 use crate::domain::Vtxo;
 use crate::error::ArkResult;
 use crate::ports::{
-    EventPublisher, NoopNotifier, Notifier, SignerService, SweepInput, TxBuilder, VtxoRepository,
-    WalletService,
+    ConfidentialOpeningProvider, EventPublisher, NoopConfidentialOpeningProvider, NoopNotifier,
+    Notifier, SignerService, TxBuilder, VtxoRepository, WalletService,
 };
 
 /// Sweeps expired VTXOs back to the ASP.
@@ -22,6 +23,14 @@ use crate::ports::{
 /// When a [`Notifier`] is configured (e.g. `dark_nostr::NostrNotifier`),
 /// the sweeper will send VTXO expiry notifications to affected users
 /// before publishing the sweep event. (Issue #247)
+///
+/// # Confidential VTXOs (#549)
+/// When the [`ConfidentialOpeningProvider`] returns an opening for a
+/// confidential VTXO, the sweep input is constructed via
+/// [`crate::confidential_sweep::sweep_input_for_vtxo`] which threads the
+/// opening into the witness so on-chain validators can recompute the
+/// Pedersen commitment. When the provider returns `None`, confidential VTXOs
+/// are skipped (left unswept) and the transparent path is unchanged.
 pub struct Sweeper {
     vtxo_repo: Arc<dyn VtxoRepository>,
     events: Arc<dyn EventPublisher>,
@@ -29,6 +38,7 @@ pub struct Sweeper {
     tx_builder: Arc<dyn TxBuilder>,
     wallet: Arc<dyn WalletService>,
     signer: Arc<dyn SignerService>,
+    opening_provider: Arc<dyn ConfidentialOpeningProvider>,
 }
 
 impl Sweeper {
@@ -47,12 +57,21 @@ impl Sweeper {
             tx_builder,
             wallet,
             signer,
+            opening_provider: Arc::new(NoopConfidentialOpeningProvider),
         }
     }
 
     /// Create a sweeper with a custom notifier for VTXO expiry alerts.
     pub fn with_notifier(mut self, notifier: Arc<dyn Notifier>) -> Self {
         self.notifier = notifier;
+        self
+    }
+
+    /// Plug in a confidential opening provider (#549). Without this, the
+    /// sweeper falls back to the no-op provider and silently skips
+    /// confidential VTXOs.
+    pub fn with_opening_provider(mut self, provider: Arc<dyn ConfidentialOpeningProvider>) -> Self {
+        self.opening_provider = provider;
         self
     }
 
@@ -73,10 +92,16 @@ impl Sweeper {
 
         // Filter out dust VTXOs from automatic sweep — they're uneconomical
         // to sweep. The admin sweep endpoint can force-sweep them.
+        //
+        // Note: dust filtering uses the plaintext `amount` field, which is
+        // zero for confidential VTXOs (#530). For confidential VTXOs we
+        // therefore keep them in the expired set — the dust check happens
+        // again on the opening's claimed amount once the
+        // `ConfidentialOpeningProvider` resolves it.
         let dust_threshold = 546u64; // Bitcoin dust limit
         let non_dust: Vec<Vtxo> = expired
             .into_iter()
-            .filter(|v| v.amount >= dust_threshold)
+            .filter(|v| v.is_confidential() || v.amount >= dust_threshold)
             .collect();
         let expired = non_dust;
         let count = expired.len() as u32;
@@ -121,12 +146,56 @@ impl Sweeper {
             // (the sweep input doesn't exist). That's OK — the VTXO is already
             // marked as swept. The on-chain sweep can be retried later or done
             // via the admin sweep endpoint.
-            let sweep_input = SweepInput {
-                txid: vtxo.outpoint.txid.clone(),
-                vout: vtxo.outpoint.vout,
-                amount: vtxo.amount,
-                tapscripts: Vec::new(), // TxBuilder resolves scripts from the tree
-                pubkey: vtxo.pubkey.clone(),
+            //
+            // For confidential VTXOs (#549) we resolve the Pedersen-commitment
+            // opening via the ConfidentialOpeningProvider. Transparent VTXOs
+            // skip this entirely; the helper produces an identical SweepInput
+            // to the pre-#549 code path. Confidential VTXOs without an opening
+            // are skipped (left unswept) — silently sweeping with a fabricated
+            // amount would let the operator steal funds.
+            let sweep_input = if vtxo.is_confidential() {
+                let opening = match self.opening_provider.opening_for(vtxo).await {
+                    Ok(Some(o)) => o,
+                    Ok(None) => {
+                        tracing::warn!(
+                            vtxo_id = %vtxo_id,
+                            "Confidential VTXO has no opening; leaving unswept on-chain (DB-marked swept)"
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            vtxo_id = %vtxo_id,
+                            error = %e,
+                            "Confidential opening lookup failed; skipping on-chain sweep"
+                        );
+                        continue;
+                    }
+                };
+                match sweep_input_for_vtxo(vtxo, Some(&opening)) {
+                    Ok(input) => input,
+                    Err(e) => {
+                        tracing::warn!(
+                            vtxo_id = %vtxo_id,
+                            error = %e,
+                            "Failed to build confidential sweep input; skipping"
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                // Transparent path — preserved verbatim.
+                match sweep_input_for_vtxo(vtxo, None) {
+                    Ok(input) => input,
+                    Err(e) => {
+                        tracing::warn!(
+                            vtxo_id = %vtxo_id,
+                            error = %e,
+                            "Failed to build transparent sweep input; skipping"
+                        );
+                        continue;
+                    }
+                }
             };
 
             match self.tx_builder.build_sweep_tx(&[sweep_input]).await {
@@ -203,7 +272,7 @@ mod tests {
     use crate::domain::{FlatTxTree, Intent, VtxoOutpoint};
     use crate::ports::{
         BlockTimestamp, BoardingInput, CommitmentTxResult, LoggingEventPublisher,
-        SignedBoardingInput, SweepableOutput, TxInput, ValidForfeitTx, WalletStatus,
+        SignedBoardingInput, SweepInput, SweepableOutput, TxInput, ValidForfeitTx, WalletStatus,
     };
     use async_trait::async_trait;
     use bitcoin::XOnlyPublicKey;
@@ -425,5 +494,83 @@ mod tests {
         let sweeper = make_sweeper(MockVtxoRepo::with_vtxos(vtxos));
         let count = sweeper.sweep_expired(1_000, None).await.unwrap();
         assert_eq!(count, 3);
+    }
+
+    // ── Confidential sweeper tests (#549) ───────────────────────────
+
+    use crate::confidential_sweep::ConfidentialOpening;
+    use crate::domain::vtxo::ConfidentialPayload;
+    use crate::ports::ConfidentialOpeningProvider;
+
+    fn make_conf_payload(seed: u8) -> ConfidentialPayload {
+        let mut commitment = [0u8; 33];
+        commitment[0] = 0x02;
+        commitment[1] = seed.max(1);
+        ConfidentialPayload::new(commitment, vec![0xab; 8], [seed; 32], {
+            let mut e = [0u8; 33];
+            e[0] = 0x03;
+            e[1] = seed;
+            e
+        })
+    }
+
+    fn make_conf_vtxo(txid: &str, expires_at: i64) -> Vtxo {
+        let mut v = Vtxo::new_confidential(
+            VtxoOutpoint::new(txid.to_string(), 0),
+            "deadbeef".to_string(),
+            make_conf_payload(7),
+        );
+        v.expires_at = expires_at;
+        v
+    }
+
+    struct FixedOpening(ConfidentialOpening);
+    #[async_trait]
+    impl ConfidentialOpeningProvider for FixedOpening {
+        async fn opening_for(&self, _vtxo: &Vtxo) -> ArkResult<Option<ConfidentialOpening>> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    /// Issue #549 acceptance: confidential expired VTXO is counted as swept
+    /// when the operator holds the opening.
+    #[tokio::test]
+    async fn test_sweeper_confidential_with_opening_counts_as_swept() {
+        let vtxo = make_conf_vtxo("conf_tx", 500);
+        let sweeper = make_sweeper(MockVtxoRepo::with_vtxos(vec![vtxo])).with_opening_provider(
+            Arc::new(FixedOpening(ConfidentialOpening::new(25_000, [0xcd; 32]))),
+        );
+        let count = sweeper.sweep_expired(1_000, None).await.unwrap();
+        assert_eq!(count, 1, "confidential VTXO with opening counts as swept");
+    }
+
+    /// Issue #549 negative path: confidential VTXO with no opening provider
+    /// is still counted as swept in the DB (the existing convention) but the
+    /// on-chain sweep tx is skipped — the test verifies the count and that
+    /// the cycle does not panic.
+    #[tokio::test]
+    async fn test_sweeper_confidential_without_opening_no_panic() {
+        let vtxo = make_conf_vtxo("conf_tx_2", 500);
+        // Default no-op opening provider
+        let sweeper = make_sweeper(MockVtxoRepo::with_vtxos(vec![vtxo]));
+        let count = sweeper.sweep_expired(1_000, None).await.unwrap();
+        // The count reflects DB-level swept marking; the on-chain sweep
+        // is the part that's skipped. Both behaviors are acceptable per
+        // the issue (the on-chain tx can be retried later).
+        assert_eq!(count, 1);
+    }
+
+    /// Issue #549 acceptance: mixed-round sweep with both transparent and
+    /// confidential VTXOs.
+    #[tokio::test]
+    async fn test_sweeper_mixed_round_counts_all() {
+        let plain = make_vtxo("plain_tx", 100);
+        let conf = make_conf_vtxo("conf_tx", 100);
+        let sweeper = make_sweeper(MockVtxoRepo::with_vtxos(vec![plain, conf]))
+            .with_opening_provider(Arc::new(FixedOpening(ConfidentialOpening::new(
+                10_000, [0xee; 32],
+            ))));
+        let count = sweeper.sweep_expired(1_000, None).await.unwrap();
+        assert_eq!(count, 2, "mixed-round sweep counts both variants");
     }
 }

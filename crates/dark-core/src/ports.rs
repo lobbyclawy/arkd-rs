@@ -316,6 +316,44 @@ pub struct SweepInput {
     pub pubkey: String,
 }
 
+/// Resolves the Pedersen-commitment opening for a confidential VTXO when the
+/// operator is sweeping it back (issue #549).
+///
+/// The default no-op implementation returns `None` for every input, which
+/// causes the sweep cycles to skip confidential VTXOs without taking
+/// action — the safe, conservative behaviour for environments that have no
+/// opening store wired up yet.
+///
+/// Concrete implementations live in the operator-side wallet/store crates.
+#[async_trait]
+pub trait ConfidentialOpeningProvider: Send + Sync {
+    /// Resolve the opening `(amount, blinding)` for a confidential VTXO, or
+    /// `None` if the operator does not (yet) hold the opening — in which case
+    /// the sweep cycle skips the VTXO and leaves it unswept.
+    async fn opening_for(
+        &self,
+        vtxo: &Vtxo,
+    ) -> ArkResult<Option<crate::confidential_sweep::ConfidentialOpening>>;
+}
+
+/// Default no-op opening provider. Returns `None` for every VTXO.
+///
+/// Wire this into [`crate::sweeper::Sweeper`] /
+/// [`crate::sweep::TxBuilderSweepService`] when no opening store is available;
+/// confidential VTXOs will be skipped (and remain unswept on retry) until a
+/// real provider is plugged in.
+pub struct NoopConfidentialOpeningProvider;
+
+#[async_trait]
+impl ConfidentialOpeningProvider for NoopConfidentialOpeningProvider {
+    async fn opening_for(
+        &self,
+        _vtxo: &Vtxo,
+    ) -> ArkResult<Option<crate::confidential_sweep::ConfidentialOpening>> {
+        Ok(None)
+    }
+}
+
 /// A sweepable batch output from a VTXO tree.
 #[derive(Debug, Clone)]
 pub struct SweepableOutput {
