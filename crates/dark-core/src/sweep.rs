@@ -10,11 +10,13 @@ use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, instrument, warn};
 
+use crate::confidential_sweep::sweep_input_for_vtxo;
 use crate::domain::Vtxo;
 use crate::error::ArkResult;
 use crate::ports::{
-    NoopNotifier, Notifier, RoundRepository, SignerService, SweepInput, SweepResult, SweepService,
-    TxBuilder, VtxoRepository, WalletService,
+    ConfidentialOpeningProvider, NoopConfidentialOpeningProvider, NoopNotifier, Notifier,
+    RoundRepository, SignerService, SweepInput, SweepResult, SweepService, TxBuilder,
+    VtxoRepository, WalletService,
 };
 
 /// Sweep configuration
@@ -349,6 +351,9 @@ pub struct TxBuilderSweepService {
     signer: Arc<dyn SignerService>,
     /// Notifier for VTXO expiry alerts (Issue #247)
     notifier: Arc<dyn Notifier>,
+    /// Resolves Pedersen-commitment openings for confidential VTXOs (#549).
+    /// The default no-op provider skips confidential VTXOs.
+    opening_provider: Arc<dyn ConfidentialOpeningProvider>,
     /// Maximum VTXOs per sweep transaction
     max_per_tx: usize,
     /// Minimum total sats to justify a sweep
@@ -371,6 +376,7 @@ impl TxBuilderSweepService {
             wallet,
             signer,
             notifier: Arc::new(NoopNotifier),
+            opening_provider: Arc::new(NoopConfidentialOpeningProvider),
             max_per_tx: 100,
             min_amount: 10_000,
         }
@@ -379,6 +385,13 @@ impl TxBuilderSweepService {
     /// Set a notifier for VTXO expiry alerts (Issue #247).
     pub fn with_notifier(mut self, notifier: Arc<dyn Notifier>) -> Self {
         self.notifier = notifier;
+        self
+    }
+
+    /// Plug in a confidential opening provider (#549). Without this, the
+    /// service falls back to the no-op provider and skips confidential VTXOs.
+    pub fn with_opening_provider(mut self, provider: Arc<dyn ConfidentialOpeningProvider>) -> Self {
+        self.opening_provider = provider;
         self
     }
 
@@ -503,7 +516,58 @@ impl SweepService for TxBuilderSweepService {
         // Group into batches of max_per_tx
         let mut result = SweepResult::default();
         for chunk in expired.chunks(self.max_per_tx) {
-            let total_sats: u64 = chunk.iter().map(|v| v.amount).sum();
+            // Resolve per-VTXO sweep inputs. For confidential VTXOs (#549) the
+            // opening_provider supplies the (amount, blinding) needed to open
+            // the Pedersen commitment; without it we drop the VTXO from this
+            // batch (it stays unswept and will be retried). Transparent VTXOs
+            // are processed exactly as before.
+            let mut inputs: Vec<SweepInput> = Vec::with_capacity(chunk.len());
+            let mut included: Vec<Vtxo> = Vec::with_capacity(chunk.len());
+            let mut total_sats: u64 = 0;
+            for vtxo in chunk {
+                let input = if vtxo.is_confidential() {
+                    let opening = match self.opening_provider.opening_for(vtxo).await {
+                        Ok(Some(o)) => o,
+                        Ok(None) => {
+                            warn!(
+                                vtxo_id = %vtxo.outpoint,
+                                "Confidential VTXO has no opening; skipping (will retry)"
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!(
+                                vtxo_id = %vtxo.outpoint,
+                                error = %e,
+                                "Confidential opening lookup failed; skipping VTXO"
+                            );
+                            continue;
+                        }
+                    };
+                    match sweep_input_for_vtxo(vtxo, Some(&opening)) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            warn!(
+                                vtxo_id = %vtxo.outpoint,
+                                error = %e,
+                                "Failed to build confidential sweep input; skipping VTXO"
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    Self::vtxo_to_sweep_input(vtxo)
+                };
+                total_sats = total_sats.saturating_add(input.amount);
+                inputs.push(input);
+                included.push(vtxo.clone());
+            }
+
+            if inputs.is_empty() {
+                debug!("Sweep batch empty after opening resolution, skipping");
+                continue;
+            }
+
             if total_sats < self.min_amount {
                 debug!(
                     total_sats,
@@ -513,8 +577,7 @@ impl SweepService for TxBuilderSweepService {
                 continue;
             }
 
-            let inputs: Vec<SweepInput> = chunk.iter().map(Self::vtxo_to_sweep_input).collect();
-            match self.sweep_batch(&inputs, chunk, total_sats).await {
+            match self.sweep_batch(&inputs, &included, total_sats).await {
                 Ok((txid, count, sats)) => {
                     result.vtxos_swept += count;
                     result.sats_recovered += sats;
@@ -982,5 +1045,425 @@ mod tests {
         assert_eq!(input.txid, "abc123");
         assert_eq!(input.vout, 7);
         assert_eq!(input.amount, 42_000);
+    }
+
+    // ── Confidential VTXO sweep tests (#549) ────────────────────────
+
+    use crate::confidential_sweep::ConfidentialOpening;
+    use crate::domain::vtxo::ConfidentialPayload;
+    use crate::ports::{ConfidentialOpeningProvider, NoopConfidentialOpeningProvider};
+    use std::sync::Mutex;
+
+    /// MockTxBuilder variant that captures the inputs passed to build_sweep_tx,
+    /// so tests can assert the witness-script contents on the confidential
+    /// sweep path (#549).
+    struct CapturingTxBuilder {
+        captured: Mutex<Vec<Vec<SweepInput>>>,
+        fail: bool,
+    }
+
+    impl CapturingTxBuilder {
+        fn new() -> Self {
+            Self {
+                captured: Mutex::new(Vec::new()),
+                fail: false,
+            }
+        }
+        fn failing() -> Self {
+            Self {
+                captured: Mutex::new(Vec::new()),
+                fail: true,
+            }
+        }
+        fn captured(&self) -> Vec<Vec<SweepInput>> {
+            self.captured.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl TxBuilder for CapturingTxBuilder {
+        async fn build_commitment_tx(
+            &self,
+            _signer_pubkey: &XOnlyPublicKey,
+            _intents: &[Intent],
+            _boarding_inputs: &[BoardingInput],
+        ) -> ArkResult<CommitmentTxResult> {
+            Ok(CommitmentTxResult {
+                commitment_tx: String::new(),
+                vtxo_tree: Vec::new(),
+                connector_address: String::new(),
+                connectors: Vec::new(),
+            })
+        }
+        async fn verify_forfeit_txs(
+            &self,
+            _vtxos: &[Vtxo],
+            _connectors: &FlatTxTree,
+            _txs: &[String],
+        ) -> ArkResult<Vec<ValidForfeitTx>> {
+            Ok(Vec::new())
+        }
+        async fn build_sweep_tx(&self, inputs: &[SweepInput]) -> ArkResult<(String, String)> {
+            self.captured.lock().unwrap().push(inputs.to_vec());
+            if self.fail {
+                return Err(crate::error::ArkError::Internal(
+                    "forced build failure".into(),
+                ));
+            }
+            Ok((
+                format!("sweep_txid_{}", inputs.len()),
+                format!("sweep_psbt_{}", inputs.len()),
+            ))
+        }
+        async fn get_sweepable_batch_outputs(
+            &self,
+            _vtxo_tree: &FlatTxTree,
+        ) -> ArkResult<Option<SweepableOutput>> {
+            Ok(None)
+        }
+        async fn finalize_and_extract(&self, tx: &str) -> ArkResult<String> {
+            Ok(format!("final_{tx}"))
+        }
+        async fn verify_vtxo_tapscript_sigs(
+            &self,
+            _tx: &str,
+            _must_include_signer: bool,
+        ) -> ArkResult<bool> {
+            Ok(true)
+        }
+        async fn verify_boarding_tapscript_sigs(
+            &self,
+            _signed_tx: &str,
+            _commitment_tx: &str,
+        ) -> ArkResult<std::collections::HashMap<u32, SignedBoardingInput>> {
+            Ok(std::collections::HashMap::new())
+        }
+    }
+
+    /// Mock VtxoRepo that records calls to `mark_vtxos_swept`.
+    struct RecordingVtxoRepo {
+        expired: Vec<Vtxo>,
+        marked_swept: Mutex<Vec<Vtxo>>,
+    }
+
+    impl RecordingVtxoRepo {
+        fn with_expired(expired: Vec<Vtxo>) -> Self {
+            Self {
+                expired,
+                marked_swept: Mutex::new(Vec::new()),
+            }
+        }
+        fn swept(&self) -> Vec<Vtxo> {
+            self.marked_swept.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl VtxoRepository for RecordingVtxoRepo {
+        async fn add_vtxos(&self, _vtxos: &[Vtxo]) -> ArkResult<()> {
+            Ok(())
+        }
+        async fn get_vtxos(&self, _outpoints: &[VtxoOutpoint]) -> ArkResult<Vec<Vtxo>> {
+            Ok(vec![])
+        }
+        async fn get_all_vtxos_for_pubkey(
+            &self,
+            _pubkey: &str,
+        ) -> ArkResult<(Vec<Vtxo>, Vec<Vtxo>)> {
+            Ok((vec![], vec![]))
+        }
+        async fn spend_vtxos(
+            &self,
+            _spent: &[(VtxoOutpoint, String)],
+            _ark_txid: &str,
+        ) -> ArkResult<()> {
+            Ok(())
+        }
+        async fn find_expired_vtxos(&self, _before_timestamp: i64) -> ArkResult<Vec<Vtxo>> {
+            Ok(self.expired.clone())
+        }
+        async fn mark_vtxos_swept(&self, vtxos: &[Vtxo]) -> ArkResult<()> {
+            self.marked_swept.lock().unwrap().extend_from_slice(vtxos);
+            Ok(())
+        }
+    }
+
+    /// Opening provider that returns a fixed opening for every VTXO.
+    struct FixedOpeningProvider {
+        opening: ConfidentialOpening,
+    }
+
+    #[async_trait]
+    impl ConfidentialOpeningProvider for FixedOpeningProvider {
+        async fn opening_for(&self, _vtxo: &Vtxo) -> ArkResult<Option<ConfidentialOpening>> {
+            Ok(Some(self.opening.clone()))
+        }
+    }
+
+    fn make_payload(seed: u8) -> ConfidentialPayload {
+        let mut commitment = [0u8; 33];
+        commitment[0] = 0x02;
+        commitment[1] = seed.max(1);
+        ConfidentialPayload::new(commitment, vec![0xab; 8], [seed; 32], {
+            let mut e = [0u8; 33];
+            e[0] = 0x03;
+            e[1] = seed;
+            e
+        })
+    }
+
+    fn make_confidential_vtxo(seed: u8) -> Vtxo {
+        let mut v = Vtxo::new_confidential(
+            VtxoOutpoint::new(format!("conf_tx_{seed}"), u32::from(seed)),
+            "deadbeef".to_string(),
+            make_payload(seed),
+        );
+        v.expires_at = 100;
+        v.expires_at_block = 50;
+        v
+    }
+
+    fn make_transparent_vtxo(seed: u8, amount: u64) -> Vtxo {
+        let mut v = Vtxo::new(
+            VtxoOutpoint::new(format!("plain_tx_{seed}"), u32::from(seed)),
+            amount,
+            "feedbeef".to_string(),
+        );
+        v.expires_at = 100;
+        v.expires_at_block = 50;
+        v
+    }
+
+    /// Issue #549: confidential VTXO past CSV → sweep tx is constructed,
+    /// witness opens the commitment correctly, swept flag set on success.
+    #[tokio::test]
+    async fn test_confidential_sweep_constructs_witness_with_opening() {
+        let vtxo = make_confidential_vtxo(7);
+        let payload = vtxo.confidential.clone().unwrap();
+        let opening = ConfidentialOpening::new(50_000, [0xcd; 32]);
+
+        let tx_builder = Arc::new(CapturingTxBuilder::new());
+        let repo = Arc::new(RecordingVtxoRepo::with_expired(vec![vtxo.clone()]));
+        let svc = TxBuilderSweepService::new(
+            tx_builder.clone(),
+            repo.clone(),
+            Arc::new(MockRoundRepo),
+            Arc::new(MockWallet),
+            Arc::new(MockSigner),
+        )
+        .with_opening_provider(Arc::new(FixedOpeningProvider { opening }))
+        .with_min_amount(1);
+
+        let result = svc.sweep_expired_vtxos(200).await.unwrap();
+
+        // 1. Sweep tx built and broadcast
+        assert_eq!(result.vtxos_swept, 1, "one confidential VTXO swept");
+        assert_eq!(result.sats_recovered, 50_000, "amount comes from opening");
+        assert_eq!(result.tx_ids.len(), 1);
+
+        // 2. Witness contains the commitment opening
+        let captured = tx_builder.captured();
+        assert_eq!(captured.len(), 1, "exactly one batch built");
+        let inputs = &captured[0];
+        assert_eq!(inputs.len(), 1);
+        let input = &inputs[0];
+        assert_eq!(input.amount, 50_000);
+        assert_eq!(
+            input.tapscripts.len(),
+            1,
+            "confidential exit script attached"
+        );
+        let script = &input.tapscripts[0];
+        // The stub script encodes commitment + amount + blinding
+        assert!(
+            script.contains(&hex::encode(payload.amount_commitment)),
+            "exit script must reference commitment"
+        );
+        assert!(
+            script.contains(&hex::encode(50_000u64.to_be_bytes())),
+            "exit script must reveal amount"
+        );
+        assert!(
+            script.contains(&hex::encode([0xcd; 32])),
+            "exit script must include blinding factor"
+        );
+
+        // 3. Repo marked the confidential VTXO as swept
+        let swept = repo.swept();
+        assert_eq!(swept.len(), 1);
+        assert_eq!(swept[0].outpoint, vtxo.outpoint);
+    }
+
+    /// Issue #549: error path leaves the VTXO unswept when the opening
+    /// provider returns None (operator does not hold the opening).
+    #[tokio::test]
+    async fn test_confidential_sweep_skipped_without_opening() {
+        struct NoOpening;
+        #[async_trait]
+        impl ConfidentialOpeningProvider for NoOpening {
+            async fn opening_for(&self, _vtxo: &Vtxo) -> ArkResult<Option<ConfidentialOpening>> {
+                Ok(None)
+            }
+        }
+
+        let vtxo = make_confidential_vtxo(2);
+        let tx_builder = Arc::new(CapturingTxBuilder::new());
+        let repo = Arc::new(RecordingVtxoRepo::with_expired(vec![vtxo]));
+
+        let svc = TxBuilderSweepService::new(
+            tx_builder.clone(),
+            repo.clone(),
+            Arc::new(MockRoundRepo),
+            Arc::new(MockWallet),
+            Arc::new(MockSigner),
+        )
+        .with_opening_provider(Arc::new(NoOpening))
+        .with_min_amount(1);
+
+        let result = svc.sweep_expired_vtxos(200).await.unwrap();
+
+        assert_eq!(result.vtxos_swept, 0, "no VTXO swept when opening unknown");
+        assert_eq!(result.sats_recovered, 0);
+        assert!(result.tx_ids.is_empty());
+        assert!(
+            tx_builder.captured().is_empty(),
+            "no sweep tx should be built when batch is empty"
+        );
+        assert!(
+            repo.swept().is_empty(),
+            "VTXO must remain unswept on the error path"
+        );
+    }
+
+    /// Issue #549: error path — TxBuilder failure for a confidential sweep
+    /// leaves the VTXO unswept (broadcast never happens).
+    #[tokio::test]
+    async fn test_confidential_sweep_build_failure_leaves_vtxo_unswept() {
+        let vtxo = make_confidential_vtxo(9);
+        let opening = ConfidentialOpening::new(20_000, [0x33; 32]);
+        let tx_builder = Arc::new(CapturingTxBuilder::failing());
+        let repo = Arc::new(RecordingVtxoRepo::with_expired(vec![vtxo]));
+
+        let svc = TxBuilderSweepService::new(
+            tx_builder.clone(),
+            repo.clone(),
+            Arc::new(MockRoundRepo),
+            Arc::new(MockWallet),
+            Arc::new(MockSigner),
+        )
+        .with_opening_provider(Arc::new(FixedOpeningProvider { opening }))
+        .with_min_amount(1);
+
+        let result = svc.sweep_expired_vtxos(200).await.unwrap();
+
+        assert_eq!(result.vtxos_swept, 0);
+        assert!(result.tx_ids.is_empty());
+        // build_sweep_tx was attempted (and failed) — that's the contract:
+        // batch failure must not mark VTXOs swept.
+        assert_eq!(tx_builder.captured().len(), 1);
+        assert!(
+            repo.swept().is_empty(),
+            "VTXO must remain unswept when sweep tx build fails"
+        );
+    }
+
+    /// Issue #549 acceptance: mixed-round sweep — a round with both
+    /// transparent and confidential VTXOs sweeps cleanly in one batch.
+    #[tokio::test]
+    async fn test_mixed_round_sweep_handles_both_variants() {
+        let conf = make_confidential_vtxo(1);
+        let conf2 = make_confidential_vtxo(2);
+        let plain = make_transparent_vtxo(3, 30_000);
+        let plain2 = make_transparent_vtxo(4, 40_000);
+        let opening = ConfidentialOpening::new(15_000, [0xaa; 32]);
+
+        let tx_builder = Arc::new(CapturingTxBuilder::new());
+        let repo = Arc::new(RecordingVtxoRepo::with_expired(vec![
+            conf.clone(),
+            plain.clone(),
+            conf2.clone(),
+            plain2.clone(),
+        ]));
+
+        let svc = TxBuilderSweepService::new(
+            tx_builder.clone(),
+            repo.clone(),
+            Arc::new(MockRoundRepo),
+            Arc::new(MockWallet),
+            Arc::new(MockSigner),
+        )
+        .with_opening_provider(Arc::new(FixedOpeningProvider { opening }))
+        .with_min_amount(1);
+
+        let result = svc.sweep_expired_vtxos(200).await.unwrap();
+
+        // All four swept; sats = 30k + 40k + 15k + 15k
+        assert_eq!(result.vtxos_swept, 4);
+        assert_eq!(result.sats_recovered, 30_000 + 40_000 + 15_000 + 15_000);
+        assert_eq!(result.tx_ids.len(), 1, "single batch for mixed round");
+
+        let inputs = &tx_builder.captured()[0];
+        assert_eq!(inputs.len(), 4);
+
+        // Confidential inputs have tapscripts populated; transparent inputs
+        // leave them empty for the TxBuilder to resolve from the tree.
+        let conf_inputs: Vec<_> = inputs.iter().filter(|i| !i.tapscripts.is_empty()).collect();
+        let plain_inputs: Vec<_> = inputs.iter().filter(|i| i.tapscripts.is_empty()).collect();
+        assert_eq!(
+            conf_inputs.len(),
+            2,
+            "two confidential inputs with witness scripts"
+        );
+        assert_eq!(
+            plain_inputs.len(),
+            2,
+            "two transparent inputs without witness scripts"
+        );
+
+        // Repo marks all four
+        assert_eq!(repo.swept().len(), 4);
+    }
+
+    /// Regression: a transparent expired VTXO still sweeps the same way as
+    /// before #549 — empty tapscripts, plaintext amount, repo marks swept.
+    #[tokio::test]
+    async fn test_transparent_sweep_unchanged_regression() {
+        let vtxo = make_transparent_vtxo(1, 50_000);
+        let tx_builder = Arc::new(CapturingTxBuilder::new());
+        let repo = Arc::new(RecordingVtxoRepo::with_expired(vec![vtxo.clone()]));
+
+        // Default no-op opening provider: confidential VTXOs would be skipped
+        // but transparent must work unchanged.
+        let svc = TxBuilderSweepService::new(
+            tx_builder.clone(),
+            repo.clone(),
+            Arc::new(MockRoundRepo),
+            Arc::new(MockWallet),
+            Arc::new(MockSigner),
+        )
+        .with_opening_provider(Arc::new(NoopConfidentialOpeningProvider));
+
+        let result = svc.sweep_expired_vtxos(200).await.unwrap();
+
+        assert_eq!(result.vtxos_swept, 1, "transparent VTXO must still sweep");
+        assert_eq!(result.sats_recovered, 50_000);
+        assert_eq!(result.tx_ids.len(), 1);
+
+        // Critical regression invariants for the transparent path:
+        let inputs = &tx_builder.captured()[0];
+        assert_eq!(inputs.len(), 1);
+        assert!(
+            inputs[0].tapscripts.is_empty(),
+            "transparent path MUST keep tapscripts empty (TxBuilder resolves from tree)"
+        );
+        assert_eq!(inputs[0].amount, 50_000);
+        assert_eq!(inputs[0].txid, vtxo.outpoint.txid);
+        assert_eq!(inputs[0].vout, vtxo.outpoint.vout);
+        assert_eq!(inputs[0].pubkey, vtxo.pubkey);
+
+        // Repo correctly marked it
+        let swept = repo.swept();
+        assert_eq!(swept.len(), 1);
+        assert_eq!(swept[0].outpoint, vtxo.outpoint);
     }
 }

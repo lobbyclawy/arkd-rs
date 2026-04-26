@@ -17,6 +17,7 @@ pub mod application;
 pub mod boarding;
 #[cfg(feature = "compliance-proofs")]
 pub mod compliance;
+pub mod confidential_sweep;
 pub mod cosigning;
 pub mod domain;
 pub mod error;
