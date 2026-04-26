@@ -14,9 +14,9 @@
 //! [`Vtxo`] get exactly the [`SweepInput`] they got before this module existed.
 //!
 //! # Hook point
-//! [`crate::sweeper::Sweeper::sweep_expired`] and
-//! [`crate::sweep::TxBuilderSweepService::sweep_expired_vtxos`] both dispatch
-//! on [`Vtxo::is_confidential`] when constructing the per-VTXO
+//! `Sweeper::sweep_expired` (in [`crate::sweeper`]) and
+//! `TxBuilderSweepService::sweep_expired_vtxos` (in [`crate::sweep`]) both
+//! dispatch on [`Vtxo::is_confidential`] when constructing the per-VTXO
 //! [`SweepInput`]. Selection, broadcast, and mark-as-swept logic is shared.
 //!
 //! # Stubs
