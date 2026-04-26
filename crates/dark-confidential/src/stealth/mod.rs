@@ -29,7 +29,9 @@ pub mod derivation;
 pub mod keys;
 pub mod meta_address;
 pub mod network;
+pub mod sender;
 
 pub use keys::{ScanKey, SpendKey};
 pub use meta_address::{MetaAddress, StealthSecrets, META_ADDRESS_VERSION_V1};
 pub use network::StealthNetwork;
+pub use sender::{derive_one_time_output, StealthOutput, STEALTH_KDF_DST};
