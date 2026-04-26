@@ -40,6 +40,86 @@ pub struct RoundAnnouncement {
     pub ephemeral_pubkey: String,
 }
 
+/// Persistent storage for per-round stealth announcements (issue #556).
+///
+/// Round announcements are the public `(round_id, vtxo_id, ephemeral_pubkey)`
+/// tuples scanning clients fetch to detect incoming stealth VTXOs. Each
+/// announcement is tagged with the on-chain `block_height` of the round so
+/// clients can resume sync after going offline and so the operator can
+/// honour the retention policy from issue #552 (`m5-dd-pruning`).
+///
+/// ## Concurrency contract
+///
+/// - `insert_announcements` MUST be atomic across the batch: either every
+///   tuple lands or none do. Implementations are expected to wrap the
+///   inserts in a single transaction.
+/// - Inserts are idempotent on `(round_id, vtxo_id)`; replaying a round
+///   commit must not duplicate rows.
+/// - The other methods are read-mostly and safe to call concurrently.
+#[async_trait]
+pub trait RoundAnnouncementRepository: Send + Sync {
+    /// Persist a batch of announcements emitted by a single round commit.
+    ///
+    /// `block_height` is the height at which the round committed; it is
+    /// recorded against every row so `prune_before` and `list_after_height`
+    /// can range-scan it.
+    async fn insert_announcements(
+        &self,
+        announcements: &[RoundAnnouncement],
+        block_height: u32,
+    ) -> ArkResult<()>;
+
+    /// List every announcement for a single round, ordered by `vtxo_id`
+    /// for stable iteration.
+    async fn list_for_round(&self, round_id: &str) -> ArkResult<Vec<RoundAnnouncement>>;
+
+    /// List announcements committed at a `block_height` strictly greater
+    /// than `height`, ordered by `(block_height, round_id, vtxo_id)` to
+    /// give scanning clients a stable resume cursor.
+    ///
+    /// `limit` MUST be honoured by the implementation; callers paginate
+    /// by passing the highest `block_height` they have seen back as the
+    /// next `height`.
+    async fn list_after_height(&self, height: u32, limit: u32)
+        -> ArkResult<Vec<RoundAnnouncement>>;
+
+    /// Delete every announcement with `block_height < cutoff_block`.
+    /// Returns the number of rows removed so the pruning job can emit a
+    /// metric.
+    async fn prune_before(&self, cutoff_block: u32) -> ArkResult<u64>;
+}
+
+/// No-op implementation. Inserts and prunes report success; reads return
+/// empty. Wire this when announcement persistence is not yet configured.
+pub struct NoopRoundAnnouncementRepository;
+
+#[async_trait]
+impl RoundAnnouncementRepository for NoopRoundAnnouncementRepository {
+    async fn insert_announcements(
+        &self,
+        _announcements: &[RoundAnnouncement],
+        _block_height: u32,
+    ) -> ArkResult<()> {
+        Ok(())
+    }
+
+    async fn list_for_round(&self, _round_id: &str) -> ArkResult<Vec<RoundAnnouncement>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_after_height(
+        &self,
+        _height: u32,
+        _limit: u32,
+    ) -> ArkResult<Vec<RoundAnnouncement>> {
+        Ok(Vec::new())
+    }
+
+    async fn prune_before(&self, _cutoff_block: u32) -> ArkResult<u64> {
+        Ok(0)
+    }
+}
+
 /// Unified query interface for VTXOs, rounds, and forfeit records.
 ///
 /// Mirrors Go dark's `IndexerService` — provides read-only, cross-repository
