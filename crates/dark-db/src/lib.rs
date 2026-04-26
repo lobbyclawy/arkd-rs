@@ -33,14 +33,16 @@ pub use pool::Database;
 pub use repos::{
     SqliteAssetRepository, SqliteBoardingRepository, SqliteCheckpointRepository,
     SqliteConfirmationStore, SqliteConvictionRepository, SqliteForfeitRepository,
-    SqliteNullifierStore, SqliteOffchainTxRepository, SqliteRoundRepository,
-    SqliteSigningSessionStore, SqliteVtxoRepository,
+    SqliteNullifierStore, SqliteOffchainTxRepository, SqliteRoundAnnouncementRepository,
+    SqliteRoundRepository, SqliteSigningSessionStore, SqliteVtxoRepository,
 };
 
 #[cfg(feature = "postgres")]
 pub use pool_postgres::{create_postgres_pool, run_postgres_migrations};
 #[cfg(feature = "postgres")]
-pub use repos::{PgOffchainTxRepository, PgRoundRepository, PgVtxoRepository};
+pub use repos::{
+    PgOffchainTxRepository, PgRoundAnnouncementRepository, PgRoundRepository, PgVtxoRepository,
+};
 
 pub use sled_repos::{SledConvictionRepository, SledEventStore, SledScheduledSessionRepository};
 

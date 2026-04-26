@@ -20,6 +20,8 @@ pub mod nullifier_store;
 #[cfg(feature = "sqlite")]
 pub mod offchain_tx_repo;
 #[cfg(feature = "sqlite")]
+pub mod round_announcement_repo;
+#[cfg(feature = "sqlite")]
 pub mod round_repo;
 #[cfg(feature = "sqlite")]
 pub mod scheduled_session_repo;
@@ -30,6 +32,8 @@ pub mod vtxo_repo;
 
 #[cfg(feature = "postgres")]
 pub mod offchain_tx_repo_pg;
+#[cfg(feature = "postgres")]
+pub mod round_announcement_repo_pg;
 #[cfg(feature = "postgres")]
 pub mod round_repo_pg;
 #[cfg(feature = "postgres")]
@@ -52,6 +56,8 @@ pub use nullifier_store::SqliteNullifierStore;
 #[cfg(feature = "sqlite")]
 pub use offchain_tx_repo::SqliteOffchainTxRepository;
 #[cfg(feature = "sqlite")]
+pub use round_announcement_repo::SqliteRoundAnnouncementRepository;
+#[cfg(feature = "sqlite")]
 pub use round_repo::SqliteRoundRepository;
 #[cfg(feature = "sqlite")]
 pub use scheduled_session_repo::SqliteScheduledSessionRepository;
@@ -65,6 +71,8 @@ pub mod scheduled_session_repo_pg;
 
 #[cfg(feature = "postgres")]
 pub use offchain_tx_repo_pg::PgOffchainTxRepository;
+#[cfg(feature = "postgres")]
+pub use round_announcement_repo_pg::PgRoundAnnouncementRepository;
 #[cfg(feature = "postgres")]
 pub use round_repo_pg::PgRoundRepository;
 #[cfg(feature = "postgres")]

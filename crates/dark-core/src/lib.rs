@@ -78,10 +78,11 @@ pub use ports::{
     FraudDetector, IndexerService, IndexerStats, LoggingEventPublisher, NewBlockEvent, NoopAlerts,
     NoopBlockchainScanner, NoopCheckpointRepository, NoopConvictionRepository, NoopFeeManager,
     NoopForfeitRepository, NoopFraudDetector, NoopIndexerService, NoopNullifierSink,
-    NoopOffchainTxRepository, NoopScheduledSessionRepository, NoopSweepService, NoopTxDecoder,
-    NullifierSink, OffchainTxRepository, RoundRepository, ScheduledSessionRepository,
-    ScriptSpentEvent, SignerService, SweepResult, SweepService, TxBuilder, TxDecoder, Unlocker,
-    VtxoRepository, WalletBalance, WalletService,
+    NoopOffchainTxRepository, NoopRoundAnnouncementRepository, NoopScheduledSessionRepository,
+    NoopSweepService, NoopTxDecoder, NullifierSink, OffchainTxRepository, RoundAnnouncement,
+    RoundAnnouncementRepository, RoundRepository, ScheduledSessionRepository, ScriptSpentEvent,
+    SignerService, SweepResult, SweepService, TxBuilder, TxDecoder, Unlocker, VtxoRepository,
+    WalletBalance, WalletService,
 };
 pub use round_batching::{
     assert_anchor_path_variant_agnostic, count_variants_from_intents, count_variants_from_vtxos,
