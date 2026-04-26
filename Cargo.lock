@@ -1107,6 +1107,7 @@ dependencies = [
  "dark-api",
  "dark-bitcoin",
  "dark-client",
+ "dark-confidential",
  "dark-core",
  "dark-db",
  "dark-nostr",

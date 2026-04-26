@@ -106,6 +106,8 @@ proptest = "1.5"
 criterion = { version = "0.5", features = ["html_reports"] }
 dark-bitcoin = { path = "crates/dark-bitcoin" }
 dark-client = { path = "crates/dark-client" }
+dark-confidential = { path = "crates/dark-confidential" }
+dark-core = { path = "crates/dark-core" }
 bitcoin = { version = "0.32", features = ["rand", "serde"] }
 secp256k1 = { version = "0.29", features = ["rand"] }
 musig2 = "0.3.1"
@@ -131,6 +133,10 @@ path = "tests/integration/mod.rs"
 [[test]]
 name = "e2e_regtest"
 path = "tests/e2e_regtest.rs"
+
+[[test]]
+name = "e2e_confidential"
+path = "tests/e2e_confidential.rs"
 
 [profile.release]
 opt-level = 3
