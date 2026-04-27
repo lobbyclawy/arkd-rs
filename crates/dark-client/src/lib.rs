@@ -57,6 +57,7 @@ pub mod confidential_exit;
 pub mod confidential_tx;
 pub mod error;
 pub mod explorer;
+pub mod owned_vtxos;
 pub mod restore;
 pub mod sdk;
 pub mod stealth_scan;
@@ -75,6 +76,10 @@ pub use confidential_tx::{
     WalletSeed, SCHEMA_VERSION,
 };
 pub use error::{ClientError, ClientResult};
+pub use owned_vtxos::{
+    EncryptedFileOwnedVtxoStore, InMemoryOwnedVtxoStore, OwnedConfidentialVtxo, OwnedVtxoError,
+    OwnedVtxoStore, ScopeMetadata, SecretBytes,
+};
 pub use restore::{
     restore_from_seed, restore_from_seed_with, RestoreConfig, RestoreError, RestoreProgress,
     RestoreSummary,
