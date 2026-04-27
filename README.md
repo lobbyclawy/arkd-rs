@@ -301,6 +301,12 @@ See [`config.example.toml`](config.example.toml) for a fully documented template
 - **[Light Mode](docs/light-mode.md)** — Simplified deployment without external dependencies
 - **[Operational Runbook](docs/runbook.md)** — Monitoring, maintenance, and troubleshooting
 
+### Confidential VTXOs
+
+- **[SDK: Confidential Transactions](docs/sdk/confidential-transactions.md)** — Step-by-step integrator guide for building confidential txs with `dark-client`
+- **[Migration: Transparent → Confidential](docs/migration/transparent-to-confidential.md)** — What changes for existing wallet integrations; backwards-compatibility guarantees
+- **[Confidential Threat Model](docs/security/confidential-threat-model.md)** — What is hidden, from whom, under which assumptions; adversary models
+
 ---
 
 ## Resources
