@@ -20,6 +20,7 @@ Threat model notes:
 "#]
 
 pub mod balance_proof;
+pub mod blinding;
 pub mod commitment;
 pub mod disclosure;
 pub mod errors;
@@ -30,6 +31,9 @@ pub mod stealth;
 pub mod viewing;
 pub mod vtxo;
 
+pub use blinding::{
+    derive_blinding, derive_blinding_with_round, pack_round_index, BLINDING_KDF_DST, SEED_LEN,
+};
 pub use disclosure::selective_reveal::{
     prove_selective_reveal, verify_selective_reveal, DisclosedFields, SelectiveReveal,
     SELECTIVE_REVEAL_DST,
