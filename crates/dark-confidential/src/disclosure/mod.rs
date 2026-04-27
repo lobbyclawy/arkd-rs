@@ -10,9 +10,13 @@
 //!
 //! - [`bounded_range`] — proves the cleartext amount lies in a
 //!   sender-specified `[lower, upper]` interval (#566).
+//! - [`source_of_funds`] — prove that a VTXO traces back to a stated
+//!   source set of on-chain inputs or Ark round commitments via the
+//!   linkable graph of confidential transactions, without revealing
+//!   intermediate hops' amounts or recipients (#567).
 //!
-//! Future submodules (#565 selective reveal, #567 source-of-funds) plug
-//! into the same scaffolding.
+//! Future submodules (#565 selective reveal) plug into the same
+//! scaffolding.
 //!
 //! # Commitment convention
 //!
@@ -23,6 +27,13 @@
 //! `range_proof::ValueCommitment::commit` to get a commitment the
 //! disclosure proof can bind to.
 //!
+//! Source-of-funds disclosure uses the standard
+//! [`crate::commitment::PedersenCommitment`] and carries its own
+//! `DisclosureError` flavor (re-exported as
+//! [`source_of_funds::DisclosureError`]) so its hop-graph specific
+//! failure modes do not get conflated with the bounded-range / selective
+//! reveal error surface.
+//!
 //! [`ValueCommitment`]: crate::range_proof::ValueCommitment
 
 use secp256k1::Scalar;
@@ -30,9 +41,14 @@ use secp256k1::Scalar;
 use crate::ConfidentialError;
 
 pub mod bounded_range;
+pub mod source_of_funds;
 
 pub use bounded_range::{
     prove_bounded_range, verify_bounded_range, BoundedRangeProof, BOUNDED_RANGE_TRANSCRIPT_DST,
+};
+pub use source_of_funds::{
+    prove_source_of_funds, verify_source_of_funds, ChainRoot, HopProof, SourceLink,
+    SourceOfFundsProof, VtxoOutpoint, SOURCE_OF_FUNDS_DST,
 };
 
 /// Cleartext opening for a Pedersen commitment.

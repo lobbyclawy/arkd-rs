@@ -30,6 +30,10 @@ pub mod stealth;
 pub mod viewing;
 pub mod vtxo;
 
+pub use disclosure::source_of_funds::{
+    prove_source_of_funds, verify_source_of_funds, ChainRoot, DisclosureError, HopProof,
+    PedersenOpening, SourceLink, SourceOfFundsProof, VtxoOutpoint, SOURCE_OF_FUNDS_DST,
+};
 pub use errors::{ConfidentialError, Result};
 pub use exit_script::{build_confidential_exit_script, ConfidentialExitScriptInputs};
 pub use stealth::{MetaAddress, ScanKey, SpendKey, StealthNetwork, StealthSecrets};
