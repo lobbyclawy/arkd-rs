@@ -9624,8 +9624,10 @@ mod tests {
     #[tokio::test]
     async fn test_start_confirmation_fails_without_enough_intents() {
         let events = Arc::new(RecordingEvents::new());
-        let mut config = ArkConfig::default();
-        config.min_intents = 2; // Require at least 2 intents
+        let config = ArkConfig {
+            min_intents: 2, // Require at least 2 intents
+            ..ArkConfig::default()
+        };
         let svc = ArkService::new(
             Arc::new(StubWallet),
             Arc::new(StubSigner),

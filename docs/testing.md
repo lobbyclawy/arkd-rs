@@ -18,6 +18,10 @@ transparent-path compatibility gate for confidential-VTXO work.
 The CI decision logic lives in `.github/scripts/go_e2e_gate.py` and is covered
 by `.github/scripts/test_go_e2e_gate.py`.
 
+GitHub branch protection should require the `Go E2E parity gate` check. That
+job always reports a status: it passes when parity is not required, and it
+fails unless every required Go E2E shard completes successfully.
+
 Go E2E runs automatically when any of the following are true:
 
 - the workflow runs on `push`, `schedule`, or `workflow_dispatch`

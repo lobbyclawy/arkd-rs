@@ -482,3 +482,34 @@ jobs:
           kill $(cat /tmp/block-miner.pid) 2>/dev/null || true
           kill $(cat /tmp/dark-go-e2e.pid) 2>/dev/null || true
           nigiri stop --delete 2>/dev/null || true
+
+  go-e2e-parity-gate:
+    name: Go E2E parity gate
+    needs:
+      - gate-go-e2e
+      - go-e2e
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce confidential parity contract
+        env:
+          GATE_RUN: ${{ needs.gate-go-e2e.outputs.run }}
+          GATE_REASON: ${{ needs.gate-go-e2e.outputs.reason }}
+          GO_E2E_RESULT: ${{ needs.go-e2e.result }}
+        run: |
+          echo "Decision: ${GATE_RUN}"
+          echo "Reason: ${GATE_REASON}"
+          echo "Go E2E result: ${GO_E2E_RESULT}"
+
+          if [ "${GATE_RUN}" != "true" ]; then
+            echo "Go E2E parity is not required for this change."
+            exit 0
+          fi
+
+          if [ "${GO_E2E_RESULT}" = "success" ]; then
+            echo "Go E2E parity passed on all shards."
+            exit 0
+          fi
+
+          echo "::error::Go E2E parity was required but did not succeed (result: ${GO_E2E_RESULT})."
+          exit 1

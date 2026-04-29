@@ -303,7 +303,7 @@ mod tests {
         // Round 2
         let partial_sigs: Vec<PartialSignature> = sks
             .iter()
-            .zip(nonces.into_iter())
+            .zip(nonces)
             .map(|(sk, (sn, _))| {
                 create_partial_sig(&key_agg_ctx, sk, sn, &agg_nonce, &msg).unwrap()
             })

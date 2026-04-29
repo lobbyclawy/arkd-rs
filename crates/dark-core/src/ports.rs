@@ -1085,11 +1085,12 @@ impl OffchainTxRepository for NoopOffchainTxRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, LazyLock};
+    use tokio::sync::Mutex;
     fn _assert_object_safe<T: ?Sized>() {}
 
     // Serialize env-var tests to avoid races between set_var / remove_var
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn test_traits_are_object_safe() {
@@ -1236,7 +1237,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_env_unlocker_missing_var() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         std::env::remove_var("DARK_WALLET_PASS");
         let unlocker = EnvUnlocker;
         let result = unlocker.get_password().await;
@@ -1250,7 +1251,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_env_unlocker_with_var() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         std::env::set_var("DARK_WALLET_PASS", "test-password-123");
         let unlocker = EnvUnlocker;
         let password = unlocker.get_password().await.unwrap();

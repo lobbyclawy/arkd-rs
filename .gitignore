@@ -25,3 +25,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Python / local tooling
+__pycache__/
+**/__pycache__/
+*.pyc
+.tmp_*

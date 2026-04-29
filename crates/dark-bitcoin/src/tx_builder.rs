@@ -34,9 +34,6 @@ use bitcoin::{
     Witness, XOnlyPublicKey,
 };
 
-#[cfg(test)]
-use crate::tapscript::build_vtxo_taproot;
-
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 /// Default CSV delay for VTXO expiry leaves (in blocks).
@@ -1282,7 +1279,7 @@ mod tests {
         let boarding = vec![make_boarding(50_000)];
 
         let r1 = LocalTxBuilder::new("regtest")
-            .build(&asp, &[intent.clone()], &boarding)
+            .build(&asp, std::slice::from_ref(&intent), &boarding)
             .unwrap();
         let r2 = LocalTxBuilder::new("mainnet")
             .build(&asp, &[intent], &boarding)

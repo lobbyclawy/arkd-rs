@@ -420,10 +420,9 @@ mod tests {
         if let Some(byte) = proof.signature.get_mut(5) {
             *byte ^= 0xFF;
         }
-        // Should either return false or error (both are acceptable)
-        match proof.verify(Network::Regtest) {
-            Ok(valid) => assert!(!valid),
-            Err(_) => {} // deserialization error is also fine
+        // Should either return false or error (both are acceptable).
+        if let Ok(valid) = proof.verify(Network::Regtest) {
+            assert!(!valid);
         }
     }
 
