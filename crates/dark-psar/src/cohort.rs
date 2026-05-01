@@ -279,10 +279,8 @@ mod tests {
     #[test]
     fn cohort_new_rejects_empty_member_list() {
         let h = HibernationHorizon::new(1, 12).unwrap();
-        assert_eq!(
-            Cohort::new([0u8; 32], vec![], h),
-            Err(PsarError::EmptyCohort)
-        );
+        let err = Cohort::new([0u8; 32], vec![], h).unwrap_err();
+        assert!(matches!(err, PsarError::EmptyCohort));
     }
 
     #[test]
@@ -319,7 +317,7 @@ mod tests {
             slot_index: 1,
         };
         let err = Cohort::new([0u8; 32], vec![member(9, 0), dup], h).unwrap_err();
-        assert_eq!(err, PsarError::DuplicateUserId);
+        assert!(matches!(err, PsarError::DuplicateUserId));
     }
 
     #[test]
@@ -341,13 +339,13 @@ mod tests {
         let h = HibernationHorizon::new(1, 12).unwrap();
         let mut c = Cohort::new([0u8; 32], vec![member(1, 0)], h).unwrap();
         let err = c.transition(BoardingState::Active).unwrap_err();
-        assert_eq!(
+        assert!(matches!(
             err,
             PsarError::InvalidBoardingState {
                 from: BoardingState::Forming,
                 to: BoardingState::Active,
             }
-        );
+        ));
     }
 
     #[test]

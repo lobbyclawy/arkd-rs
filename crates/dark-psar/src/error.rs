@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::cohort::BoardingState;
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PsarError {
     #[error("horizon n={n} is outside [1, {max_n}]")]
@@ -30,4 +30,32 @@ pub enum PsarError {
         from: BoardingState,
         to: BoardingState,
     },
+
+    #[error("schedule entry invalid at epoch {epoch}, slot {slot}")]
+    ScheduleInvalid { epoch: u32, slot: u8 },
+
+    #[error("slot {slot_index} commits to a different pubkey than the user's keypair")]
+    PubkeyMismatch { slot_index: u32 },
+
+    #[error("slot root in attestation does not match recomputed slot root")]
+    SlotRootMismatch,
+
+    #[error("attestation signature failed to verify")]
+    AttestationVerify,
+
+    #[error("schedule horizon n={schedule_n} disagrees with cohort horizon n={cohort_n}")]
+    HorizonDisagrees { schedule_n: u32, cohort_n: u32 },
+
+    #[error("attestation field {field} disagrees with cohort: attest={attest_value}, cohort={cohort_value}")]
+    AttestationFieldMismatch {
+        field: &'static str,
+        attest_value: u32,
+        cohort_value: u32,
+    },
+
+    #[error("dark-von-musig2 error during boarding")]
+    VonMusig2(#[from] dark_von_musig2::VonMusig2Error),
+
+    #[error("user keypair has odd parity; PSAR requires BIP-340 even-parity normalization")]
+    OddParity,
 }

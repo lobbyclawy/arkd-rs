@@ -20,13 +20,17 @@
 #![forbid(unsafe_code)]
 
 pub mod attest;
+pub mod boarding;
 pub mod cohort;
 pub mod error;
+pub mod message;
 #[cfg(feature = "regtest")]
 pub mod publish;
 pub mod slot_tree;
 
 pub use attest::{SlotAttest, SlotAttestError, SlotAttestUnsigned};
+pub use boarding::{user_board, UserBoardingArtifact};
 pub use cohort::{BoardingState, Cohort, CohortMember, HibernationHorizon};
 pub use error::PsarError;
+pub use message::derive_message_for_epoch;
 pub use slot_tree::{Side, Slot, SlotInclusionProof, SlotRoot, SlotTree};
