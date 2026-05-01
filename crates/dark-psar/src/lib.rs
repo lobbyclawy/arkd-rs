@@ -27,10 +27,12 @@ pub mod message;
 #[cfg(feature = "regtest")]
 pub mod publish;
 pub mod slot_tree;
+pub mod store;
 
 pub use attest::{SlotAttest, SlotAttestError, SlotAttestUnsigned};
-pub use boarding::{user_board, UserBoardingArtifact};
+pub use boarding::{asp_board, user_board, ActiveCohort, UserBoardingArtifact};
 pub use cohort::{BoardingState, Cohort, CohortMember, HibernationHorizon};
 pub use error::PsarError;
 pub use message::derive_message_for_epoch;
 pub use slot_tree::{Side, Slot, SlotInclusionProof, SlotRoot, SlotTree};
+pub use store::{ActiveCohortStore, InMemoryActiveCohortStore};

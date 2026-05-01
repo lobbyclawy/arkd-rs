@@ -42,7 +42,7 @@ use rand::Rng;
 use secp256k1::{Keypair, Parity, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey};
 use sha2::{Digest, Sha256};
 
-use crate::attest::SlotAttest;
+use crate::attest::{SlotAttest, SlotAttestUnsigned};
 use crate::cohort::Cohort;
 use crate::error::PsarError;
 use crate::message::derive_message_for_epoch;
@@ -265,6 +265,148 @@ fn compute_schedule_witness(schedule: &PublishedSchedule) -> [u8; 32] {
 /// boarding test harness terse.
 pub fn new_secp() -> Secp256k1<secp256k1::All> {
     Secp256k1::new()
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// ASP-side flow (#671)
+// ───────────────────────────────────────────────────────────────────────────
+
+use std::collections::HashMap;
+
+use dark_von_musig2::setup::{RetainedScalars, Setup};
+
+use crate::cohort::{BoardingState, CohortMember, HibernationHorizon};
+use crate::slot_tree::SlotTree;
+
+/// The artifact of a successful ASP-side boarding flow.
+///
+/// `RetainedScalars` carries the operator-only scalars `{r_{t,b}}` and
+/// auto-zeroizes on drop; do not serialize or transport this struct
+/// outside the ASP's process.
+pub struct ActiveCohort {
+    pub cohort: Cohort,
+    pub retained: RetainedScalars,
+    pub schedule: PublishedSchedule,
+    pub setup_id: [u8; 32],
+    pub slot_root: SlotRoot,
+    pub attest: SlotAttest,
+    /// 32-byte raw txid of the on-chain publication, if step 4 of the
+    /// flow ran (regtest only). `None` for off-chain-only flows used by
+    /// unit tests and the K=100/N=12 happy path.
+    pub publish_txid: Option<[u8; 32]>,
+    /// User boarding artifacts keyed by `user_id`.
+    pub artifacts: HashMap<[u8; 32], UserBoardingArtifact>,
+}
+
+/// ASP-side boarding (#671).
+///
+/// This is the off-chain orchestration entry point: it runs Setup,
+/// builds the slot tree, signs `SlotAttest`, and drives every member
+/// through `user_board`, producing an [`ActiveCohort`] in the
+/// `Active` state. On-chain publication of `SlotAttest` (step 4 of
+/// the issue text) is decoupled into [`asp_publish_attest`] so this
+/// function stays buildable without the `regtest` feature; the test
+/// harness at K=100/N=12 exercises the off-chain path.
+///
+/// The convenience signature accepts user keypairs alongside members
+/// — phase 5 (CLI) will replace this with a network-driven collector
+/// that streams `UserBoardingArtifact`s back from each user.
+pub fn asp_board<R: Rng + ?Sized>(
+    asp_kp: &Keypair,
+    cohort_id: [u8; 32],
+    members_and_keys: Vec<(CohortMember, Keypair)>,
+    horizon: HibernationHorizon,
+    setup_id: [u8; 32],
+    publish_txid: Option<[u8; 32]>,
+    rng: &mut R,
+) -> Result<ActiveCohort, PsarError> {
+    if members_and_keys.is_empty() {
+        return Err(PsarError::EmptyCohort);
+    }
+
+    let secp = Secp256k1::new();
+    let asp_xonly = asp_kp.x_only_public_key().0;
+    let (members, user_keys): (Vec<_>, Vec<_>) = members_and_keys.into_iter().unzip();
+
+    // ─── 1. Cohort + state machine ───────────────────────────────────
+    let mut cohort = Cohort::new(cohort_id, members, horizon)?;
+
+    // ─── 2. Setup phase: Λ + retained scalars ────────────────────────
+    let asp_sk = SecretKey::from_keypair(asp_kp);
+    let (schedule, retained) = Setup::run(&asp_sk, &setup_id, horizon.n)?;
+
+    // ─── 3. Slot tree + SlotAttest signing ───────────────────────────
+    let tree = SlotTree::from_members(&cohort.members);
+    let slot_root = tree.root();
+    let unsigned = SlotAttestUnsigned {
+        slot_root: slot_root.0,
+        cohort_id,
+        setup_id,
+        n: horizon.n,
+        k: cohort.k(),
+    };
+    let attest = unsigned.sign(&secp, asp_kp);
+    cohort.slot_root = Some(slot_root.0);
+    cohort.transition(BoardingState::Committed)?;
+
+    // ─── 4. (External) publish SlotAttest on regtest ─────────────────
+    // Caller wires this via asp_publish_attest behind the `regtest`
+    // feature. The optional `publish_txid` argument captures the
+    // returned Txid.
+
+    // ─── 5. Drive each user through user_board ───────────────────────
+    let mut artifacts: HashMap<[u8; 32], UserBoardingArtifact> = HashMap::new();
+    // Iterate by slot_index from the cohort's authoritative member
+    // list so the per-user keypair lookup matches the slot it occupies.
+    let user_kps_by_slot: HashMap<u32, &Keypair> = cohort
+        .members
+        .iter()
+        .zip(user_keys.iter())
+        .map(|(m, kp)| (m.slot_index, kp))
+        .collect();
+    for member in &cohort.members {
+        let kp = user_kps_by_slot
+            .get(&member.slot_index)
+            .ok_or(PsarError::PubkeyMismatch {
+                slot_index: member.slot_index,
+            })?;
+        let artifact = user_board(
+            &cohort,
+            &attest,
+            &asp_xonly,
+            &schedule,
+            kp,
+            member.slot_index,
+            rng,
+        )?;
+        artifacts.insert(member.user_id, artifact);
+    }
+    cohort.transition(BoardingState::Active)?;
+
+    Ok(ActiveCohort {
+        cohort,
+        retained,
+        schedule,
+        setup_id,
+        slot_root,
+        attest,
+        publish_txid,
+        artifacts,
+    })
+}
+
+/// Publish an `ActiveCohort`'s [`SlotAttest`] on-chain via OP_RETURN
+/// and stamp the resulting txid into `publish_txid`. Behind the
+/// `regtest` feature.
+#[cfg(feature = "regtest")]
+pub fn asp_publish_attest(
+    client: &bitcoincore_rpc::Client,
+    active: &mut ActiveCohort,
+) -> Result<bitcoin::Txid, crate::publish::PublishError> {
+    use bitcoin::hashes::Hash;
+    let txid = crate::publish::publish_slot_attest(client, &active.attest)?;
+    active.publish_txid = Some(*txid.as_raw_hash().as_byte_array());
+    Ok(txid)
 }
 
 #[cfg(test)]
@@ -517,5 +659,147 @@ mod tests {
         schedule.entries[0].r1[0] ^= 0x01;
         let w1 = compute_schedule_witness(&schedule);
         assert_ne!(w0, w1);
+    }
+
+    // ─── ASP-side flow tests (#671) ────────────────────────────────────
+
+    fn cohort_with_kp_pairs(k: u32) -> (Vec<(CohortMember, Keypair)>, [u8; 32]) {
+        let secp = Secp256k1::new();
+        let mut out = Vec::with_capacity(k as usize);
+        for i in 0..k {
+            let kp = even_parity_keypair(&secp, (i + 1) as u8);
+            let xonly = kp.x_only_public_key().0.serialize();
+            out.push((
+                CohortMember {
+                    user_id: [(i & 0xff) as u8; 32],
+                    pk_user: xonly,
+                    slot_index: i,
+                },
+                kp,
+            ));
+        }
+        // Spread user_ids beyond `K=255` so tests never duplicate them.
+        for (idx, (m, _)) in out.iter_mut().enumerate() {
+            m.user_id[0] = ((idx >> 8) & 0xff) as u8;
+            m.user_id[1] = (idx & 0xff) as u8;
+        }
+        (out, [0xab; 32])
+    }
+
+    #[test]
+    fn asp_board_happy_path_k4_n2() {
+        let secp = Secp256k1::new();
+        let asp_kp = even_parity_keypair(&secp, 0x77);
+        let horizon = HibernationHorizon::new(2, 12).unwrap();
+        let (members_kps, cohort_id) = cohort_with_kp_pairs(4);
+        let mut rng = StdRng::seed_from_u64(0xdead_beef);
+        let active = asp_board(
+            &asp_kp,
+            cohort_id,
+            members_kps,
+            horizon,
+            [0xc4; 32],
+            None,
+            &mut rng,
+        )
+        .expect("asp_board");
+
+        assert_eq!(active.cohort.k(), 4);
+        assert_eq!(active.cohort.state(), BoardingState::Active);
+        assert_eq!(active.artifacts.len(), 4);
+        assert_eq!(active.schedule.n, 2);
+        assert!(active.publish_txid.is_none());
+        // Schedule witness across all artifacts is identical (same Λ).
+        let witnesses: std::collections::HashSet<[u8; 32]> = active
+            .artifacts
+            .values()
+            .map(|a| a.schedule_witness)
+            .collect();
+        assert_eq!(witnesses.len(), 1, "all users should witness the same Λ");
+    }
+
+    #[test]
+    fn asp_board_rejects_empty_member_set() {
+        let secp = Secp256k1::new();
+        let asp_kp = even_parity_keypair(&secp, 0x77);
+        let horizon = HibernationHorizon::new(2, 12).unwrap();
+        let mut rng = StdRng::seed_from_u64(1);
+        let result = asp_board(
+            &asp_kp,
+            [0; 32],
+            Vec::new(),
+            horizon,
+            [0xc4; 32],
+            None,
+            &mut rng,
+        );
+        match result {
+            Err(PsarError::EmptyCohort) => {}
+            Err(other) => panic!("expected EmptyCohort, got {other:?}"),
+            Ok(_) => panic!("expected EmptyCohort error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn asp_board_k100_n12_under_60_seconds() {
+        // Issue #671 acceptance: K=100, N=12 ASP-side flow runs to
+        // ActiveCohort under 60 s on dev hardware.
+        let secp = Secp256k1::new();
+        let asp_kp = even_parity_keypair(&secp, 0xaa);
+        let horizon = HibernationHorizon::new(12, 12).unwrap();
+        let (members_kps, cohort_id) = cohort_with_kp_pairs(100);
+        let mut rng = StdRng::seed_from_u64(0xdada);
+
+        let start = std::time::Instant::now();
+        let active = asp_board(
+            &asp_kp,
+            cohort_id,
+            members_kps,
+            horizon,
+            [0xc4; 32],
+            None,
+            &mut rng,
+        )
+        .expect("asp_board K=100 N=12");
+        let elapsed = start.elapsed();
+
+        assert_eq!(active.cohort.k(), 100);
+        assert_eq!(active.cohort.state(), BoardingState::Active);
+        assert_eq!(active.artifacts.len(), 100);
+        for art in active.artifacts.values() {
+            assert_eq!(art.n, 12);
+            assert_eq!(art.presigned.len(), 12);
+        }
+        assert!(
+            elapsed.as_secs() < 60,
+            "K=100/N=12 took {elapsed:?} (acceptance budget: 60 s)"
+        );
+    }
+
+    #[test]
+    fn asp_board_persists_into_in_memory_store() {
+        use crate::store::{ActiveCohortStore, InMemoryActiveCohortStore};
+        let secp = Secp256k1::new();
+        let asp_kp = even_parity_keypair(&secp, 0x77);
+        let horizon = HibernationHorizon::new(2, 12).unwrap();
+        let (members_kps, cohort_id) = cohort_with_kp_pairs(3);
+        let mut rng = StdRng::seed_from_u64(2);
+        let active = asp_board(
+            &asp_kp,
+            cohort_id,
+            members_kps,
+            horizon,
+            [0xc4; 32],
+            Some([0x42; 32]),
+            &mut rng,
+        )
+        .unwrap();
+
+        let mut store = InMemoryActiveCohortStore::new();
+        store.save(active).unwrap();
+        let loaded = store.load(&cohort_id).expect("loaded");
+        assert_eq!(loaded.cohort.k(), 3);
+        assert_eq!(loaded.publish_txid, Some([0x42; 32]));
+        assert_eq!(store.all().len(), 1);
     }
 }
