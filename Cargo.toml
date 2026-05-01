@@ -35,6 +35,7 @@ members = [
     "crates/dark-wallet-rest",
     "crates/dark-rest-client",
     "crates/dark-confidential",
+    "crates/dark-von",
 ]
 
 [dependencies]

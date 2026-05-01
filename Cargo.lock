@@ -1424,6 +1424,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "dark-von"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "hex",
+ "hmac",
+ "proptest",
+ "rand 0.8.6",
+ "secp256k1 0.29.1",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "zeroize",
+]
+
+[[package]]
 name = "dark-wallet"
 version = "0.2.0"
 dependencies = [

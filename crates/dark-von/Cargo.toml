@@ -1,0 +1,41 @@
+[package]
+name = "dark-von"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lobby <lobby.clawy@gmail.com>", "Andrea Carotti <ac.carotti@gmail.com>"]
+description = "ECVRF + nonce-derivation wrapper (VON) for PSAR on dark"
+license = "MIT"
+repository = "https://github.com/lobbyclawy/dark"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[features]
+default = []
+# Enables raw-byte export of `SecretSchedule`. Off by default — the secret
+# schedule contains every retained MuSig2 nonce scalar for the cohort
+# horizon and must not leak through routine serialisation paths.
+dangerous-export = []
+
+[dependencies]
+thiserror = "2.0"
+secp256k1 = { version = "0.29", features = ["rand"] }
+sha2 = "0.10"
+hmac = "0.12"
+zeroize = { version = "1.7", features = ["zeroize_derive"] }
+rand = "0.8"
+
+[dev-dependencies]
+proptest = "1.5"
+criterion = { version = "0.5", features = ["html_reports"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+
+[lib]
+name = "dark_von"
+path = "src/lib.rs"
+
+[[bench]]
+name = "von"
+harness = false
