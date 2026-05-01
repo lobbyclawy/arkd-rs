@@ -22,6 +22,7 @@
 mod bip327;
 pub mod error;
 pub mod nonces;
+pub mod presign;
 pub mod setup;
 pub mod sign;
 
