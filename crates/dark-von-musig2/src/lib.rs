@@ -21,6 +21,7 @@
 
 mod bip327;
 pub mod epoch;
+pub mod equivocation;
 pub mod error;
 pub mod nonces;
 pub mod presign;
