@@ -1,9 +1,9 @@
 //! Boarding flows (issues #670 user-side and #671 ASP-side).
 //!
-//! This module owns the *coordination* between the [`cohort`] /
-//! [`attest`] / [`slot_tree`] pieces and the cryptographic primitives
-//! in `dark_von_musig2`. The user-side flow is `user_board` (#670);
-//! the ASP-side flow `asp_board` (#671) lives later in this file.
+//! This module owns the *coordination* between the `cohort`, `attest`,
+//! and `slot_tree` modules and the cryptographic primitives in
+//! `dark_von_musig2`. The user-side flow is `user_board` (#670); the
+//! ASP-side flow `asp_board` (#671) lives later in this file.
 //!
 //! # Conventions
 //!
