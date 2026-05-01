@@ -31,6 +31,15 @@ pub enum PsarError {
         to: BoardingState,
     },
 
+    #[error("invalid lifecycle event {event:?} for state {state:?}")]
+    InvalidLifecycleEvent {
+        state: crate::cohort::CohortState,
+        event: crate::lifecycle::CohortLifecycleEvent,
+    },
+
+    #[error("cohort {cohort_id} not found in store")]
+    CohortNotFound { cohort_id: String },
+
     #[error("schedule entry invalid at epoch {epoch}, slot {slot}")]
     ScheduleInvalid { epoch: u32, slot: u8 },
 

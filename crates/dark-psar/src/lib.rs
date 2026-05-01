@@ -24,6 +24,7 @@ pub mod batch_tree;
 pub mod boarding;
 pub mod cohort;
 pub mod error;
+pub mod lifecycle;
 pub mod message;
 #[cfg(feature = "regtest")]
 pub mod publish;
@@ -33,8 +34,9 @@ pub mod store;
 pub use attest::{SlotAttest, SlotAttestError, SlotAttestUnsigned};
 pub use batch_tree::compute_batch_tree_root;
 pub use boarding::{asp_board, user_board, ActiveCohort, UserBoardingArtifact};
-pub use cohort::{BoardingState, Cohort, CohortMember, HibernationHorizon};
+pub use cohort::{BoardingState, Cohort, CohortMember, CohortState, HibernationHorizon};
 pub use error::PsarError;
+pub use lifecycle::{next_state, CohortLifecycleEvent};
 pub use message::derive_message_for_epoch;
 pub use slot_tree::{Side, Slot, SlotInclusionProof, SlotRoot, SlotTree};
 pub use store::{ActiveCohortStore, InMemoryActiveCohortStore};
