@@ -1445,12 +1445,15 @@ name = "dark-von-musig2"
 version = "0.1.0"
 dependencies = [
  "bitcoin",
+ "ciborium",
  "dark-von",
  "hex",
  "musig2",
  "proptest",
  "rand 0.8.6",
  "secp256k1 0.29.1",
+ "serde",
+ "serde_bytes",
  "sha2",
  "thiserror 2.0.18",
  "zeroize",
@@ -4454,6 +4457,16 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

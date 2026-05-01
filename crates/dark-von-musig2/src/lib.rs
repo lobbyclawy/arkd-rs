@@ -22,6 +22,7 @@
 mod bip327;
 pub mod error;
 pub mod nonces;
+pub mod setup;
 pub mod sign;
 
 pub use error::{Bip327Error, VonMusig2Error};

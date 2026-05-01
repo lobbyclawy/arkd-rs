@@ -49,4 +49,13 @@ pub enum VonMusig2Error {
 
     #[error("invalid secp256k1 point in the von nonce")]
     InvalidVonPoint,
+
+    #[error("dark-von error")]
+    DarkVon(#[from] dark_von::VonError),
+
+    #[error("malformed published schedule wire bytes: {0}")]
+    MalformedPublishedSchedule(&'static str),
+
+    #[error("cbor decoding failed: {0}")]
+    Cbor(String),
 }
