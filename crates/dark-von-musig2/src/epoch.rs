@@ -8,7 +8,7 @@
 //!    participant's pre-committed `PubNonce` from [`PreSigned`] to recover
 //!    the same `agg_nonce` the participant signed against.
 //! 3. Compute the operator's partial signature via
-//!    [`crate::bip327::sign::partial_sign_with_scalars`] using `(r_{t,1}, r_{t,2})`.
+//!    `crate::bip327::sign::partial_sign_with_scalars` using `(r_{t,1}, r_{t,2})`.
 //! 4. Aggregate operator + participant partial sigs into a 64-byte BIP-340
 //!    signature `(R_x, s)`.
 //!

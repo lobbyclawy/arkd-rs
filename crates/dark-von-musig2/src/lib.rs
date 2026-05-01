@@ -1,7 +1,7 @@
 //! VON-augmented MuSig2 (BIP-327) for PSAR.
 //!
 //! See `docs/adr/0008-musig2-nonce-injection.md` for the dependency
-//! decision: BIP-327 is implemented in the private [`bip327`] module
+//! decision: BIP-327 is implemented in the private `bip327` module
 //! on top of `secp256k1 = 0.29`; the public adapter
 //! [`sign::sign_partial_with_von`] consumes `(r₁, r₂)` scalars from
 //! [`dark_von::wrapper::nonce`] (#655) directly — no internal hashing
