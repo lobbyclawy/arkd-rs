@@ -4,7 +4,7 @@
 - **Date:** 2026-05-01
 - **Milestone:** VON-M1 (phase/5-integration)
 - **Drives:** #677 → unblocks #678 → #679 → #680
-- **Affects:** new `dark_core::asp_mode` (~30 LOC enum + per-cohort
+- **Affects:** new `dark_psar::asp_mode` (~30 LOC enum + per-cohort
   dispatch tag), new adapter module inside `crates/dark-psar`, new
   `[ark.psar]` section in `config.example.toml`. Existing
   `crates/dark-core/src/{application,round_loop,round_scheduler,
@@ -130,21 +130,28 @@ infrastructure are not modified.
 
 ### Per-cohort mode tag
 
-Add `crates/dark-core/src/asp_mode.rs` (new):
+Add `crates/dark-psar/src/asp_mode.rs` (new):
 
 ```rust
 pub enum AspMode {
     Standard,
-    Psar(dark_psar::HibernationHorizon),
+    Psar(crate::HibernationHorizon),
 }
 ```
 
-The enum is constructed by `dark_core::config` from the new
-`[ark.psar]` config section and stored on a new
-`AspModeRegistry: HashMap<CohortId, AspMode>` (in-memory for #678,
-persistence is out of scope for VON-M1). The registry has one
-public method, `dispatch_signing(cohort_id) -> AspMode`, used by
-the parallel pipeline driver in `dark-psar` to pick its branch.
+The enum lives in `dark-psar`, not `dark-core`, because `dark-psar`
+already depends on `dark-core` (via `batch_tree.rs`'s use of
+`dark_core::round_tree`). Hosting `AspMode` in `dark-core` would
+require `dark-core → dark-psar`, closing a cycle. Co-locating the
+enum with `HibernationHorizon` (its payload type) and with the
+parallel-pipeline driver (its consumer) is the natural shape.
+
+The top-level operator binary (`src/main.rs` / `src/config.rs`)
+already depends on both crates and is the right home for the
+`AspModeRegistry: HashMap<CohortId, AspMode>` that wires
+configuration to the driver. The registry has one public method,
+`dispatch_signing(cohort_id) -> AspMode`, used by the parallel
+pipeline driver in `dark-psar` to pick its branch.
 `application.rs` does **not** consult the registry — standard rounds
 ignore PSAR cohorts entirely.
 
@@ -180,11 +187,11 @@ required by #678's acceptance criterion #4.
 Standard-mode flows must remain bit-identical, mirroring the
 transparent-VTXO parity gate from #520. The mechanism:
 
-- **No file under `crates/dark-core/src/` outside `asp_mode.rs`
-  changes in #678–#680.** A grep over the diff for the Phase 5 PR
-  must show only `crates/dark-core/src/asp_mode.rs` (added),
-  `crates/dark-core/src/lib.rs` (one-line `pub mod asp_mode`),
-  `config.example.toml`, and the dark-psar / ark-cli additions.
+- **No file under `crates/dark-core/src/` changes in #678–#680.**
+  A grep over the diff for the Phase 5 PR must show no edits to any
+  file under `crates/dark-core/src/`. New code lives in `dark-psar`
+  (enum + driver), `src/` (config wiring), `config.example.toml`,
+  `crates/ark-cli/`, and `crates/dark-bitcoin/tests/`.
 - **`tests/e2e_regtest.rs` runs unchanged** in CI. Any regression
   in standard-mode parity surfaces as a failed test in that suite.
 - **Golden vector for standard 2-of-2:** #678 lands a small golden
@@ -205,15 +212,14 @@ edits to existing types/signatures.
 
 | File | Kind | Notes |
 |---|---|---|
-| `crates/dark-core/src/asp_mode.rs` | additive (new) | `AspMode` enum + `AspModeRegistry` + `dispatch_signing` |
-| `crates/dark-core/src/lib.rs` | additive (one line) | `pub mod asp_mode;` |
+| `crates/dark-psar/src/asp_mode.rs` | additive (new) | `AspMode` enum + `AspModeRegistry` + `dispatch_signing` |
 | `crates/dark-psar/src/adapter.rs` | additive (new) | Parallel-pipeline driver consuming the registry |
-| `crates/dark-psar/src/lib.rs` | additive (one line) | `pub mod adapter;` |
+| `crates/dark-psar/src/lib.rs` | additive (two lines) | `pub mod asp_mode; pub mod adapter;` |
 | `config.example.toml` | additive | New `[ark.psar]` section |
-| `crates/dark-core/src/config.rs` (if it exists, else `src/config.rs`) | additive | Parse `[ark.psar]` into `PsarConfigSection` |
-| `crates/dark-bitcoin/tests/golden_2of2.rs` | additive | Standard-mode parity golden vector |
+| `src/config.rs` | additive | Parse `[ark.psar]` into `PsarSection` (top-level binary owns the registry) |
+| `crates/dark-bitcoin/tests/golden_2of2.rs` | additive (new) | Standard-mode parity golden vector |
 
-No refactors. Five new files, two one-line additions, one new test.
+No refactors. Four new files, one two-line addition, one new test.
 
 ### #679 — `ark-cli psar` subcommands
 
@@ -239,14 +245,13 @@ One refactor (Cargo.toml `[[bin]]`), three additive.
 
 ## Cross-cutting — constraints on downstream issues
 
-- **#678** MUST keep the `AspMode` enum in `dark-core`, not
-  `dark-psar`. The parallel-pipeline driver uses
-  `dark_psar::HibernationHorizon` re-exported through
-  `dark-core::asp_mode::AspMode::Psar(_)`. Cyclic-dep gotcha:
-  `dark-core` already declares `dark-psar` in `Cargo.toml` (or will
-  in #678) — verify with `cargo tree -i dark-psar` before merging.
-  If a cycle appears, move `HibernationHorizon` into a shared
-  leaf crate (out of scope; flag in the PR for follow-up).
+- **#678** MUST keep the `AspMode` enum in `dark-psar` (not in
+  `dark-core`). `dark-psar` already depends on `dark-core` via
+  `batch_tree.rs` → `dark_core::round_tree`; placing `AspMode` in
+  `dark-core` closes the dependency cycle. The top-level binary
+  (`src/config.rs` / `src/main.rs`) is the natural owner of the
+  `AspModeRegistry` because it already pulls both crates and reads
+  the operator config.
 - **#678** MUST add the standard-mode golden-vector test as an
   acceptance gate. Without it, this ADR's parity-gate claim is
   unverified.
