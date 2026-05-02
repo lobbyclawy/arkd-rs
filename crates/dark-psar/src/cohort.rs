@@ -92,30 +92,60 @@ impl HibernationHorizon {
     }
 }
 
-/// One-way lifecycle of a cohort.
+/// Lifecycle of a cohort.
+///
+/// ```text
+/// Forming                            (slot tree assembling)
+///   │ slot_attest signed
+///   ▼
+/// Committed                          (slot_attest published)
+///   │ on-chain confirmation
+///   ▼
+/// Active ◄──┐                        (boarding artifacts collected)
+///   │      │ epoch t commits
+///   ▼      │
+/// InProgress(t) ──┘                  (#673 epoch processing)
+///   ▲
+///   │ horizon exhausted (t == n)
+///   ▼
+/// Concluded
+/// ```
 ///
 /// `Forming` is the only state in which new members can be added.
 /// `Committed` is reached once the slot Merkle tree has been built and
-/// the [`SlotAttest`](crate) has been published (phase 3, #667–#669).
+/// the [`SlotAttest`](crate) has been signed (phase 3, #667–#668).
 /// `Active` is reached once every user has handed back their
-/// pre-signed material (phase 3, #670–#671). `Concluded` is reached
-/// once all `N` epochs have been processed (phase 4, #672–#675).
+/// pre-signed material (phase 3, #670–#671). `InProgress(t)` is the
+/// transient state during epoch `t` processing (phase 4, #673);
+/// `Concluded` is reached once all `N` epochs have been processed.
+///
+/// `BoardingState` is a deprecated alias kept for downstream code that
+/// imports it directly; new code should use [`CohortState`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum BoardingState {
+pub enum CohortState {
     Forming,
     Committed,
     Active,
+    /// Transient state while epoch `t` is being processed by the ASP.
+    InProgress(u32),
     Concluded,
 }
 
-impl BoardingState {
+/// Backwards-compatible alias for [`CohortState`]. Phase 3 used this
+/// name; phase 4 (#674) rename retained as an alias to keep external
+/// imports working.
+pub type BoardingState = CohortState;
+
+impl CohortState {
     /// `true` iff `self → next` is a legal transition.
-    fn allows(self, next: BoardingState) -> bool {
+    pub(crate) fn allows(self, next: CohortState) -> bool {
         matches!(
             (self, next),
-            (BoardingState::Forming, BoardingState::Committed)
-                | (BoardingState::Committed, BoardingState::Active)
-                | (BoardingState::Active, BoardingState::Concluded)
+            (CohortState::Forming, CohortState::Committed)
+                | (CohortState::Committed, CohortState::Active)
+                | (CohortState::Active, CohortState::InProgress(_))
+                | (CohortState::InProgress(_), CohortState::Active)
+                | (CohortState::Active, CohortState::Concluded)
         )
     }
 }
@@ -212,7 +242,7 @@ impl Cohort {
     }
 
     /// Move to `next`, enforcing the legal transition table.
-    pub fn transition(&mut self, next: BoardingState) -> Result<(), PsarError> {
+    pub fn transition(&mut self, next: CohortState) -> Result<(), PsarError> {
         if !self.state.allows(next) {
             return Err(PsarError::InvalidBoardingState {
                 from: self.state,
@@ -221,6 +251,13 @@ impl Cohort {
         }
         self.state = next;
         Ok(())
+    }
+
+    /// Internal setter used by [`crate::store::ActiveCohortStore::record_transition`]
+    /// after the store-side validation has confirmed the transition is
+    /// legal. Reuses [`Cohort::transition`]'s legality check defensively.
+    pub(crate) fn set_state(&mut self, next: CohortState) -> Result<(), PsarError> {
+        self.transition(next)
     }
 }
 

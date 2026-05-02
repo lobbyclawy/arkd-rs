@@ -31,6 +31,30 @@ pub enum PsarError {
         to: BoardingState,
     },
 
+    #[error("invalid lifecycle event {event:?} for state {state:?}")]
+    InvalidLifecycleEvent {
+        state: crate::cohort::CohortState,
+        event: crate::lifecycle::CohortLifecycleEvent,
+    },
+
+    #[error("cohort {cohort_id} not found in store")]
+    CohortNotFound { cohort_id: String },
+
+    #[error("user {user_id} produced an invalid partial signature for epoch {epoch}")]
+    InvalidUserPartial { user_id: String, epoch: u32 },
+
+    #[error("epoch {epoch} is out of range for cohort horizon n={n}")]
+    EpochOutOfRange { epoch: u32, n: u32 },
+
+    #[error("resurface request t_prime={t_prime} > current_epoch={current_epoch}")]
+    ResurfaceFromFuture { t_prime: u32, current_epoch: u32 },
+
+    #[error("inclusion proof for slot {slot_index} did not verify against slot_root")]
+    InclusionProofInvalid { slot_index: u32 },
+
+    #[error("no signature for user at epoch {epoch}; user may have been evicted")]
+    UserSigNotFound { epoch: u32 },
+
     #[error("schedule entry invalid at epoch {epoch}, slot {slot}")]
     ScheduleInvalid { epoch: u32, slot: u8 },
 
