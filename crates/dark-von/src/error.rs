@@ -21,8 +21,14 @@ pub enum EcvrfError {
     #[error("invalid public key: not a valid secp256k1 point")]
     InvalidPublicKey,
 
+    #[error("verification failed: algebraic relation does not hold")]
+    VerificationEquationFailed,
+
     #[error("verification failed: challenge mismatch")]
-    VerificationFailed,
+    ChallengeMismatch,
+
+    #[error("verification failed: beta mismatch")]
+    OutputMismatch,
 
     #[error("hash-to-curve exhausted 256 counter values")]
     HashToCurveExhausted,

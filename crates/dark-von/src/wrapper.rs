@@ -83,7 +83,9 @@ pub fn verify(
     let alpha_prime = build_alpha_prime(x, r_point);
     let beta = ecvrf::proof_to_hash(proof);
     ecvrf::verify(pk, &alpha_prime, &beta, proof).map_err(|e| match e {
-        EcvrfError::VerificationFailed => VonError::WrongPublicKey,
+        EcvrfError::VerificationEquationFailed
+        | EcvrfError::ChallengeMismatch
+        | EcvrfError::OutputMismatch => VonError::WrongPublicKey,
         other => VonError::Ecvrf(other),
     })
 }

@@ -328,7 +328,7 @@ pub fn verify(pk: &PublicKey, alpha: &[u8], beta: &[u8; 32], pi: &Proof) -> Resu
     let neg_c_pk = c_pk.negate(secp);
     let u = s_g
         .combine(&neg_c_pk)
-        .map_err(|_| EcvrfError::VerificationFailed)?;
+        .map_err(|_| EcvrfError::VerificationEquationFailed)?;
 
     let s_h = h
         .mul_tweak(secp, &s_scalar)
@@ -340,15 +340,15 @@ pub fn verify(pk: &PublicKey, alpha: &[u8], beta: &[u8; 32], pi: &Proof) -> Resu
     let neg_c_gamma = c_gamma.negate(secp);
     let v = s_h
         .combine(&neg_c_gamma)
-        .map_err(|_| EcvrfError::VerificationFailed)?;
+        .map_err(|_| EcvrfError::VerificationEquationFailed)?;
 
     let c_prime = challenge(pk, &h, &pi.gamma, &u, &v);
     if !ct_eq(&c_prime, &pi.c) {
-        return Err(EcvrfError::VerificationFailed);
+        return Err(EcvrfError::ChallengeMismatch);
     }
     let beta_prime = proof_to_hash(pi);
     if !ct_eq(beta, &beta_prime) {
-        return Err(EcvrfError::VerificationFailed);
+        return Err(EcvrfError::OutputMismatch);
     }
     Ok(())
 }
@@ -604,7 +604,7 @@ mod tests {
         let alpha = b"hello";
         let (beta, pi) = prove(&kp.secret, alpha).unwrap();
         let result = verify(&kp2.public, alpha, &beta, &pi);
-        assert!(matches!(result, Err(EcvrfError::VerificationFailed)));
+        assert!(matches!(result, Err(EcvrfError::ChallengeMismatch)));
     }
 
     #[test]
@@ -614,7 +614,7 @@ mod tests {
         let alpha = b"hello";
         let (beta, pi) = prove(&kp.secret, alpha).unwrap();
         let result = verify(&kp.public, b"hellp", &beta, &pi);
-        assert!(matches!(result, Err(EcvrfError::VerificationFailed)));
+        assert!(matches!(result, Err(EcvrfError::ChallengeMismatch)));
     }
 
     #[test]
@@ -627,7 +627,7 @@ mod tests {
         bytes[80] ^= 0x01;
         let pi_mut = Proof::from_slice(&bytes).unwrap();
         let result = verify(&kp.public, alpha, &beta, &pi_mut);
-        assert!(matches!(result, Err(EcvrfError::VerificationFailed)));
+        assert!(matches!(result, Err(EcvrfError::ChallengeMismatch)));
     }
 
     #[test]
@@ -640,7 +640,7 @@ mod tests {
         bytes[40] ^= 0x01;
         let pi_mut = Proof::from_slice(&bytes).unwrap();
         let result = verify(&kp.public, alpha, &beta, &pi_mut);
-        assert!(matches!(result, Err(EcvrfError::VerificationFailed)));
+        assert!(matches!(result, Err(EcvrfError::ChallengeMismatch)));
     }
 
     #[test]
@@ -661,7 +661,7 @@ mod tests {
         bytes[..33].copy_from_slice(&replacement);
         let pi_mut = Proof::from_slice(&bytes).unwrap();
         let result = verify(&kp.public, alpha, &beta, &pi_mut);
-        assert!(matches!(result, Err(EcvrfError::VerificationFailed)));
+        assert!(matches!(result, Err(EcvrfError::ChallengeMismatch)));
     }
 
     #[test]
@@ -672,7 +672,7 @@ mod tests {
         let (mut beta, pi) = prove(&kp.secret, alpha).unwrap();
         beta[0] ^= 0x01;
         let result = verify(&kp.public, alpha, &beta, &pi);
-        assert!(matches!(result, Err(EcvrfError::VerificationFailed)));
+        assert!(matches!(result, Err(EcvrfError::OutputMismatch)));
     }
 
     #[test]
