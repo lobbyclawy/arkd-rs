@@ -84,6 +84,11 @@ jobs:
           PROPTEST_CASES: "256"
         run: cargo nextest run --all-features --workspace
 
+      - name: Equivocation-evidence demo
+        # Security boundary (iv): operator equivocation is publicly
+        # verifiable from the two attestations + pk_attest alone.
+        run: cargo run -p dark-psar --all-features --bin equivocation-demo
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

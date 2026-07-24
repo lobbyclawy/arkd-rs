@@ -33,7 +33,7 @@
 //!
 //! Issue #668 sets a target of ≤ 80 B "after Schnorr sig" so the
 //! attestation fits in a single OP_RETURN output. Publishing the full
-//! 168-byte signed payload requires the verifier to have the on-chain
+//! 200-byte signed payload requires the verifier to have the on-chain
 //! data only — but it overflows the standard 80 B `-datacarriersize`
 //! limit.
 //!
@@ -164,7 +164,7 @@ pub struct SlotAttest {
 }
 
 impl SlotAttest {
-    /// Full canonical wire size = unsigned (104) + Schnorr (64).
+    /// Full canonical wire size = unsigned (136) + Schnorr (64).
     pub const SIZE: usize = SlotAttestUnsigned::SIZE + 64;
 
     /// On-chain OP_RETURN payload size: 4 B magic + 64 B sig.

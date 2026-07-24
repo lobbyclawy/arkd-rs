@@ -52,6 +52,12 @@ name = "psar-demo"
 path = "src/bin/psar-demo.rs"
 required-features = ["demo"]
 
+# Equivocation-evidence demo (FC'27 T4). Uses only default deps so it
+# runs from a clean checkout with one command and no feature flags.
+[[bin]]
+name = "equivocation-demo"
+path = "src/bin/equivocation-demo.rs"
+
 [[bench]]
 name = "boarding"
 harness = false

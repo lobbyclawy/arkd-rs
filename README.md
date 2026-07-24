@@ -240,6 +240,24 @@ cargo build --release
 
 The script starts dark, hits `GetInfo` via gRPC, and cleans up on exit.
 
+### Equivocation-Evidence Demo (PSAR)
+
+Two BIP-340-signed slot attestations sharing a `cohort_id` but committing to
+different schedule roots are publicly verifiable proof of operator
+equivocation - PSAR's central accountability object. A runnable demo builds
+the pair from a real cohort setup and verifies it with exactly two BIP-340
+checks and no other state:
+
+```bash
+cargo run -p dark-psar --bin equivocation-demo
+```
+
+The demo prints the serialized evidence and its exact size: 200 B per
+attestation, 400 B for the standalone pair (200 B incremental when the
+legitimate attestation is already public). The same boundary runs on every
+CI build via `crates/dark-psar/tests/equivocation_evidence.rs` plus a
+dedicated demo step in the CI workflow.
+
 ---
 
 ## Deployment
