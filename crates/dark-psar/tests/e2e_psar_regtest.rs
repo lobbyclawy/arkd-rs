@@ -95,6 +95,9 @@ fn op_return_publication_round_trip() {
 
     let (attest, pk) = make_attest();
     let txid = publish_slot_attest(&client, &attest).expect("publish");
+    // scripts/psar-onchain.sh parses this exact line (run with
+    // --nocapture) to query bitcoind for the tx's weight and vbytes.
+    println!("slot_attest_txid: {txid}");
 
     // Mine the publication into a block so `getrawtransaction` returns it
     // without `txindex=1` enabled.
