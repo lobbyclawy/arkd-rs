@@ -405,7 +405,6 @@ impl Server {
                                 round_id,
                                 commitment_tx,
                                 has_boarding_inputs,
-                                has_connectors: _,
                                 ..
                             } => {
                                 // Always emit BatchFinalization so clients can
