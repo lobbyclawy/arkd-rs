@@ -24,6 +24,7 @@ main() {
   files=$(git grep -lIi -e lobby -e carotti -e gmail || true)
   if [ -n "$files" ]; then
     printf '%s\n' "$files" | xargs perl -pi \
+      -e 's/^authors = \[.*\]/authors = ["Anonymous"]/;' \
       -e 's/Lobby & Andrea Carotti/the Authors/g;' \
       -e 's/lobbyclawy/anon/g;' \
       -e 's/[A-Za-z0-9._%+-]+\@gmail\.com/anon\@example.org/g;' \
