@@ -6,7 +6,7 @@
 //! data to a Pyroscope server. Round-phase labels (idle, registration, signing, finalization)
 //! are attached for fine-grained analysis. Connect the Pyroscope UI to view profiles.
 //!
-//! See: <https://github.com/lobbyclawy/dark/issues/274>
+//! See: <https://github.com/anon/dark/issues/274>
 
 /// Configuration for continuous profiling.
 #[allow(dead_code)]

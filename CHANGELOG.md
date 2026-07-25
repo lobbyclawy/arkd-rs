@@ -179,6 +179,6 @@ dark is a full behavioral-parity Rust reimplementation of the [Go arkd](https://
 | Async model | Goroutines | tokio async/await |
 | Binary | Dynamic linking | Single static binary |
 
-[Unreleased]: https://github.com/lobbyclawy/dark/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/lobbyclawy/dark/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/lobbyclawy/dark/releases/tag/v0.1.0
+[Unreleased]: https://github.com/anon/dark/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/anon/dark/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/anon/dark/releases/tag/v0.1.0

@@ -322,4 +322,4 @@ No. Confidential VTXOs ride on existing Bitcoin script. ADR-0005 covers the conf
 
 ## 9. Where to file follow-ups
 
-If your integration runs into a sharp edge that the protocol could smooth, file an issue against `lobbyclawy/dark` with the `client` + `confidential-vtxos` + `migration-feedback` labels. The migration acceptance criterion at #577 includes "at least one external integrator spot-reviews the migration guide" — feedback shapes the next revision.
+If your integration runs into a sharp edge that the protocol could smooth, file an issue against `anon/dark` with the `client` + `confidential-vtxos` + `migration-feedback` labels. The migration acceptance criterion at #577 includes "at least one external integrator spot-reviews the migration guide" — feedback shapes the next revision.

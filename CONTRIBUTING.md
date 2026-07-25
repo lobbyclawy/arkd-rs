@@ -28,7 +28,7 @@ This project follows the [Rust Code of Conduct](https://www.rust-lang.org/polici
 ### Clone and Build
 
 ```bash
-git clone https://github.com/lobbyclawy/dark.git
+git clone https://github.com/anon/dark.git
 cd dark
 
 # Build
@@ -202,8 +202,8 @@ Include:
 
 ## Questions?
 
-- Open a [Discussion](https://github.com/lobbyclawy/dark/discussions)
-- Check existing [Issues](https://github.com/lobbyclawy/dark/issues)
+- Open a [Discussion](https://github.com/anon/dark/discussions)
+- Check existing [Issues](https://github.com/anon/dark/issues)
 
 ---
 

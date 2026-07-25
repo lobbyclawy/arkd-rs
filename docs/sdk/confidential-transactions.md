@@ -379,7 +379,7 @@ Before shipping a wallet that supports confidential VTXOs:
 
 ## 10. Where to ask questions
 
-- Bug reports: GitHub issues against `lobbyclawy/dark`. Tag `client` + `confidential-vtxos`.
+- Bug reports: GitHub issues against `anon/dark`. Tag `client` + `confidential-vtxos`.
 - API surface questions: rustdoc at the canonical paths (`crates/dark-client/src/lib.rs`, `crates/dark-confidential/src/lib.rs`).
 - Threat-model questions: see the [Confidential Threat Model](../security/confidential-threat-model.md).
 - Migration from a transparent-only wallet: see the [migration guide](../migration/transparent-to-confidential.md).

@@ -251,7 +251,7 @@ additive-tweak scheme with the explicit caveat.
 
 **Recovery on auditor-key leak.** If a viewing-key bundle is leaked
 beyond its intended audience, the user's recovery is to **rotate the
-master meta-address** — publish a new `MetaAddress` ([issue #553](https://github.com/lobbyclawy/dark/issues/553))
+master meta-address** — publish a new `MetaAddress` ([issue #553](https://github.com/anon/dark/issues/553))
 with a new `(scan_sk, spend_sk)` pair, and instruct counterparties to
 use the new address. Past payments to the old meta-address remain
 scannable by the leak attacker; future payments to the new meta-address
@@ -841,7 +841,7 @@ Stating these so an integrator does not falsely assume coverage:
 ## 7. Worked examples with `ark-cli`
 
 The `ark-cli` binary ships disclosure subcommands per
-[issue #568](https://github.com/lobbyclawy/dark/issues/568). This
+[issue #568](https://github.com/anon/dark/issues/568). This
 section walks through end-to-end invocations for each shipping
 disclosure type, including the verifier side. Each command is
 documented with at least one example in `--help` (per the issue's
@@ -1190,7 +1190,7 @@ expected return value for any memo the auditor encounters.
 
 The dark operator runs a gRPC service whose schema includes a
 `VerifyComplianceProof` method, defined in
-[issue #569](https://github.com/lobbyclawy/dark/issues/569) and pinned
+[issue #569](https://github.com/anon/dark/issues/569) and pinned
 by the disclosure-types ADR §#569 (`VerifyComplianceProof` gRPC endpoint) MUST.
 
 The endpoint is a **convenience for verifiers**: it does the same
@@ -1564,16 +1564,16 @@ sensitivity classification.
 
 ### Related issues
 
-- [Issue #561](https://github.com/lobbyclawy/dark/issues/561) — Viewing-key scope mechanism (closed; landed as the M6-DD viewing-key-scope ADR).
-- [Issue #562](https://github.com/lobbyclawy/dark/issues/562) — Compliance proof bundle format (closed; landed as the M6-DD compliance-bundle-format ADR).
-- [Issue #563](https://github.com/lobbyclawy/dark/issues/563) — Disclosure proof types shipping at launch (closed; landed as the M6-DD disclosure-types ADR).
-- [Issue #564](https://github.com/lobbyclawy/dark/issues/564) — Viewing-key derivation, issuance, and verification (consumer of wire-tag `0x0001`).
-- [Issue #565](https://github.com/lobbyclawy/dark/issues/565) — VTXO selective reveal with commitment opening (consumer of wire-tag `0x0002`).
-- [Issue #566](https://github.com/lobbyclawy/dark/issues/566) — Bounded-range compliance proofs (consumer of wire-tag `0x0003`).
-- [Issue #567](https://github.com/lobbyclawy/dark/issues/567) — Source-of-funds proofs over the linkable graph (consumer of wire-tag `0x0004`).
-- [Issue #568](https://github.com/lobbyclawy/dark/issues/568) — `ark-cli` disclose / verify commands.
-- [Issue #569](https://github.com/lobbyclawy/dark/issues/569) — `VerifyComplianceProof` gRPC endpoint.
-- [Issue #570](https://github.com/lobbyclawy/dark/issues/570) — This compliance guide.
+- [Issue #561](https://github.com/anon/dark/issues/561) — Viewing-key scope mechanism (closed; landed as the M6-DD viewing-key-scope ADR).
+- [Issue #562](https://github.com/anon/dark/issues/562) — Compliance proof bundle format (closed; landed as the M6-DD compliance-bundle-format ADR).
+- [Issue #563](https://github.com/anon/dark/issues/563) — Disclosure proof types shipping at launch (closed; landed as the M6-DD disclosure-types ADR).
+- [Issue #564](https://github.com/anon/dark/issues/564) — Viewing-key derivation, issuance, and verification (consumer of wire-tag `0x0001`).
+- [Issue #565](https://github.com/anon/dark/issues/565) — VTXO selective reveal with commitment opening (consumer of wire-tag `0x0002`).
+- [Issue #566](https://github.com/anon/dark/issues/566) — Bounded-range compliance proofs (consumer of wire-tag `0x0003`).
+- [Issue #567](https://github.com/anon/dark/issues/567) — Source-of-funds proofs over the linkable graph (consumer of wire-tag `0x0004`).
+- [Issue #568](https://github.com/anon/dark/issues/568) — `ark-cli` disclose / verify commands.
+- [Issue #569](https://github.com/anon/dark/issues/569) — `VerifyComplianceProof` gRPC endpoint.
+- [Issue #570](https://github.com/anon/dark/issues/570) — This compliance guide.
 
 ### Source code
 
@@ -1612,5 +1612,5 @@ sensitivity classification.
 ---
 
 *This document is reviewed by a compliance subject-matter expert per
-the acceptance criterion of [issue #570](https://github.com/lobbyclawy/dark/issues/570).
+the acceptance criterion of [issue #570](https://github.com/anon/dark/issues/570).
 The reviewer is named in the pull request that lands this file.*

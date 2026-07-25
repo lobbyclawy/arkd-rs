@@ -1,6 +1,6 @@
 # Confidential validation errors — observability and log hygiene
 
-Issue: [#544](https://github.com/lobbyclawy/dark/issues/544) (depends on #538).
+Issue: [#544](https://github.com/anon/dark/issues/544) (depends on #538).
 
 This document is the operational contract for the
 `ConfidentialValidationError` enum in `dark-core` and its companion

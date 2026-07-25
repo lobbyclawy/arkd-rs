@@ -99,7 +99,7 @@ pub struct ServerSection {
     /// Path to the password file when unlocker_type = file.
     pub unlocker_file_path: Option<String>,
     /// OpenTelemetry OTLP collector endpoint (e.g. "http://localhost:4317").
-    /// See: <https://github.com/lobbyclawy/dark/issues/245>
+    /// See: <https://github.com/anon/dark/issues/245>
     pub otlp_endpoint: Option<String>,
     /// Pyroscope continuous profiling URL (e.g. "http://localhost:4040").
     /// When set, the server starts a Pyroscope agent for continuous CPU profiling.

@@ -7,7 +7,7 @@
    ```bash
    curl -s -X POST -H "Authorization: token $GH_TOKEN" -H "Content-Type: application/json" \
      "https://api.github.com/repos/$REPO/issues/ISSUE_NUM/assignees" \
-     -d '{"assignees":["lobbyclawy"]}'
+     -d '{"assignees":["anon"]}'
    ```
 3. **Implement** — write the code for the issue
 4. **Local checks** — `cargo fmt --all` + `cargo clippy -- -D warnings` + `cargo test --workspace` — all must pass before pushing
@@ -62,7 +62,7 @@ curl -s -X PUT -H "Authorization: token $GH_TOKEN" -H "Content-Type: application
 
 ```bash
 GH_TOKEN=$GH_TOKEN
-REPO=lobbyclawy/dark
+REPO=anon/dark
 
 # Get the latest commit SHA on the PR
 SHA=$(curl -s -H "Authorization: token $GH_TOKEN" \
@@ -95,7 +95,7 @@ curl -s -X POST -H "Authorization: token $GH_TOKEN" -H "Content-Type: applicatio
 
 ```bash
 GH_TOKEN=$GH_TOKEN
-REPO=lobbyclawy/dark
+REPO=anon/dark
 
 # Create PR
 curl -s -X POST -H "Authorization: token $GH_TOKEN" -H "Content-Type: application/json" \

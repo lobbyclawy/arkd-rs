@@ -1,6 +1,6 @@
 [Unit]
 Description=dark - Ark Protocol Server (Rust)
-Documentation=https://github.com/lobbyclawy/dark-rs
+Documentation=https://github.com/anon/dark-rs
 After=network-online.target
 Wants=network-online.target
 

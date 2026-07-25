@@ -4,8 +4,8 @@
     "title": "dark-wallet-rest",
     "description": "REST wallet daemon for dark, an Ark protocol server for Bitcoin L2.\n\nExposes a curated subset of the gRPC surface as HTTP + JSON, with SSE for server-streamed events. Signer-path RPCs (tree nonces, tree signatures, forfeit signing) remain gRPC-only by design.\n\nAll endpoints return JSON. Binary fields (PSBTs, pubkeys, signatures) are hex-encoded strings unless noted. Amounts are denominated in satoshis.",
     "contact": {
-      "name": "Lobby",
-      "email": "lobby.clawy@gmail.com"
+      "name": "Anonymous",
+      "email": "anon@example.org"
     },
     "license": {
       "name": "MIT",

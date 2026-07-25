@@ -3,7 +3,7 @@
 //! Provides a unified tracing subscriber setup with optional OpenTelemetry
 //! OTLP export support (currently stubbed, ready to enable).
 //!
-//! See: <https://github.com/lobbyclawy/dark/issues/245>
+//! See: <https://github.com/anon/dark/issues/245>
 
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

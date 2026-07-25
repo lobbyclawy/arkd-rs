@@ -2,10 +2,10 @@
 name = "dark-von"
 version = "0.1.0"
 edition = "2021"
-authors = ["Lobby <lobby.clawy@gmail.com>", "Andrea Carotti <ac.carotti@gmail.com>"]
+authors = ["Anonymous"]
 description = "ECVRF + nonce-derivation wrapper (VON) for PSAR on dark"
 license = "MIT"
-repository = "https://github.com/lobbyclawy/dark"
+repository = "https://github.com/anon/dark"
 
 [lints.rust]
 unsafe_code = "forbid"

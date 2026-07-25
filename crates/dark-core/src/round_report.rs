@@ -3,7 +3,7 @@
 //! `RoundReport` captures timing, counts, and outcome data for a single round
 //! so it can be logged, exported to OpenTelemetry, or forwarded to alerting.
 //!
-//! See: <https://github.com/lobbyclawy/dark/issues/245>
+//! See: <https://github.com/anon/dark/issues/245>
 
 use std::time::Instant;
 use tracing::info;

@@ -23,7 +23,7 @@
 
 ```bash
 # Clone and configure
-git clone https://github.com/lobbyclawy/dark.git
+git clone https://github.com/anon/dark.git
 cd dark
 cp config.example.toml config.toml
 

@@ -2,10 +2,10 @@
 name = "dark-wallet-rest"
 version = "0.2.0"
 edition = "2021"
-authors = ["Lobby <lobby.clawy@gmail.com>", "Andrea Carotti <ac.carotti@gmail.com>"]
+authors = ["Anonymous"]
 description = "REST wallet daemon for dark — axum + utoipa on top of dark-client"
 license = "MIT"
-repository = "https://github.com/lobbyclawy/dark"
+repository = "https://github.com/anon/dark"
 
 [features]
 # Default = full daemon: REST router + Swagger UI.

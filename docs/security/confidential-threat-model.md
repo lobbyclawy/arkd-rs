@@ -344,7 +344,7 @@ The acceptance criterion at #577 says "security model reviewed by whoever owns c
 - [ ] Tor scope (§7) is reflected in user-facing privacy claims.
 - [ ] Selective-disclosure limits (§8) are reflected in the wallet's disclosure UX.
 
-If any item fails, file an issue against `lobbyclawy/dark` with the `confidential-vtxos` + `security-critical` labels.
+If any item fails, file an issue against `anon/dark` with the `confidential-vtxos` + `security-critical` labels.
 
 ---
 

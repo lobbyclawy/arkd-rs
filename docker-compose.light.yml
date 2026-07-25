@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   dark:
-    image: ghcr.io/lobbyclawy/dark:latest
+    image: ghcr.io/anon/dark:latest
     ports:
       - "50051:50051"
     volumes:
