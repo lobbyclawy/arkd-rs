@@ -25,3 +25,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local agent config (contains absolute paths)
+.claude/
